@@ -17,7 +17,7 @@ from .config import Config
 from .media import PreviewManager, Tools, probe
 from .scan import (
     MODE_FILES, MODE_FOLDERS, ScanThread, detect_mode, human_duration,
-    human_size, list_entries,
+    human_resolution, human_size, list_entries,
 )
 from .transfer import Transfer, TransferQueue
 from .tree import TreePanel
@@ -437,6 +437,25 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(min(self.index + done, total))
 
+    def _breadcrumb(self, item) -> str:
+        """Chaîne des dossiers depuis la racine du tri jusqu'à celui de l'élément.
+
+        En mode fichier, le seul nom du dossier parent ne suffit pas à se situer :
+        plusieurs dossiers portent souvent le même nom à des endroits différents.
+        """
+        top = Path(self.levels[0]["root"] if self.levels else (self.root or item.path))
+        parts = []
+        current = Path(item.path).parent
+        while True:
+            parts.append(current.name or str(current))
+            if current == top or current.parent == current or len(parts) > 12:
+                break
+            current = current.parent
+        parts.reverse()
+        if len(parts) > 6:
+            parts = parts[:2] + ["…"] + parts[-3:]
+        return "  ›  ".join(parts)
+
     def show_item(self, index: int) -> None:
         if not self.items:
             return
@@ -457,12 +476,17 @@ class MainWindow(QMainWindow):
             if item.subdir_count:
                 parts.append(f"{item.subdir_count} sous-dossier{'s' if item.subdir_count > 1 else ''}")
         else:
-            self.item_title.setText(item.name)
             info = item.info or probe(item.path)
             item.info = info
+            # La durée rejoint le titre : c'est ce qu'on veut savoir en premier
+            # d'une vidéo, et la ligne d'informations est déjà chargée.
+            duration = human_duration(info["duration"]) if info.get("duration") else ""
+            self.item_title.setText(
+                f"{item.name}   —   {duration}" if duration else item.name
+            )
             parts = [human_size(item.size)]
-            if info.get("duration"):
-                parts.append(human_duration(info["duration"]))
+            if info.get("height"):
+                parts.append(human_resolution(info["height"]))
             if info.get("width"):
                 parts.append(f"{info['width']}×{info['height']}")
             if info.get("codec"):
@@ -471,11 +495,9 @@ class MainWindow(QMainWindow):
             parts.append("modifié le " + datetime.fromtimestamp(item.mtime).strftime("%d/%m/%Y"))
         self.item_subtitle.setText("   ·   ".join(parts))
 
-        # Le dossier qui contient l'élément : en mode fichier, c'est la seule
-        # façon de savoir quel dossier on est en train de vider.
-        parent = Path(item.path).parent
-        self.item_parent.setText("dans  " + (parent.name or str(parent)))
-        self.item_parent.setToolTip(str(parent))
+        crumbs = self._breadcrumb(item)
+        self.item_parent.setText(crumbs)
+        self.item_parent.setToolTip(str(Path(item.path).parent))
 
         if item.pending:
             self.show_banner(f"Transfert en cours vers {item.status_detail}…", "#2a3340")

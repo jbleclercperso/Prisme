@@ -43,6 +43,13 @@ entre en mode dossiers, et l'on continue à descendre.
 - **En bas à gauche** : la résolution (`720p`, `1080p`, `4K`…) et le nom du
   fichier. Les hauteurs non standard sont ramenées à l'appellation la plus
   proche, un 352p s'affiche donc `360p`.
+
+Dans la fiche du haut, la durée de la vidéo est accolée à son titre, et la ligne
+d'informations — poids, résolution, dimensions, codec, date — est dimensionnée
+pour se lire d'un coup d'œil. Juste en dessous figure **la chaîne des dossiers
+depuis la racine du tri** (`Archives › 2019 › Vacances`) : en mode fichier, le
+seul nom du dossier parent ne suffit pas à se situer, plusieurs dossiers portant
+souvent le même nom à des endroits différents.
 - Un double-clic sur une case ouvre l'explorateur sur ce fichier.
 
 Les vignettes des deux éléments suivants sont fabriquées à l'avance, donc
@@ -131,12 +138,16 @@ une arborescence profonde ne coûte donc rien.
 
 Bouton **Destinations…** (ou `Ctrl+D`). Deux façons de les remplir :
 
-- **Ajouter un dossier…** pour en choisir un à la main ;
+- **Ajouter des dossiers…** — `Ctrl` ou `Maj` pour en sélectionner plusieurs
+  d'un coup, chacun devenant un raccourci. Le sélecteur natif de Windows ne sait
+  choisir qu'un dossier à la fois, c'est donc celui de Qt qui s'ouvre.
 - **Ajouter tous les sous-dossiers de…** pour peupler la liste d'un coup — par
-  exemple un dossier `Archives` contenant `2019`, `2020`, `2021`… chacun reçoit
-  automatiquement une touche.
+  exemple un dossier `Archives` contenant `2019`, `2020`, `2021`…
 
-La touche et le libellé se modifient en double-cliquant la cellule.
+La touche et le libellé se modifient en double-cliquant la cellule. **Glissez une
+ligne par sa poignée** pour changer l'ordre : les boutons de la barre du bas
+suivent celui de la liste. **Renuméroter** réattribue les touches dans cet ordre,
+**Réinitialiser** vide la liste (sans toucher aux dossiers).
 
 ## Sécurités
 
@@ -195,8 +206,9 @@ Fabrique une arborescence avec de vraies vidéos (ffmpeg), puis vérifie l'analy
 la répartition des aperçus, les déplacements, les suppressions, les annulations,
 les collisions de noms, les deux modes, la molette, l'arborescence, la barre de
 commandes à la souris, le filtre par nom, les métadonnées des vignettes, la
-descente dans les sous-dossiers, le cache d'analyse et les transferts en tâche
-de fond — interface comprise, en mode sans affichage. 144 vérifications.
+descente dans les sous-dossiers, le cache d'analyse, la gestion des destinations
+et les transferts en tâche de fond — interface comprise, en mode sans affichage.
+171 vérifications.
 
 ```bash
 python tests/bench_scan.py

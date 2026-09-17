@@ -9,9 +9,9 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFrame,
-    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout, QMessageBox,
-    QLineEdit, QPushButton, QSizePolicy, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout, QLineEdit,
+    QListView, QMessageBox, QPushButton, QSizePolicy, QTreeView, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .config import KEY_ORDER, RESERVED_KEYS
@@ -21,12 +21,13 @@ GRID_COLUMNS = 5
 
 STYLESHEET = """
 QWidget { background: #14161a; color: #e6e8ea; font-size: 13px; }
-QLabel#title { font-size: 21px; font-weight: 600; color: #ffffff; }
-QLabel#subtitle { font-size: 13px; color: #9aa4b0; }
+QLabel#title { font-size: 23px; font-weight: 600; color: #ffffff; }
+QLabel#subtitle { font-size: 15px; color: #b6c0cc; }
 QLabel#counter { font-size: 13px; color: #9aa4b0; }
+QLabel#rootPath { font-size: 13px; color: #9aa4b0; }
 QLabel#pending { font-size: 12px; color: #8fb4ff; background: #1b2434;
                  border-radius: 5px; padding: 3px 9px; }
-QLabel#parentPath { font-size: 12px; color: #6f7885; }
+QLabel#parentPath { font-size: 13px; color: #8a94a2; }
 QLabel#hint { color: #6f7885; }
 QFrame#card { background: #1b1f26; border: 1px solid #262c35; border-radius: 10px; }
 QFrame#tile { background: #0e1013; border: 1px solid #262c35; border-radius: 8px; }
@@ -52,8 +53,9 @@ QFrame#keycap:hover { background: #1c2430; border-color: #4c8dff; }
 QLabel#keyLetter { font-weight: 700; color: #ffd479; font-size: 13px; }
 QLabel#keyLabel { color: #c3cad3; font-size: 12px; }
 QLabel#statusBanner { border-radius: 6px; padding: 6px 10px; font-weight: 600; }
-QTableWidget { background: #0e1013; gridline-color: #262c35;
-               selection-background-color: #2f6fed; }
+QTreeWidget#destTree { background: #0e1013; border: 1px solid #262c35;
+                       border-radius: 6px; selection-background-color: #2f6fed; }
+QTreeWidget#destTree::item { padding: 4px 2px; }
 QHeaderView::section { background: #1b1f26; border: 0; padding: 6px; color: #9aa4b0; }
 QLineEdit { background: #0e1013; border: 1px solid #323a45; border-radius: 6px;
             padding: 5px 8px; }
@@ -762,79 +764,170 @@ class CommandBar(QWidget):
         self.updateGeometry()
 
 
+def pick_folders(parent, caption: str, start: str = "") -> list:
+    """Ouvre un sélecteur de dossiers acceptant une sélection multiple.
+
+    Le sélecteur natif de Windows ne laisse choisir qu'un dossier à la fois. On
+    passe donc par celui de Qt, dont on élargit le mode de sélection des vues
+    internes — seule façon d'ajouter vingt destinations en une fois.
+    """
+    dialog = QFileDialog(parent, caption, start)
+    dialog.setFileMode(QFileDialog.Directory)
+    dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+    dialog.setOption(QFileDialog.ShowDirsOnly, True)
+    for view in dialog.findChildren((QListView, QTreeView)):
+        view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return []
+    chosen = []
+    for selected in dialog.selectedFiles():
+        path = Path(selected)
+        if path.is_dir():
+            chosen.append(path)
+    return chosen
+
+
 class DestinationsDialog(QDialog):
-    """Gestion des dossiers de destination et de leurs touches."""
+    """Gestion des dossiers de destination : touche, libellé et ordre d'affichage."""
+
+    COL_GRIP, COL_KEY, COL_LABEL, COL_PATH = range(4)
 
     def __init__(self, destinations: list, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Dossiers de destination")
-        self.resize(720, 420)
-        self.destinations = [dict(d) for d in destinations]
+        self.resize(820, 480)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
             "Chaque destination est déclenchée par sa touche pendant le tri. "
-            "Double-cliquez une cellule pour la modifier."
+            "Double-cliquez une cellule pour la modifier, et glissez une ligne "
+            "par sa poignée pour changer l'ordre des boutons."
         ))
 
-        self.table = QTableWidget(0, 3, self)
-        self.table.setHorizontalHeaderLabels(["Touche", "Libellé", "Dossier"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        layout.addWidget(self.table, 1)
+        self.tree = QTreeWidget(self)
+        self.tree.setObjectName("destTree")
+        self.tree.setColumnCount(4)
+        self.tree.setHeaderLabels(["", "Touche", "Libellé", "Dossier"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # InternalMove sur un QTreeWidget deplace la ligne entiere, contrairement
+        # a un QTableWidget qui deplacerait les cellules une a une.
+        self.tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.tree.setEditTriggers(
+            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+        )
+        header = self.tree.header()
+        header.setSectionResizeMode(self.COL_GRIP, QHeaderView.Fixed)
+        header.resizeSection(self.COL_GRIP, 28)
+        header.setSectionResizeMode(self.COL_KEY, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_LABEL, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_PATH, QHeaderView.Stretch)
+        layout.addWidget(self.tree, 1)
 
         buttons = QHBoxLayout()
-        add = QPushButton("Ajouter un dossier…")
+        add = QPushButton("Ajouter des dossiers…")
+        add.setObjectName("primary")
+        add.setToolTip("Ctrl ou Maj pour en sélectionner plusieurs d'un coup")
         add_many = QPushButton("Ajouter tous les sous-dossiers de…")
         remove = QPushButton("Retirer")
-        add.clicked.connect(self.add_one)
-        add_many.clicked.connect(self.add_many)
+        renumber = QPushButton("Renuméroter")
+        renumber.setToolTip("Réattribue les touches dans l'ordre de la liste")
+        reset = QPushButton("Réinitialiser")
+        reset.setObjectName("danger")
+        add.clicked.connect(self.add_folders)
+        add_many.clicked.connect(self.add_children_of)
         remove.clicked.connect(self.remove_selected)
-        buttons.addWidget(add)
-        buttons.addWidget(add_many)
-        buttons.addWidget(remove)
+        renumber.clicked.connect(self.renumber)
+        reset.clicked.connect(self.reset_all)
+        for button in (add, add_many, remove, renumber):
+            buttons.addWidget(button)
         buttons.addStretch(1)
+        buttons.addWidget(reset)
         layout.addLayout(buttons)
 
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        # Qt libelle ces boutons en anglais faute de traduction installee.
+        box.button(QDialogButtonBox.Ok).setText("Enregistrer")
+        box.button(QDialogButtonBox.Cancel).setText("Annuler")
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
         layout.addWidget(box)
 
-        self.refresh()
+        self.set_destinations(destinations)
 
-    def refresh(self) -> None:
-        self.table.setRowCount(len(self.destinations))
-        for row, dest in enumerate(self.destinations):
-            for column, value in enumerate((dest.get("key", ""), dest.get("label", ""), dest.get("path", ""))):
-                cell = QTableWidgetItem(value)
-                if column == 2:
-                    cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
-                self.table.setItem(row, column, cell)
+    # -- contenu ---------------------------------------------------------
+    def set_destinations(self, destinations: list) -> None:
+        self.tree.clear()
+        for dest in destinations:
+            self._append_row(
+                dest.get("key", ""),
+                dest.get("label", "") or Path(dest.get("path", "")).name,
+                dest.get("path", ""),
+            )
 
-    def _free_key(self) -> str:
-        used = {d.get("key") for d in self.destinations}
+    def _append_row(self, key: str, label: str, path: str) -> QTreeWidgetItem:
+        item = QTreeWidgetItem(["⠿", key, label, path])
+        item.setFlags(
+            Qt.ItemIsEnabled | Qt.ItemIsSelectable
+            | Qt.ItemIsEditable | Qt.ItemIsDragEnabled
+        )
+        item.setToolTip(self.COL_GRIP, "Glissez pour déplacer cette ligne")
+        item.setToolTip(self.COL_PATH, path)
+        self.tree.addTopLevelItem(item)
+        return item
+
+    def _rows(self) -> list:
+        return [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+
+    def _used_keys(self) -> set:
+        return {row.text(self.COL_KEY).strip().lower() for row in self._rows()}
+
+    def _free_key(self, taken: set) -> str:
         for key in KEY_ORDER:
-            if key not in used and key not in RESERVED_KEYS:
+            if key not in taken and key not in RESERVED_KEYS:
                 return key
         return ""
 
-    def _append(self, path: Path) -> None:
-        if any(Path(d["path"]) == path for d in self.destinations):
+    def _add_paths(self, paths: list) -> int:
+        existing = {row.text(self.COL_PATH) for row in self._rows()}
+        taken = self._used_keys()
+        added = 0
+        for path in paths:
+            if str(path) in existing:
+                continue
+            key = self._free_key(taken)
+            if key:
+                taken.add(key)
+            self._append_row(key, path.name, str(path))
+            existing.add(str(path))
+            added += 1
+        return added
+
+    # -- actions ---------------------------------------------------------
+    def add_folders(self) -> None:
+        start = ""
+        rows = self._rows()
+        if rows:
+            start = str(Path(rows[-1].text(self.COL_PATH)).parent)
+        chosen = pick_folders(self, "Choisir un ou plusieurs dossiers", start)
+        if not chosen:
             return
-        self.destinations.append({"key": self._free_key(), "label": path.name, "path": str(path)})
+        added = self._add_paths(chosen)
+        if added < len(chosen):
+            QMessageBox.information(
+                self, "Doublons ignorés",
+                f"{len(chosen) - added} dossier(s) figuraient déjà dans la liste.",
+            )
 
-    def add_one(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Choisir un dossier de destination")
-        if chosen:
-            self._append(Path(chosen))
-            self.refresh()
-
-    def add_many(self) -> None:
-        parent = QFileDialog.getExistingDirectory(self, "Dossier contenant les destinations")
+    def add_children_of(self) -> None:
+        parent = QFileDialog.getExistingDirectory(
+            self, "Dossier contenant les destinations"
+        )
         if not parent:
             return
         children = sorted(
@@ -842,43 +935,55 @@ class DestinationsDialog(QDialog):
             key=lambda p: p.name.lower(),
         )
         if not children:
-            QMessageBox.information(self, "Rien à ajouter", "Ce dossier ne contient aucun sous-dossier.")
+            QMessageBox.information(
+                self, "Rien à ajouter", "Ce dossier ne contient aucun sous-dossier."
+            )
             return
-        for child in children:
-            self._append(child)
-        self.refresh()
+        self._add_paths(children)
 
     def remove_selected(self) -> None:
-        rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
-        for row in rows:
-            if 0 <= row < len(self.destinations):
-                del self.destinations[row]
-        self.refresh()
+        for item in self.tree.selectedItems():
+            index = self.tree.indexOfTopLevelItem(item)
+            if index >= 0:
+                self.tree.takeTopLevelItem(index)
 
+    def renumber(self) -> None:
+        """Réattribue les touches en suivant l'ordre affiché."""
+        available = [key for key in KEY_ORDER if key not in RESERVED_KEYS]
+        for position, row in enumerate(self._rows()):
+            row.setText(self.COL_KEY, available[position] if position < len(available) else "")
+
+    def reset_all(self) -> None:
+        if not self.tree.topLevelItemCount():
+            return
+        confirm = QMessageBox.question(
+            self, "Réinitialiser",
+            "Retirer les "
+            f"{self.tree.topLevelItemCount()} destinations et repartir de zéro ?\n\n"
+            "Les dossiers eux-mêmes ne sont pas touchés.",
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self.tree.clear()
+
+    # -- resultat --------------------------------------------------------
     def result_destinations(self) -> list:
-        """Relit le tableau. Les lignes inutilisables sont écartées et signalées."""
+        """Relit la liste dans son ordre d'affichage, en signalant les rejets."""
         out = []
         seen = set()
         rejected = []
-        for row in range(self.table.rowCount()):
-            key_item = self.table.item(row, 0)
-            label_item = self.table.item(row, 1)
-            path_item = self.table.item(row, 2)
-            if not path_item:
+        for row in self._rows():
+            path = row.text(self.COL_PATH).strip()
+            if not path:
                 continue
-            path = path_item.text().strip()
-            label = (label_item.text().strip() if label_item else "") or Path(path).name
-            key = key_item.text().strip()[:1].lower() if key_item else ""
+            label = row.text(self.COL_LABEL).strip() or Path(path).name
+            key = row.text(self.COL_KEY).strip()[:1].lower()
 
-            reason = ""
             if not key:
-                reason = "aucune touche"
-            elif key in seen:
-                reason = f"la touche « {key} » est déjà prise"
-            if reason:
-                rejected.append(f"{label} : {reason}")
+                rejected.append(f"{label} : aucune touche")
                 continue
-
+            if key in seen:
+                rejected.append(f"{label} : la touche « {key} » est déjà prise")
+                continue
             seen.add(key)
             out.append({"key": key, "label": label, "path": path})
 
@@ -887,8 +992,8 @@ class DestinationsDialog(QDialog):
                 self, "Destinations ignorées",
                 "Ces destinations n'ont pas été enregistrées :\n\n  · "
                 + "\n  · ".join(rejected)
-                + "\n\nLes touches m, o, c et z sont réservées "
-                  "(son, ouvrir, configurer, annuler).",
+                + "\n\nChaque destination a besoin d'une touche qui lui soit propre : "
+                  "un chiffre ou une lettre. « Renuméroter » s'en charge d'un coup.",
             )
         return out
 
@@ -911,7 +1016,7 @@ class RootBar(QWidget):
         layout.setSpacing(10)
 
         self.root_label = QLabel("—", self)
-        self.root_label.setObjectName("subtitle")
+        self.root_label.setObjectName("rootPath")
         self.counter = QLabel("", self)
         self.counter.setObjectName("counter")
         self.pending = QLabel("", self)

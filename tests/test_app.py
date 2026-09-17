@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QWheelEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QAbstractItemView, QApplication  # noqa: E402
 
 from videosorter import config as vs_config  # noqa: E402
 from videosorter import media as vs_media  # noqa: E402
@@ -111,8 +111,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.start_root(flat)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 1, 60)
     window.show_item(0)
-    check(window.item_parent.text() == f"dans  {flat.name}",
-          f"mode fichier : parent affiché (obtenu {window.item_parent.text()!r})")
+    check(window.item_parent.text() == flat.name,
+          f"mode fichier : dossier affiché (obtenu {window.item_parent.text()!r})")
     check(window.item_parent.toolTip() == str(flat), "chemin complet en infobulle")
 
     print("\n[13] Molette pour avancer et reculer")
@@ -490,6 +490,110 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(signature(root / "inexistant") == "", "et vide sur un dossier absent")
     (victim.path / "ajout.mp4").unlink()
     (nested.path / "interne" / "ajout2.mp4").unlink()
+
+    print("\n[25] Entête : arborescence complète et durée près du titre")
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
+    position = [i.name for i in window.items].index("Anniversaire")
+    window.show_item(position)
+    check(window.item_parent.text() == root.name,
+          f"au premier niveau, la racine seule (obtenu {window.item_parent.text()!r})")
+
+    window.enter_current()
+    wait_for(app, lambda: not window.scanning and window.mode == MODE_FILES, 60)
+    wait_for(app, lambda: bool(window.current.info.get("duration")), 30)
+    window.show_item(0)
+    crumbs = window.item_parent.text()
+    check(crumbs == f"{root.name}  ›  Anniversaire",
+          f"chaîne complète depuis la racine (obtenu {crumbs!r})")
+    from videosorter.scan import human_duration
+    expected = human_duration(window.current.info["duration"])
+    title = window.item_title.text()
+    check("—" in title and title.endswith(expected),
+          f"durée accolée au titre (attendu …{expected}, obtenu {title!r})")
+    check(window.current.name in title, "le nom du fichier reste en tête")
+    info_line = window.item_subtitle.text()
+    check("240p" in info_line, f"résolution nommée dans les infos (obtenu {info_line!r})")
+    check("320×240" in info_line, "dimensions exactes conservées")
+    check("Ko" in info_line or "Mo" in info_line, "poids présent")
+    check("modifié le" in info_line, "date présente")
+
+    # Trois niveaux : la chaîne doit tous les montrer.
+    window.go_up()
+    wait_for(app, lambda: not window.scanning and window.mode == MODE_FOLDERS, 60)
+    position = [i.name for i in window.items].index("Sous-dossiers")
+    window.show_item(position)
+    window.enter_current()
+    wait_for(app, lambda: not window.scanning and window.root.name == "Sous-dossiers", 60)
+    window.enter_current()
+    wait_for(app, lambda: not window.scanning and window.root.name == "interne", 60)
+    window.show_item(0)
+    crumbs = window.item_parent.text()
+    check(crumbs == f"{root.name}  ›  Sous-dossiers  ›  interne",
+          f"trois niveaux affichés (obtenu {crumbs!r})")
+    while window.go_up():
+        wait_for(app, lambda: not window.scanning, 60)
+
+    print("\n[26] Boîte de destinations : ordre, renumérotation, réinitialisation")
+    from videosorter.widgets import DestinationsDialog
+
+    dialog = DestinationsDialog([
+        {"key": "1", "label": "2019", "path": str(tri / "2019")},
+        {"key": "2", "label": "2020", "path": str(tri / "2020")},
+        {"key": "3", "label": "2021", "path": str(tri / "2021")},
+    ])
+    rows = dialog._rows()
+    check(len(rows) == 3, f"trois lignes reprises (obtenu {len(rows)})")
+    check(rows[0].text(DestinationsDialog.COL_GRIP) == "⠿",
+          "chaque ligne porte une poignée")
+    check(bool(rows[0].flags() & Qt.ItemIsDragEnabled), "et se laisse déplacer")
+    check(dialog.tree.dragDropMode() == QAbstractItemView.InternalMove,
+          "le glisser-déposer réorganise la liste")
+    check(dialog.tree.selectionMode() == QAbstractItemView.ExtendedSelection,
+          "plusieurs lignes se sélectionnent à la fois")
+
+    # L'ordre de la liste est celui des boutons : on inverse et on vérifie.
+    moved = dialog.tree.takeTopLevelItem(0)
+    dialog.tree.addTopLevelItem(moved)
+    order = [d["label"] for d in dialog.result_destinations()]
+    check(order == ["2020", "2021", "2019"],
+          f"le résultat suit l'ordre affiché (obtenu {order})")
+    keys = [d["key"] for d in dialog.result_destinations()]
+    check(keys == ["2", "3", "1"], f"les touches suivent leur destination ({keys})")
+
+    dialog.renumber()
+    renumbered = dialog.result_destinations()
+    check([d["key"] for d in renumbered] == ["1", "2", "3"],
+          "« Renuméroter » réattribue les touches dans l'ordre")
+    check([d["label"] for d in renumbered] == ["2020", "2021", "2019"],
+          "sans toucher à l'ordre ni aux libellés")
+
+    added = dialog._add_paths([tri / "2019", tri / "souris"])
+    check(added == 1, f"un dossier déjà présent n'est pas ajouté deux fois ({added})")
+    check(len(dialog._rows()) == 4, "et le nouveau prend la suite")
+    check(dialog._rows()[3].text(DestinationsDialog.COL_KEY) == "4",
+          "avec la première touche libre")
+
+    dialog.tree.clear()
+    check(dialog.result_destinations() == [], "la réinitialisation vide bien la liste")
+
+    print("\n[27] Sélection multiple de dossiers")
+    from videosorter.widgets import pick_folders
+    import inspect
+    source = inspect.getsource(pick_folders)
+    check("DontUseNativeDialog" in source,
+          "le sélecteur Qt remplace celui de Windows, qui ne sait pas sélectionner plusieurs dossiers")
+    check("ExtendedSelection" in source, "les vues internes acceptent la sélection multiple")
+
+    probe_dialog = DestinationsDialog([])
+    picked = [tri / "2019", tri / "2020", tri / "2021"]
+    check(probe_dialog._add_paths(picked) == 3,
+          "trois dossiers choisis d'un coup donnent trois raccourcis")
+    results = probe_dialog.result_destinations()
+    check([d["key"] for d in results] == ["1", "2", "3"],
+          f"chacun reçoit une touche distincte ({[d['key'] for d in results]})")
+    check([d["label"] for d in results] == ["2019", "2020", "2021"],
+          "et le nom du dossier sert de libellé")
 
 
 def main() -> int:
