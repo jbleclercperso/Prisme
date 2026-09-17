@@ -106,28 +106,55 @@ def _is_hidden(path: Path) -> bool:
 
 
 def scan_folder(folder: Path) -> Item:
-    """Parcourt récursivement un dossier et en agrège les statistiques."""
+    """Parcourt récursivement un dossier et en agrège les statistiques.
+
+    Écrit avec `os.scandir` et non `os.walk` : sous Windows, l'énumération d'un
+    répertoire rapporte déjà taille et type de chaque entrée, et `DirEntry.stat()`
+    se sert de ces données au lieu d'interroger le disque une seconde fois. Les
+    chemins restent des chaînes tant que possible, `pathlib` coûtant cher quand
+    on l'invoque des dizaines de milliers de fois.
+    """
     item = Item(path=folder, kind=MODE_FOLDERS)
     try:
         item.mtime = folder.stat().st_mtime
     except OSError:
         pass
 
-    for dirpath, dirnames, filenames in os.walk(folder, onerror=lambda _e: None):
-        item.subdir_count += len(dirnames)
-        for name in filenames:
-            full = Path(dirpath) / name
-            item.file_count += 1
-            try:
-                item.size += full.stat().st_size
-            except OSError:
-                pass
-            if is_video(full):
-                item.video_count += 1
-                if len(item.videos) < MAX_VIDEOS_PER_ITEM:
-                    item.videos.append(full)
+    size = 0
+    file_count = 0
+    video_count = 0
+    subdir_count = 0
+    videos: list = []
 
-    item.videos.sort(key=lambda p: str(p).lower())
+    stack = [str(folder)]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    subdir_count += 1
+                    stack.append(entry.path)
+                    continue
+                file_count += 1
+                size += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+            dot = entry.name.rfind(".")
+            if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
+                video_count += 1
+                if len(videos) < MAX_VIDEOS_PER_ITEM:
+                    videos.append(entry.path)
+
+    item.size = size
+    item.file_count = file_count
+    item.video_count = video_count
+    item.subdir_count = subdir_count
+    videos.sort(key=str.lower)
+    item.videos = [Path(path) for path in videos]
     return item
 
 
@@ -180,17 +207,25 @@ class ScanThread(QThread):
     item_ready = Signal(object)
     finished_scan = Signal(str, int)   # mode, total
 
-    def __init__(self, root: Path, mode: str = "", skip_hidden: bool = True, parent=None):
+    def __init__(self, root: Path, mode: str = "", skip_hidden: bool = True,
+                 use_cache: bool = True, parent=None):
         super().__init__(parent)
         self.root = Path(root)
         self.mode = mode
         self.skip_hidden = skip_hidden
+        self.use_cache = use_cache
+        self.reused = 0        # dossiers relus depuis le cache
+        self.rescanned = 0     # dossiers qu il a fallu reparcourir
         self._stop = False
 
     def stop(self) -> None:
         self._stop = True
 
     def run(self) -> None:
+        # Import tardif : le cache depend de ce module, l importer en tete
+        # creerait un cycle.
+        from .scan_cache import CACHE, signature
+
         mode = self.mode or detect_mode(self.root, self.skip_hidden)
         paths = list_entries(self.root, mode, self.skip_hidden)
         total = len(paths)
@@ -198,8 +233,22 @@ class ScanThread(QThread):
             if self._stop:
                 return
             self.progress.emit(index, total, path.name)
-            item = scan_folder(path) if mode == MODE_FOLDERS else scan_file(path)
+
+            if mode != MODE_FOLDERS:
+                item = scan_file(path)
+            else:
+                sig = signature(path) if self.use_cache else ""
+                item = CACHE.get(path, sig) if sig else None
+                if item is None:
+                    item = scan_folder(path)
+                    CACHE.put(item, sig or signature(path))
+                    self.rescanned += 1
+                else:
+                    self.reused += 1
+
             if self._stop:
                 return
             self.item_ready.emit(item)
+
+        CACHE.flush()
         self.finished_scan.emit(mode, total)

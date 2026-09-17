@@ -230,7 +230,8 @@ class MainWindow(QMainWindow):
             "←/→ naviguer   ·   molette avancer/reculer   ·   Ctrl+Z annuler   "
             "·   Ctrl+F filtrer   ·   Ctrl+T arborescence   ·   Ctrl+M son   "
             "·   Ctrl+O ouvrir   ·   Ctrl+D destinations   ·   Entrée pause   "
-            "·   Ctrl+↓ entrer dans le dossier   ·   Échap remonter",
+            "·   Ctrl+↓ entrer dans le dossier   ·   Ctrl+R réanalyser   "
+            "·   Échap remonter",
             sort_page,
         )
         hint.setObjectName("hint")
@@ -239,9 +240,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(sort_page)
 
         self.done_page = DonePage(self)
-        self.done_page.rescan.clicked.connect(
-            lambda: self.start_root(self.root, self.mode, reset_levels=False)
-        )
+        self.done_page.rescan.clicked.connect(self.refresh_root)
         self.done_page.change.clicked.connect(self.choose_root)
         self.stack.addWidget(self.done_page)
 
@@ -259,7 +258,8 @@ class MainWindow(QMainWindow):
             self.start_root(Path(chosen))
 
     def start_root(self, root: Path | None, mode: str = "",
-                   reset_levels: bool = True, restore_id: str = "") -> None:
+                   reset_levels: bool = True, restore_id: str = "",
+                   use_cache: bool = True) -> None:
         if root is None or not Path(root).is_dir():
             QMessageBox.warning(self, "Dossier introuvable", f"{root} n'existe plus.")
             return
@@ -297,7 +297,10 @@ class MainWindow(QMainWindow):
         self.setFocus()
 
         self.scanning = True
-        self.scan_thread = ScanThread(self.root, self.mode, self.cfg["skip_hidden"], self)
+        self.scan_thread = ScanThread(
+            self.root, self.mode, self.cfg["skip_hidden"],
+            use_cache and self.cfg["use_scan_cache"], self,
+        )
         self.scan_thread.progress.connect(self.on_scan_progress)
         self.scan_thread.item_ready.connect(self.on_item_ready)
         self.scan_thread.finished_scan.connect(self.on_scan_finished)
@@ -309,6 +312,13 @@ class MainWindow(QMainWindow):
             self.scan_thread.wait(3000)
             self.scan_thread = None
         self.scanning = False
+
+    def refresh_root(self) -> None:
+        """Relit tout le disque, sans se fier a l'analyse precedente."""
+        if self.root is None:
+            return
+        self.show_banner("Réanalyse complète en cours…", "#22303f")
+        self.start_root(self.root, self.mode, reset_levels=False, use_cache=False)
 
     def toggle_mode(self) -> None:
         """Force l'autre mode sur la racine courante, sans changer de dossier."""
@@ -384,6 +394,13 @@ class MainWindow(QMainWindow):
     def on_scan_finished(self, mode: str, total: int) -> None:
         self.scanning = False
         self.filter_bar.set_count(len(self.items), len(self.all_items))
+        thread = self.scan_thread
+        if thread is not None and thread.reused:
+            self.show_banner(
+                f"{thread.reused} dossier(s) relu(s) depuis l'analyse précédente, "
+                f"{thread.rescanned} réanalysé(s).   Ctrl+R pour tout revérifier.",
+                "#22303f",
+            )
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(total)
         if not self.items:
@@ -869,6 +886,8 @@ class MainWindow(QMainWindow):
                 return self.edit_destinations()
             if key == Qt.Key_F:
                 return self.focus_filter()
+            if key == Qt.Key_R:
+                return self.refresh_root()
             if key == Qt.Key_Down:
                 return self.enter_current()
             if key == Qt.Key_Up:

@@ -60,6 +60,7 @@ déjà vu est instantané.
 | **molette** | Avance ou recule dans la vidéo survolée (`Ctrl` pour des sauts six fois plus grands) |
 | `Ctrl+Z` | Annuler la dernière action |
 | `Ctrl+F` | Aller au champ de filtre |
+| `Ctrl+R` | Réanalyser tout le disque, sans se fier au cache |
 | `Ctrl+↓` | Entrer dans le dossier affiché pour en trier les vidéos |
 | `Ctrl+↑` | Remonter au dossier parent |
 | `Ctrl+T` | Afficher ou masquer l'arborescence |
@@ -78,6 +79,24 @@ de l'application sont sur `Ctrl` ou sur des touches de navigation. Cela fait
 36 destinations possibles, attribuées d'office dans l'ordre `1`…`0` puis
 `a z e r t y…` (ordre du clavier AZERTY). La barre de commandes passe à la ligne,
 elle ne déborde jamais.
+
+## Vitesse de l'analyse
+
+Une collection ne change presque pas d'un lancement à l'autre : l'application
+garde le résultat de chaque dossier et ne refait que ce qui a bougé.
+
+Ce qui déclenche une réanalyse : la date de modification du dossier ou de l'un
+de ses sous-dossiers directs. Windows la met à jour dès qu'une entrée y est
+ajoutée, retirée ou renommée, ce qui couvre tout changement aux deux premiers
+niveaux. Plus profond, la modification passe inaperçue — **`Ctrl+R` force une
+relecture complète** quand vous avez remanié une arborescence à la main.
+
+Au démarrage, un bandeau indique combien de dossiers ont été relus depuis
+l'analyse précédente et combien ont dû être réanalysés.
+
+Le cache vit dans `%LOCALAPPDATA%\VideoSorter\scan-cache.json`, se limite aux
+30 000 dossiers les plus récemment consultés, et `use_scan_cache: false` dans la
+configuration le désactive.
 
 ## Filtrer
 
@@ -163,7 +182,7 @@ python main.py
 quelques réglages : `preview_seconds` (durée de la boucle au survol),
 `thumb_count` (nombre d'aperçus), `thumb_width` (finesse des vignettes),
 `delete_mode`, `scroll_seconds` (pas de la molette), `tree_root`,
-`filter_include`, `filter_exclude`, `skip_hidden`.
+`filter_include`, `filter_exclude`, `skip_hidden`, `use_scan_cache`.
 Le cache de vignettes est à côté, dans `thumbs\`.
 
 ## Tests
@@ -176,8 +195,14 @@ Fabrique une arborescence avec de vraies vidéos (ffmpeg), puis vérifie l'analy
 la répartition des aperçus, les déplacements, les suppressions, les annulations,
 les collisions de noms, les deux modes, la molette, l'arborescence, la barre de
 commandes à la souris, le filtre par nom, les métadonnées des vignettes, la
-descente dans les sous-dossiers et les transferts en tâche de fond — interface
-comprise, en mode sans affichage. 132 vérifications.
+descente dans les sous-dossiers, le cache d'analyse et les transferts en tâche
+de fond — interface comprise, en mode sans affichage. 144 vérifications.
+
+```bash
+python tests/bench_scan.py
+```
+
+Mesure le coût de l'analyse sur une arborescence synthétique, avec et sans cache.
 
 ```bash
 python tests/test_recycle_and_render.py <dossier_fixture> <sortie.png>
@@ -192,6 +217,7 @@ Vérifie la corbeille Windows réelle et exporte une capture de la fenêtre.
 | `main.py` | Démarrage |
 | `videosorter/config.py` | Configuration persistante, emplacements |
 | `videosorter/scan.py` | Analyse de la racine, statistiques des dossiers |
+| `videosorter/scan_cache.py` | Mémoire des analyses précédentes |
 | `videosorter/media.py` | ffmpeg/ffprobe, cache, vignettes en arrière-plan |
 | `videosorter/actions.py` | Déplacer, supprimer, annuler |
 | `videosorter/transfer.py` | File de transferts en tâche de fond |

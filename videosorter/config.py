@@ -10,6 +10,7 @@ APP_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / APP_NAME
 CONFIG_PATH = APP_DIR / "config.json"
 THUMB_DIR = APP_DIR / "thumbs"
 PROBE_CACHE_PATH = APP_DIR / "probe-cache.json"
+SCAN_CACHE_PATH = APP_DIR / "scan-cache.json"
 LOCAL_TRASH = APP_DIR / "_TRASH"
 
 VIDEO_EXTS = {
@@ -42,6 +43,7 @@ DEFAULTS = {
     "ffprobe": "",
     "window": {"w": 1400, "h": 900},
     "skip_hidden": True,
+    "use_scan_cache": True,      # reutiliser l analyse precedente
 }
 
 

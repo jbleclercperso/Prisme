@@ -433,6 +433,64 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     wait_for(app, lambda: not window.scanning and window.root.name == "Sous-dossiers", 60)
     check(len(window.levels) == 1, "Ctrl+↑ remonte d'un seul niveau")
 
+    print("\n[24] Cache d'analyse")
+    from videosorter.scan_cache import CACHE, signature
+
+    CACHE.data = {}
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
+    first_pass = window.scan_thread
+    check(first_pass.reused == 0, "premier passage : rien à réutiliser")
+    check(first_pass.rescanned == len(window.all_items),
+          f"tout est analysé ({first_pass.rescanned})")
+    check(len(CACHE.data) == len(window.all_items),
+          f"chaque dossier est mémorisé ({len(CACHE.data)})")
+    reference = {i.name: (i.size, i.file_count, i.video_count) for i in window.all_items}
+
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
+    second_pass = window.scan_thread
+    check(second_pass.reused == len(window.all_items),
+          f"second passage : tout vient du cache ({second_pass.reused} réutilisés, "
+          f"{second_pass.rescanned} réanalysés)")
+    again = {i.name: (i.size, i.file_count, i.video_count) for i in window.all_items}
+    check(again == reference, "et les chiffres sont identiques à l'analyse complète")
+    cached_videos = {i.name: len(i.videos) for i in window.all_items}
+    check(all(count > 0 for name, count in cached_videos.items()
+              if reference[name][2] > 0),
+          "les chemins des vidéos sont restitués")
+
+    # Un fichier ajouté doit invalider le dossier concerné, et lui seul.
+    victim = next(i for i in window.all_items if i.name == "Anniversaire")
+    (victim.path / "ajout.mp4").write_bytes(b"x" * 1024)
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
+    third_pass = window.scan_thread
+    check(third_pass.rescanned == 1,
+          f"un seul dossier réanalysé après modification (obtenu {third_pass.rescanned})")
+    refreshed = next(i for i in window.all_items if i.name == "Anniversaire")
+    check(refreshed.file_count == reference["Anniversaire"][1] + 1,
+          "et ses chiffres sont à jour")
+
+    # Une modification au deuxième niveau doit compter aussi.
+    nested = next(i for i in window.all_items if i.name == "Sous-dossiers")
+    (nested.path / "interne" / "ajout2.mp4").write_bytes(b"x" * 512)
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
+    check(window.scan_thread.rescanned == 1,
+          "une modification dans un sous-dossier invalide le dossier parent")
+
+    # Ctrl+R ignore le cache et relit tout.
+    window.refresh_root()
+    wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
+    check(window.scan_thread.reused == 0,
+          f"Ctrl+R relit tout depuis le disque ({window.scan_thread.rescanned} dossiers)")
+
+    check(signature(root / "Anniversaire") != "", "empreinte calculable sur un dossier")
+    check(signature(root / "inexistant") == "", "et vide sur un dossier absent")
+    (victim.path / "ajout.mp4").unlink()
+    (nested.path / "interne" / "ajout2.mp4").unlink()
+
 
 def main() -> int:
     base = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
@@ -458,6 +516,9 @@ def main() -> int:
     vs_config.LOCAL_TRASH = sandbox / "_TRASH"
     import videosorter.actions as vs_actions
     vs_actions.LOCAL_TRASH = sandbox / "_TRASH"
+    import videosorter.scan_cache as vs_scan_cache
+    vs_scan_cache.CACHE.path = sandbox / "scan-cache.json"
+    vs_scan_cache.CACHE.data = {}
 
     app = QApplication.instance() or QApplication(sys.argv)
     cfg = Config(path=sandbox / "config.json")
