@@ -23,9 +23,13 @@ Le bouton **Mode** force l'autre mode si la détection ne correspond pas à l'en
 - **Dossier contenant peu de vidéos** : les 10 cases se répartissent sur ces
   vidéos, à des instants échelonnés dans chacune.
 - **Survol d'une case** : la vidéo démarre à cet instant et tourne en boucle sur
-  10 secondes. Le son est coupé par défaut (`Ctrl+M` pour l'activer), et la
-  molette avance ou recule dans l'extrait.
-- Chaque case indique son horodatage et le nom du fichier dont elle vient.
+  10 secondes. Le son est coupé par défaut — `Ctrl+M`, ou le bouton *Son* dans
+  l'entête, qui affiche l'état courant. La molette avance ou recule dans l'extrait.
+- **Pastille en haut à droite** : la durée totale de la vidéo. Pendant un
+  déplacement à la molette, elle affiche la position et la durée.
+- **En bas à gauche** : la résolution (`720p`, `1080p`, `4K`…) et le nom du
+  fichier. Les hauteurs non standard sont ramenées à l'appellation la plus
+  proche, un 352p s'affiche donc `360p`.
 - Un double-clic sur une case ouvre l'explorateur sur ce fichier.
 
 Les vignettes des deux éléments suivants sont fabriquées à l'avance, donc
@@ -42,6 +46,7 @@ déjà vu est instantané.
 | `←` / `→` | Revenir en arrière / avancer sans décider |
 | **molette** | Avance ou recule dans la vidéo survolée (`Ctrl` pour des sauts six fois plus grands) |
 | `Ctrl+Z` | Annuler la dernière action |
+| `Ctrl+F` | Aller au champ de filtre |
 | `Ctrl+T` | Afficher ou masquer l'arborescence |
 | `Ctrl+M` | Couper ou remettre le son |
 | `Ctrl+O` | Ouvrir l'élément courant dans l'explorateur |
@@ -58,6 +63,22 @@ de l'application sont sur `Ctrl` ou sur des touches de navigation. Cela fait
 36 destinations possibles, attribuées d'office dans l'ordre `1`…`0` puis
 `a z e r t y…` (ordre du clavier AZERTY). La barre de commandes passe à la ligne,
 elle ne déborde jamais.
+
+## Filtrer
+
+Deux champs au-dessus de la fiche, `Ctrl+F` pour y aller :
+
+- **contient…** — ne garder que les noms qui comportent l'un des termes ;
+- **exclure…** — écarter les noms qui en comportent un.
+
+Plusieurs termes se séparent par des virgules, la casse est ignorée, et les deux
+champs se combinent. Taper `+` dans « exclure » met de côté tous les dossiers
+préfixés. `Échap` ou `Entrée` rend la main aux raccourcis de tri, *Effacer*
+remet tout.
+
+Le filtre masque sans rien perdre : le compteur indique combien d'éléments sont
+écartés, et les termes sont conservés d'une session à l'autre — c'est pourquoi
+ils restent visibles en permanence dans la barre.
 
 ## Mode arborescence
 
@@ -126,7 +147,8 @@ python main.py
 `%LOCALAPPDATA%\VideoSorter\config.json` — destinations, racines récentes, et
 quelques réglages : `preview_seconds` (durée de la boucle au survol),
 `thumb_count` (nombre d'aperçus), `thumb_width` (finesse des vignettes),
-`delete_mode`, `scroll_seconds` (pas de la molette), `tree_root`, `skip_hidden`.
+`delete_mode`, `scroll_seconds` (pas de la molette), `tree_root`,
+`filter_include`, `filter_exclude`, `skip_hidden`.
 Le cache de vignettes est à côté, dans `thumbs\`.
 
 ## Tests
@@ -138,8 +160,9 @@ python tests/test_app.py
 Fabrique une arborescence avec de vraies vidéos (ffmpeg), puis vérifie l'analyse,
 la répartition des aperçus, les déplacements, les suppressions, les annulations,
 les collisions de noms, les deux modes, la molette, l'arborescence, la barre de
-commandes à la souris et les transferts en tâche de fond — interface comprise,
-en mode sans affichage. 71 vérifications.
+commandes à la souris, le filtre par nom, les métadonnées des vignettes et les
+transferts en tâche de fond — interface comprise, en mode sans affichage.
+108 vérifications.
 
 ```bash
 python tests/test_recycle_and_render.py <dossier_fixture> <sortie.png>

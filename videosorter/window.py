@@ -22,7 +22,7 @@ from .scan import (
 from .transfer import Transfer, TransferQueue
 from .tree import TreePanel
 from .widgets import (
-    STYLESHEET, CommandBar, DestinationsDialog, PreviewGrid, RootBar,
+    STYLESHEET, CommandBar, DestinationsDialog, FilterBar, PreviewGrid, RootBar,
     SinglePlayer,
 )
 
@@ -105,8 +105,9 @@ class MainWindow(QMainWindow):
         self.resize(cfg["window"].get("w", 1400), cfg["window"].get("h", 900))
         self.setStyleSheet(STYLESHEET)
 
-        self.items: list = []
-        self.index = 0
+        self.all_items: list = []      # tout ce que l'analyse a trouve
+        self.items: list = []          # ce que le filtre laisse passer
+        self.index = 0                 # index dans self.items
         self.mode = MODE_FOLDERS
         self.root: Path | None = None
         self.plans: dict = {}
@@ -152,7 +153,15 @@ class MainWindow(QMainWindow):
         self.root_bar.openSettings.connect(self.edit_destinations)
         self.root_bar.toggleMode.connect(self.toggle_mode)
         self.root_bar.toggleTree.connect(self.toggle_tree)
+        self.root_bar.toggleMute.connect(self.toggle_mute)
+        self.root_bar.set_muted(self.cfg["muted"])
         layout.addWidget(self.root_bar)
+
+        self.filter_bar = FilterBar(sort_page)
+        self.filter_bar.changed.connect(self.apply_filter)
+        self.filter_bar.released.connect(self.setFocus)
+        self.filter_bar.set_terms(self.cfg["filter_include"], self.cfg["filter_exclude"])
+        layout.addWidget(self.filter_bar)
 
         self.progress = QProgressBar(sort_page)
         self.progress.setTextVisible(False)
@@ -214,8 +223,9 @@ class MainWindow(QMainWindow):
 
         hint = QLabel(
             "←/→ naviguer   ·   molette avancer/reculer   ·   Ctrl+Z annuler   "
-            "·   Ctrl+T arborescence   ·   Ctrl+M son   ·   Ctrl+O ouvrir   "
-            "·   Ctrl+D destinations   ·   Entrée pause   ·   Échap quitter le tri",
+            "·   Ctrl+F filtrer   ·   Ctrl+T arborescence   ·   Ctrl+M son   "
+            "·   Ctrl+O ouvrir   ·   Ctrl+D destinations   ·   Entrée pause   "
+            "·   Échap quitter le tri",
             sort_page,
         )
         hint.setObjectName("hint")
@@ -248,6 +258,7 @@ class MainWindow(QMainWindow):
         self.stop_scan()
         self.root = Path(root)
         self.mode = mode or detect_mode(self.root, self.cfg["skip_hidden"])
+        self.all_items = []
         self.items = []
         self.plans = {}
         self.history = []
@@ -297,6 +308,10 @@ class MainWindow(QMainWindow):
             self.item_subtitle.setText(f"Analyse {done}/{total} — {name}")
 
     def on_item_ready(self, item) -> None:
+        self.all_items.append(item)
+        self.filter_bar.set_count(len(self.items), len(self.all_items))
+        if not self._matches(item):
+            return
         first = not self.items
         self.items.append(item)
         if first:
@@ -310,6 +325,7 @@ class MainWindow(QMainWindow):
 
     def on_scan_finished(self, mode: str, total: int) -> None:
         self.scanning = False
+        self.filter_bar.set_count(len(self.items), len(self.all_items))
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(total)
         if not self.items:
@@ -334,6 +350,9 @@ class MainWindow(QMainWindow):
     def update_counter(self) -> None:
         total = len(self.items)
         suffix = " (analyse…)" if self.scanning else ""
+        hidden = len(self.all_items) - total
+        if hidden > 0:
+            suffix += f" · {hidden} filtrés"
         done = self.stats["moved"] + self.stats["deleted"]
         self.root_bar.counter.setText(
             f"{min(self.index + 1, total)} / {total}{suffix}   ·   "
@@ -424,8 +443,8 @@ class MainWindow(QMainWindow):
             return
         if current:
             self._apply_plan(item, plan)
-        for slot, (video, ts) in enumerate(plan):
-            self.preview.request_thumb(item.item_id, slot, video, ts)
+        for slot, entry in enumerate(plan):
+            self.preview.request_thumb(item.item_id, slot, entry[0], entry[1])
 
     def _apply_plan(self, item, plan: list) -> None:
         viewer = self.grid if item.kind == MODE_FOLDERS else self.single
@@ -436,8 +455,8 @@ class MainWindow(QMainWindow):
         current = self.current
         if current is not None and current.item_id == item_id:
             self._apply_plan(current, plan)
-        for slot, (video, ts) in enumerate(plan):
-            self.preview.request_thumb(item_id, slot, video, ts)
+        for slot, entry in enumerate(plan):
+            self.preview.request_thumb(item_id, slot, entry[0], entry[1])
 
     def on_thumb_ready(self, item_id: str, slot: int, path: str) -> None:
         current = self.current
@@ -504,8 +523,60 @@ class MainWindow(QMainWindow):
         self.cfg["tree_root"] = path
         self.cfg.save()
 
+    # ------------------------------------------------------------------
+    # Filtre par nom
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _terms(text: str) -> list:
+        return [term.strip().lower() for term in text.split(",") if term.strip()]
+
+    def _matches(self, item) -> bool:
+        name = item.name.lower()
+        include = self._terms(self.cfg["filter_include"])
+        exclude = self._terms(self.cfg["filter_exclude"])
+        if include and not any(term in name for term in include):
+            return False
+        return not any(term in name for term in exclude)
+
+    def apply_filter(self, include: str, exclude: str) -> None:
+        self.cfg["filter_include"] = include
+        self.cfg["filter_exclude"] = exclude
+        self.cfg.save()
+
+        current = self.current
+        self.items = [item for item in self.all_items if self._matches(item)]
+        self.filter_bar.set_count(len(self.items), len(self.all_items))
+
+        if not self.items:
+            self.preview.cancel_all()
+            self._release_media()
+            self.index = 0
+            self.item_title.setText("Aucun élément ne correspond au filtre")
+            self.item_parent.setText("")
+            self.item_subtitle.setText(
+                f"{len(self.all_items)} élément(s) masqué(s). Modifiez ou effacez le filtre."
+            )
+            self.grid.set_no_videos("—")
+            self.update_counter()
+            return
+
+        # On reste sur le même élément s'il passe encore le filtre.
+        if current is not None and current in self.items:
+            self.index = self.items.index(current)
+        else:
+            self.index = min(self.index, len(self.items) - 1)
+        if self.stack.currentIndex() == PAGE_DONE:
+            self.stack.setCurrentIndex(PAGE_SORT)
+        self.show_item(self.index)
+
+    def focus_filter(self) -> None:
+        self.filter_bar.include.setFocus()
+        self.filter_bar.include.selectAll()
+
     def _item_by_id(self, item_id: str):
-        for item in self.items:
+        # Sur self.all_items : un transfert peut aboutir alors que le filtre a
+        # entre-temps ecarte l'element de la liste visible.
+        for item in self.all_items:
             if item.item_id == item_id:
                 return item
         return None
@@ -608,7 +679,7 @@ class MainWindow(QMainWindow):
         self.show_banner(f"Restauration de « {Path(entry.src).name} »…", "#22303f")
 
     def _item_by_path(self, path: Path):
-        for item in self.items:
+        for item in self.all_items:
             if item.path == path:
                 return item
         return None
@@ -727,6 +798,8 @@ class MainWindow(QMainWindow):
                 return self.open_external()
             if key == Qt.Key_D:
                 return self.edit_destinations()
+            if key == Qt.Key_F:
+                return self.focus_filter()
             return super().keyPressEvent(event)
 
         if key in (Qt.Key_Delete, Qt.Key_Backspace):
@@ -775,6 +848,7 @@ class MainWindow(QMainWindow):
         self.cfg.save()
         self.grid.set_muted(muted)
         self.single.set_muted(muted)
+        self.root_bar.set_muted(muted)
         self.show_banner("Son coupé" if muted else "Son activé", "#2a2f38")
 
     def closeEvent(self, event):

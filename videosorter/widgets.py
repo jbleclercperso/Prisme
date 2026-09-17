@@ -10,12 +10,12 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout, QMessageBox,
-    QPushButton, QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout,
-    QWidget,
+    QLineEdit, QPushButton, QSizePolicy, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from .config import KEY_ORDER, RESERVED_KEYS
-from .scan import human_duration
+from .scan import human_duration, human_resolution
 
 GRID_COLUMNS = 5
 
@@ -33,7 +33,10 @@ QFrame#tile { background: #0e1013; border: 1px solid #262c35; border-radius: 8px
 QFrame#tile[hovered="true"] { border: 1px solid #4c8dff; }
 QLabel#tileBadge { background: rgba(0,0,0,0.65); color: #dfe4ea; border-radius: 4px;
                    padding: 1px 5px; font-size: 11px; }
-QLabel#tileCaption { color: #8b95a3; font-size: 11px; }
+QLabel#tileDuration { background: rgba(0,0,0,0.78); color: #ffffff;
+                     border-radius: 5px; padding: 2px 8px;
+                     font-size: 13px; font-weight: 700; }
+QLabel#tileCaption { color: #9aa6b4; font-size: 11px; font-weight: 600; }
 QLabel#tilePlaceholder { color: #59616d; font-size: 12px; }
 QPushButton { background: #232932; border: 1px solid #323a45; border-radius: 6px;
               padding: 6px 12px; color: #e6e8ea; }
@@ -53,7 +56,9 @@ QTableWidget { background: #0e1013; gridline-color: #262c35;
                selection-background-color: #2f6fed; }
 QHeaderView::section { background: #1b1f26; border: 0; padding: 6px; color: #9aa4b0; }
 QLineEdit { background: #0e1013; border: 1px solid #323a45; border-radius: 6px;
-            padding: 6px; }
+            padding: 5px 8px; }
+QLineEdit:focus { border-color: #4c8dff; }
+QLineEdit#excludeEdit:focus { border-color: #d4707c; }
 QProgressBar { background: #1b1f26; border: 0; border-radius: 2px; }
 QProgressBar::chunk { background: #2f6fed; border-radius: 2px; }
 """
@@ -99,31 +104,64 @@ class PreviewTile(QFrame):
         self.badge = QLabel(str(slot + 1), self)
         self.badge.setObjectName("tileBadge")
 
+        # La durée est l'information qu'on cherche le plus vite : elle occupe un
+        # coin à elle, en gros, plutôt que d'être noyée dans la légende.
+        self.duration_chip = QLabel("", self)
+        self.duration_chip.setObjectName("tileDuration")
+        self.duration_chip.hide()
+
         self.caption = QLabel("", self)
         self.caption.setObjectName("tileCaption")
 
+        self.duration = 0.0
+        self.height_px = 0
         self._pixmap: QPixmap | None = None
 
     # -- contenu ---------------------------------------------------------
     def reset(self) -> None:
         self.video = ""
         self.ts = 0.0
+        self.duration = 0.0
+        self.height_px = 0
         self._pixmap = None
         self.image.clear()
         self.placeholder.setText("…")
         self.placeholder.show()
         self.caption.setText("")
+        self.duration_chip.hide()
         self.set_hovered(False)
 
-    def set_source(self, video: str, ts: float) -> None:
+    def set_source(self, video: str, ts: float, duration: float = 0.0,
+                   height: int = 0) -> None:
         self.video = video
         self.ts = ts
-        self.set_position(ts)
+        self.duration = duration
+        self.height_px = height
+        name = Path(video).name if video else ""
+        resolution = human_resolution(height)
+        legend = f"{resolution}  ·  {name}" if resolution else name
+        self.caption.setText(elide(legend, 40))
+        self.caption.setToolTip(name)
+        self.show_duration()
 
-    def set_position(self, seconds: float) -> None:
-        """Rafraîchit l'horodatage affiché, sans toucher au point d'entrée."""
-        name = Path(self.video).name if self.video else ""
-        self.caption.setText(elide(f"{human_duration(seconds)}  ·  {name}", 40))
+    def show_duration(self) -> None:
+        """Rétablit la durée totale dans la pastille."""
+        if self.duration:
+            self.duration_chip.setText(human_duration(self.duration))
+            self.duration_chip.show()
+            self._place_chip()
+        else:
+            self.duration_chip.hide()
+
+    def show_position(self, seconds: float) -> None:
+        """Pendant un déplacement à la molette, la pastille situe la lecture."""
+        if not self.duration:
+            return
+        self.duration_chip.setText(
+            f"{human_duration(seconds)} / {human_duration(self.duration)}"
+        )
+        self.duration_chip.show()
+        self._place_chip()
 
     def set_thumb(self, path: str) -> None:
         pixmap = QPixmap(path)
@@ -158,6 +196,11 @@ class PreviewTile(QFrame):
             self._pixmap.scaled(area.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         )
 
+    def _place_chip(self) -> None:
+        self.duration_chip.adjustSize()
+        self.duration_chip.move(self.width() - self.duration_chip.width() - 7, 7)
+        self.duration_chip.raise_()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         rect = self.rect()
@@ -165,6 +208,7 @@ class PreviewTile(QFrame):
         self.placeholder.setGeometry(1, 1, rect.width() - 2, rect.height() - 20)
         self.badge.adjustSize()
         self.badge.move(7, 7)
+        self._place_chip()
         self.caption.setGeometry(7, rect.height() - 18, rect.width() - 14, 15)
         self._rescale()
 
@@ -237,7 +281,7 @@ class PreviewGrid(QWidget):
     def set_plan(self, plan: list) -> None:
         for slot, tile in enumerate(self.tiles):
             if slot < len(plan):
-                tile.set_source(plan[slot][0], plan[slot][1])
+                tile.set_source(*plan[slot])
             else:
                 tile.set_empty("")
 
@@ -273,6 +317,7 @@ class PreviewGrid(QWidget):
             return
         if self.hovered_slot != -1:
             self.tiles[self.hovered_slot].set_hovered(False)
+            self.tiles[self.hovered_slot].show_duration()
         self.hovered_slot = slot
         if slot == -1:
             self._leave()
@@ -344,7 +389,7 @@ class PreviewGrid(QWidget):
         # secondes ramènerait aussitôt à l'endroit qu'on vient de quitter.
         self._segment_start = position
         self.player.setPosition(position)
-        self.tiles[self.hovered_slot].set_position(position / 1000.0)
+        self.tiles[self.hovered_slot].show_position(position / 1000.0)
         event.accept()
 
     def stop(self) -> None:
@@ -432,7 +477,7 @@ class SinglePlayer(QWidget):
     def set_plan(self, plan: list) -> None:
         for slot, tile in enumerate(self.tiles):
             if slot < len(plan):
-                tile.set_source(plan[slot][0], plan[slot][1])
+                tile.set_source(*plan[slot])
 
     def set_thumb(self, slot: int, path: str) -> None:
         if 0 <= slot < len(self.tiles):
@@ -501,6 +546,77 @@ class SinglePlayer(QWidget):
 
     def stop(self) -> None:
         self.player.stop()
+
+
+class FilterEdit(QLineEdit):
+    """Champ de filtre qui rend la main au clavier de tri sur Échap ou Entrée."""
+
+    released = Signal()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Escape, Qt.Key_Return, Qt.Key_Enter):
+            self.released.emit()
+            return
+        super().keyPressEvent(event)
+
+
+class FilterBar(QWidget):
+    """Filtre par nom : ce qu'on veut voir, et ce qu'on veut écarter."""
+
+    changed = Signal(str, str)
+    released = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        label = QLabel("Filtre", self)
+        label.setObjectName("hint")
+        self.include = FilterEdit(self)
+        self.include.setPlaceholderText("contient… (plusieurs termes séparés par des virgules)")
+        self.exclude = FilterEdit(self)
+        self.exclude.setPlaceholderText("exclure… (ex : +)")
+        self.exclude.setObjectName("excludeEdit")
+        self.count = QLabel("", self)
+        self.count.setObjectName("counter")
+        clear = QPushButton("Effacer", self)
+        clear.setFocusPolicy(Qt.NoFocus)
+        clear.clicked.connect(self.clear)
+
+        layout.addWidget(label)
+        layout.addWidget(self.include, 3)
+        layout.addWidget(self.exclude, 2)
+        layout.addWidget(self.count)
+        layout.addWidget(clear)
+
+        # Un court délai évite de refiltrer à chaque frappe pendant la saisie.
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(220)
+        self.timer.timeout.connect(self._emit)
+        for field in (self.include, self.exclude):
+            field.textChanged.connect(lambda _t: self.timer.start())
+            field.released.connect(self.released)
+
+    def _emit(self) -> None:
+        self.changed.emit(self.include.text(), self.exclude.text())
+
+    def set_terms(self, include: str, exclude: str) -> None:
+        for field, value in ((self.include, include), (self.exclude, exclude)):
+            field.blockSignals(True)
+            field.setText(value)
+            field.blockSignals(False)
+
+    def clear(self) -> None:
+        self.set_terms("", "")
+        self._emit()
+        self.released.emit()
+
+    def set_count(self, shown: int, total: int) -> None:
+        hidden = total - shown
+        self.count.setText(f"{hidden} masqué{'s' if hidden > 1 else ''}" if hidden else "")
 
 
 class KeyCap(QFrame):
@@ -784,6 +900,7 @@ class RootBar(QWidget):
     openSettings = Signal()
     toggleMode = Signal()
     toggleTree = Signal()
+    toggleMute = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -803,20 +920,27 @@ class RootBar(QWidget):
         settings = QPushButton("Destinations…")
         mode = QPushButton("Mode")
         tree = QPushButton("Arborescence")
-        for button in (change, settings, mode, tree):
+        self.mute = QPushButton("Son coupé")
+        for button in (change, settings, mode, tree, self.mute):
             button.setFocusPolicy(Qt.NoFocus)
         change.clicked.connect(self.changeRoot)
         settings.clicked.connect(self.openSettings)
         mode.clicked.connect(self.toggleMode)
         tree.clicked.connect(self.toggleTree)
+        self.mute.clicked.connect(self.toggleMute)
 
         layout.addWidget(self.root_label, 1)
         layout.addWidget(self.pending)
         layout.addWidget(self.counter)
+        layout.addWidget(self.mute)
         layout.addWidget(tree)
         layout.addWidget(mode)
         layout.addWidget(settings)
         layout.addWidget(change)
+
+    def set_muted(self, muted: bool) -> None:
+        self.mute.setText("Son coupé" if muted else "Son actif")
+        self.mute.setToolTip("Ctrl+M")
 
     def set_pending(self, count: int) -> None:
         """Rappelle discrètement que des copies se poursuivent en arrière-plan."""

@@ -75,6 +75,22 @@ def human_duration(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+# Hauteurs normalisees, pour nommer une resolution plutot que la decrire.
+STANDARD_HEIGHTS = (144, 240, 360, 480, 576, 720, 1080, 1440)
+
+
+def human_resolution(height: int) -> str:
+    """Traduit une hauteur d'image en appellation courante : 720p, 1080p, 4K."""
+    if not height:
+        return ""
+    if height >= 4320:
+        return "8K"
+    if height >= 2160:
+        return "4K"
+    closest = min(STANDARD_HEIGHTS, key=lambda standard: abs(standard - height))
+    return f"{closest}p"
+
+
 def is_video(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXTS
 

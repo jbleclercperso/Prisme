@@ -32,6 +32,8 @@ DEFAULTS = {
     "scroll_seconds": 5,         # pas de la molette dans une video
     "tree_root": "",             # racine du panneau d'arborescence
     "tree_visible": False,
+    "filter_include": "",       # termes a chercher dans le nom
+    "filter_exclude": "",       # termes qui ecartent un element
     "preview_seconds": 10,
     "thumb_count": 10,
     "thumb_width": 480,

@@ -256,6 +256,106 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     finally:
         vs_actions.move_to = real_move
 
+    print("\n[18] Durée et résolution sur les vignettes")
+    from videosorter.scan import human_resolution
+    check(human_resolution(240) == "240p", "240 -> 240p")
+    check(human_resolution(1080) == "1080p", "1080 -> 1080p")
+    check(human_resolution(352) == "360p", "352 est ramené au standard le plus proche")
+    check(human_resolution(2160) == "4K", "2160 -> 4K")
+    check(human_resolution(0) == "", "hauteur inconnue : rien d'affiché")
+
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 1, 60)
+    window.show_item(0)
+    wait_for(app, lambda: window.grid.tiles[0].duration > 0, 90)
+    tile = window.grid.tiles[0]
+    check(tile.duration > 0, f"durée remontée jusqu'à la vignette ({tile.duration:.1f} s)")
+    check(tile.height_px == 240, f"hauteur remontée ({tile.height_px})")
+    check(not tile.duration_chip.isHidden(), "pastille de durée affichée")
+    check(tile.duration_chip.text() == "0:06", f"durée totale, pas l'instant de l'aperçu "
+          f"(obtenu {tile.duration_chip.text()!r})")
+    check(tile.duration_chip.x() > tile.width() / 2, "pastille placée en haut à droite")
+    check(tile.caption.text().startswith("240p"),
+          f"légende commençant par la résolution (obtenu {tile.caption.text()!r})")
+    check(".mp4" in tile.caption.text(), "le nom du fichier reste dans la légende")
+
+    # Pendant un déplacement à la molette, la pastille situe la lecture.
+    tile.show_position(3.0)
+    check(" / " in tile.duration_chip.text(),
+          f"molette : position et durée (obtenu {tile.duration_chip.text()!r})")
+    tile.show_duration()
+    check(tile.duration_chip.text() == "0:06", "la durée revient une fois le survol fini")
+
+    print("\n[19] Bouton de son")
+    check(window.root_bar.mute.text() == "Son coupé", "état initial visible dans l'entête")
+    QTest.mouseClick(window.root_bar.mute, Qt.LeftButton)
+    pump(app, 0.3)
+    check(window.cfg["muted"] is False, "un clic réactive le son")
+    check(window.root_bar.mute.text() == "Son actif", "le bouton reflète le nouvel état")
+    check(window.grid.audio.isMuted() is False, "le lecteur suit")
+    QTest.keyClick(window, Qt.Key_M, Qt.ControlModifier)
+    pump(app, 0.3)
+    check(window.cfg["muted"] is True, "Ctrl+M recoupe le son")
+    check(window.root_bar.mute.text() == "Son coupé", "et le bouton se remet à jour")
+
+    print("\n[20] Filtre par nom")
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
+    total = len(window.all_items)
+    names = [item.name for item in window.all_items]
+    check(total >= 3, f"{total} éléments avant filtrage : {names}")
+
+    window.apply_filter("anniv", "")
+    pump(app, 0.3)
+    check([i.name for i in window.items] == ["Anniversaire"],
+          f"« contient » ne garde que la correspondance ({[i.name for i in window.items]})")
+    check(len(window.all_items) == total, "la liste complète est conservée derrière")
+    check("filtrés" in window.root_bar.counter.text(),
+          "le compteur signale que des éléments sont masqués")
+    check("masqué" in window.filter_bar.count.text(), "et la barre de filtre aussi")
+
+    window.apply_filter("", "melange")
+    pump(app, 0.3)
+    kept = [i.name for i in window.items]
+    check("Melange" not in kept, f"« exclure » retire la correspondance ({kept})")
+    check(len(kept) == total - 1, "et ne retire rien d'autre")
+
+    # Le cas décrit : des dossiers préfixés que l'on veut écarter.
+    plus_dir = root / "+a_ignorer"
+    plus_dir.mkdir(exist_ok=True)
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.all_items) >= 4, 60)
+    window.apply_filter("", "+")
+    pump(app, 0.3)
+    check(all(not i.name.startswith("+") for i in window.items),
+          "les dossiers commençant par « + » sont écartés")
+    check(any(i.name.startswith("+") for i in window.all_items),
+          "mais ils restent dans la liste complète")
+
+    window.apply_filter("", "")
+    pump(app, 0.3)
+    check(len(window.items) == len(window.all_items), "effacer le filtre rend tout")
+    check(window.filter_bar.count.text() == "", "et éteint l'indicateur")
+
+    window.apply_filter("zzz-introuvable", "")
+    pump(app, 0.3)
+    check(window.items == [], "un filtre sans correspondance vide la liste")
+    check("Aucun élément" in window.item_title.text(),
+          f"et le dit clairement (obtenu {window.item_title.text()!r})")
+    window.apply_filter("", "")
+    pump(app, 0.3)
+    check(len(window.items) > 0, "et l'on peut repartir de là")
+
+    check(window.cfg["filter_exclude"] == "", "le filtre est mémorisé dans la configuration")
+    window.filter_bar.set_terms("abc", "def")
+    window.filter_bar._emit()
+    pump(app, 0.5)
+    check(window.cfg["filter_include"] == "abc" and window.cfg["filter_exclude"] == "def",
+          "la saisie alimente bien la configuration")
+    window.filter_bar.clear()
+    pump(app, 0.5)
+    check(window.cfg["filter_include"] == "", "le bouton Effacer remet tout à zéro")
+
 
 def main() -> int:
     base = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
@@ -318,16 +418,16 @@ def main() -> int:
 
     plan_anniv = window.plans.get(str(anniv.path), [])
     check(len(plan_anniv) == 10, f"Anniversaire : 10 aperçus (obtenu {len(plan_anniv)})")
-    check(len({v for v, _ in plan_anniv}) == 10,
+    check(len({entry[0] for entry in plan_anniv}) == 10,
           "Anniversaire : 10 vidéos distinctes échantillonnées")
 
     melange = by_name.get("Melange")
     plan_mel = window.plans.get(str(melange.path), [])
     check(len(plan_mel) == 10, f"Melange (2 vidéos) : 10 aperçus (obtenu {len(plan_mel)})")
-    check(len({v for v, _ in plan_mel}) == 2, "Melange : les 2 vidéos sont utilisées")
-    check(len({round(ts, 2) for _, ts in plan_mel}) >= 5,
+    check(len({entry[0] for entry in plan_mel}) == 2, "Melange : les 2 vidéos sont utilisées")
+    check(len({round(entry[1], 2) for entry in plan_mel}) >= 5,
           "Melange : instants échelonnés dans chaque vidéo")
-    check(all(ts > 0 for _, ts in plan_mel), "instants strictement positifs")
+    check(all(entry[1] > 0 for entry in plan_mel), "instants strictement positifs")
 
     window.show_item([i.name for i in window.items].index("Anniversaire"))
     ok = wait_for(app, lambda: sum(1 for t in window.grid.tiles if t._pixmap) >= 10, 120)
@@ -403,7 +503,7 @@ def main() -> int:
     ok = wait_for(app, lambda: sum(1 for t in window.single.tiles if t._pixmap) >= 10, 90)
     check(ok, "pellicule de 10 images pour la vidéo courante")
     plan_file = window.plans.get(str(window.current.path), [])
-    check(len({round(ts, 2) for _, ts in plan_file}) == 10,
+    check(len({round(entry[1], 2) for entry in plan_file}) == 10,
           "10 instants distincts dans la même vidéo")
 
     print("\n[10] Déplacement d'un fichier seul")

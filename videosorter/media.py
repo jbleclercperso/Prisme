@@ -210,6 +210,10 @@ def clear_cache() -> None:
 def build_preview_plan(videos: list, count: int) -> list:
     """Répartit `count` aperçus sur les vidéos disponibles.
 
+    Chaque entrée est (fichier, instant, durée, hauteur) : le sondage ffprobe a
+    déjà eu lieu ici, autant en faire profiter l'affichage plutôt que de le
+    refaire depuis le fil de l'interface.
+
     Beaucoup de vidéos : une image par vidéo, prise à des hauteurs variées.
     Peu de vidéos : plusieurs instants échelonnés dans chacune.
     """
@@ -234,9 +238,10 @@ def build_preview_plan(videos: list, count: int) -> list:
 
     plan = []
     for video, fraction in pairs:
-        duration = probe(Path(video)).get("duration") or 0.0
+        info = probe(Path(video))
+        duration = info.get("duration") or 0.0
         ts = min(duration - 1.0, duration * fraction) if duration > 2 else 0.0
-        plan.append((str(video), max(0.0, ts)))
+        plan.append((str(video), max(0.0, ts), duration, info.get("height") or 0))
     return plan
 
 
