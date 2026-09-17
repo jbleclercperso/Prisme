@@ -76,6 +76,19 @@ def first_untouched(window) -> int:
     return 0
 
 
+def fresh_root(app, window, base, tri, name: str, count: int) -> Path:
+    """Racine jetable peuplee de `count` videos, pour une etape qui en consomme."""
+    folder = base / name
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir(parents=True, exist_ok=True)
+    sources = sorted(tri.rglob("*.mp4"))
+    for position in range(count):
+        shutil.copy2(sources[position % len(sources)], folder / f"{name}_{position}.mp4")
+    window.start_root(folder)
+    wait_for(app, lambda: not window.scanning and len(window.items) == count, 60)
+    return folder
+
+
 def wheel(widget, notches: int, modifiers=Qt.NoModifier) -> None:
     """Simule un cran de molette au centre du widget."""
     center = widget.rect().center()
@@ -161,7 +174,55 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.toggle_tree(False)
     check(window.tree.isHidden(), "panneau masqué à la bascule")
 
-    print("\n[16] Transfert en tâche de fond")
+    print("\n[16] Barre de commandes cliquable")
+    fresh_root(app, window, base, tri, "clics", 5)
+    window.cfg.set_destinations([
+        {"key": "1", "label": "Souris", "path": str(tri / "souris")},
+    ])
+    window.commands.rebuild(window.cfg.destinations, "Corbeille")
+    caps = [
+        window.commands.layout_.itemAt(i).widget()
+        for i in range(window.commands.layout_.count())
+    ]
+    check(len(caps) == 3, f"trois vignettes : Suppr, Espace, 1 destination ({len(caps)})")
+    check(all(c.cursor().shape() == Qt.PointingHandCursor for c in caps),
+          "les vignettes se signalent comme cliquables")
+    check("touche 1" in caps[2].toolTip(), "l'infobulle rappelle la touche")
+
+    window.show_item(first_untouched(window))
+    name = window.current.name
+    index_before = window.index
+    QTest.mouseClick(caps[2], Qt.LeftButton)
+    settle(app, window)
+    check((tri / "souris" / name).exists(),
+          f"un clic sur la vignette « 1 » envoie « {name} » vers sa destination")
+    check(window.index == index_before + 1, "et enchaîne sur l'élément suivant")
+
+    window.show_item(first_untouched(window))
+    skipped_before = window.stats["skipped"]
+    QTest.mouseClick(caps[1], Qt.LeftButton)
+    pump(app, 0.3)
+    check(window.stats["skipped"] == skipped_before + 1,
+          "un clic sur « Espace » passe l'élément")
+
+    window.show_item(first_untouched(window))
+    trashed = window.current.name
+    QTest.mouseClick(caps[0], Qt.LeftButton)
+    settle(app, window)
+    check(not (window.root / trashed).exists(),
+          f"un clic sur « Suppr » supprime « {trashed} »")
+
+    # Relâcher en dehors de la vignette ne doit rien déclencher.
+    window.show_item(first_untouched(window))
+    intact = window.current.name
+    QTest.mousePress(caps[2], Qt.LeftButton)
+    QTest.mouseRelease(caps[2], Qt.LeftButton, Qt.NoModifier,
+                       QPoint(caps[2].width() + 40, 5))
+    settle(app, window, 5)
+    check(not (tri / "souris" / intact).exists(),
+          "un clic relâché en dehors est sans effet")
+
+    print("\n[17] Transfert en tâche de fond")
     import videosorter.actions as vs_actions
     real_move = vs_actions.move_to
     started = {"at": 0.0}
@@ -172,13 +233,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         return real_move(src, dest)
 
     # Racine dédiée : il faut un élément suivant pour vérifier l'enchaînement.
-    fond_src = base / "fond_src"
-    shutil.rmtree(fond_src, ignore_errors=True)
-    fond_src.mkdir(parents=True, exist_ok=True)
-    for position, source in enumerate(sorted(tri.rglob("*.mp4"))[:2]):
-        shutil.copy2(source, fond_src / f"fond_{position}.mp4")
-    window.start_root(fond_src)
-    wait_for(app, lambda: not window.scanning and len(window.items) == 2, 60)
+    fresh_root(app, window, base, tri, "fond_src", 2)
 
     vs_actions.move_to = slow_move
     try:

@@ -45,6 +45,7 @@ QPushButton#primary:hover { background: #4280f5; }
 QPushButton#danger { background: #3a2226; border-color: #6d2f38; }
 QPushButton#danger:hover { background: #4d2a30; }
 QFrame#keycap { background: #0e1013; border: 1px solid #39414d; border-radius: 6px; }
+QFrame#keycap:hover { background: #1c2430; border-color: #4c8dff; }
 QLabel#keyLetter { font-weight: 700; color: #ffd479; font-size: 13px; }
 QLabel#keyLabel { color: #c3cad3; font-size: 12px; }
 QLabel#statusBanner { border-radius: 6px; padding: 6px 10px; font-weight: 600; }
@@ -503,11 +504,15 @@ class SinglePlayer(QWidget):
 
 
 class KeyCap(QFrame):
-    """Rappel visuel d'un raccourci et de son effet."""
+    """Un raccourci et son effet — utilisable au clavier comme à la souris."""
+
+    clicked = Signal()
 
     def __init__(self, key: str, label: str, tone: str = "", parent=None):
         super().__init__(parent)
         self.setObjectName("keycap")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"{label}   (touche {key})")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(9, 6, 11, 6)
         layout.setSpacing(8)
@@ -515,13 +520,23 @@ class KeyCap(QFrame):
         key_label.setObjectName("keyLetter")
         text = QLabel(elide(label, 26), self)
         text.setObjectName("keyLabel")
-        text.setToolTip(label)
         layout.addWidget(key_label)
         layout.addWidget(text)
+        # Sans cela, un clic tombant sur le texte n'atteindrait pas la vignette.
+        for child in (key_label, text):
+            child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         if tone == "danger":
             key_label.setStyleSheet("color: #ff8a8a;")
         elif tone == "neutral":
             key_label.setStyleSheet("color: #8fd0ff;")
+
+    def mouseReleaseEvent(self, event):
+        # Relâcher en dehors annule le clic, comme sur un vrai bouton.
+        if event.button() == Qt.LeftButton and self.rect().contains(
+            event.position().toPoint()
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
 
 class FlowLayout(QLayout):
@@ -593,7 +608,11 @@ class FlowLayout(QLayout):
 
 
 class CommandBar(QWidget):
-    """Bandeau listant les actions disponibles pour l'élément courant."""
+    """Bandeau des actions disponibles : rappel des touches, et boutons cliquables."""
+
+    deleteRequested = Signal()
+    skipRequested = Signal()
+    moveRequested = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -604,12 +623,26 @@ class CommandBar(QWidget):
             item = self.layout_.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        self.layout_.addWidget(KeyCap("Suppr", delete_label, "danger"))
-        self.layout_.addWidget(KeyCap("Espace", "Passer", "neutral"))
+
+        delete_cap = KeyCap("Suppr", delete_label, "danger")
+        delete_cap.clicked.connect(self.deleteRequested)
+        self.layout_.addWidget(delete_cap)
+
+        skip_cap = KeyCap("Espace", "Passer", "neutral")
+        skip_cap.clicked.connect(self.skipRequested)
+        self.layout_.addWidget(skip_cap)
+
         for dest in destinations:
-            self.layout_.addWidget(
-                KeyCap(dest.get("key", "?").upper(), dest.get("label") or Path(dest["path"]).name)
+            cap = KeyCap(
+                dest.get("key", "?").upper(),
+                dest.get("label") or Path(dest["path"]).name,
             )
+            # dict(dest) fige la destination : sans copie, toutes les vignettes
+            # partageraient la dernière du tour de boucle.
+            cap.clicked.connect(
+                lambda checked=False, d=dict(dest): self.moveRequested.emit(d)
+            )
+            self.layout_.addWidget(cap)
         self.updateGeometry()
 
 

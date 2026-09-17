@@ -206,6 +206,10 @@ class MainWindow(QMainWindow):
         layout.addLayout(middle, 1)
 
         self.commands = CommandBar(sort_page)
+        # Les memes actions qu'au clavier, accessibles a la souris.
+        self.commands.deleteRequested.connect(self.on_command_delete)
+        self.commands.skipRequested.connect(self.on_command_skip)
+        self.commands.moveRequested.connect(self.on_command_move)
         layout.addWidget(self.commands)
 
         hint = QLabel(
@@ -749,6 +753,21 @@ class MainWindow(QMainWindow):
             if dest:
                 return self.act_move(dest)
         super().keyPressEvent(event)
+
+    # ------------------------------------------------------------------
+    # Barre de commandes a la souris
+    # ------------------------------------------------------------------
+    def on_command_delete(self) -> None:
+        self.act_delete()
+        self.setFocus()
+
+    def on_command_skip(self) -> None:
+        self.act_skip()
+        self.setFocus()
+
+    def on_command_move(self, dest: dict) -> None:
+        self.act_move(dest)
+        self.setFocus()
 
     def toggle_mute(self) -> None:
         muted = not self.cfg["muted"]

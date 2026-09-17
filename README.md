@@ -49,6 +49,10 @@ déjà vu est instantané.
 | `Entrée` | Pause / reprise (mode fichier) |
 | `Échap` | Quitter le tri et revenir à l'écran d'accueil |
 
+Chaque vignette de la barre du bas est aussi **un bouton** : un clic déclenche
+exactement la même action que sa touche, et enchaîne sur l'élément suivant. Le
+clavier pour aller vite, la souris quand on n'a pas la main dessus.
+
 **Toutes** les touches simples sont libres pour vos destinations : les commandes
 de l'application sont sur `Ctrl` ou sur des touches de navigation. Cela fait
 36 destinations possibles, attribuées d'office dans l'ordre `1`…`0` puis
@@ -133,9 +137,9 @@ python tests/test_app.py
 
 Fabrique une arborescence avec de vraies vidéos (ffmpeg), puis vérifie l'analyse,
 la répartition des aperçus, les déplacements, les suppressions, les annulations,
-les collisions de noms, les deux modes, la molette, l'arborescence et les
-transferts en tâche de fond — interface comprise, en mode sans affichage.
-63 vérifications.
+les collisions de noms, les deux modes, la molette, l'arborescence, la barre de
+commandes à la souris et les transferts en tâche de fond — interface comprise,
+en mode sans affichage. 71 vérifications.
 
 ```bash
 python tests/test_recycle_and_render.py <dossier_fixture> <sortie.png>
