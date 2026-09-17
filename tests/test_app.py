@@ -13,6 +13,10 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# La console Windows est en cp1252 : sans cela, une flèche ou un accent dans un
+# libellé ferait échouer l'affichage du résultat plutôt que le test lui-même.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
@@ -355,6 +359,79 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.filter_bar.clear()
     pump(app, 0.5)
     check(window.cfg["filter_include"] == "", "le bouton Effacer remet tout à zéro")
+
+    print("\n[21] Entrer dans un dossier, puis en revenir")
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
+    position = [i.name for i in window.items].index("Anniversaire")
+    window.show_item(position)
+    parent_item = window.current
+    check(window.mode == MODE_FOLDERS, "on part du mode dossiers")
+    check(not window.root_bar.enter.isHidden(), "le bouton « Entrer » est proposé")
+    check(window.root_bar.up.isHidden(), "pas de « Remonter » au niveau racine")
+
+    QTest.mouseClick(window.root_bar.enter, Qt.LeftButton)
+    ok = wait_for(app, lambda: not window.scanning and window.root == parent_item.path, 60)
+    check(ok, "la racine devient le dossier sur lequel on était")
+    check(window.mode == MODE_FILES,
+          f"et le mode bascule sur les fichiers (obtenu {window.mode})")
+    check(len(window.items) == 12,
+          f"les 12 vidéos du dossier sont listées (obtenu {len(window.items)})")
+    check(all(i.kind == MODE_FILES for i in window.items), "ce sont bien des fichiers")
+    check(not window.root_bar.up.isHidden(), "« Remonter » apparaît")
+    check("niveau 2" in window.root_bar.root_label.text(),
+          f"la profondeur est indiquée (obtenu {window.root_bar.root_label.text()!r})")
+
+    # On trie une vidéo à l'intérieur, pour vérifier que tout fonctionne en profondeur.
+    inner_dest = tri / "interieur"
+    window.cfg.set_destinations([{"key": "1", "label": "Intérieur", "path": str(inner_dest)}])
+    inner_name = window.current.name
+    QTest.keyClick(window, Qt.Key_1)
+    settle(app, window)
+    check((inner_dest / inner_name).exists(),
+          f"une vidéo du sous-dossier part vers sa destination ({inner_name})")
+
+    QTest.mouseClick(window.root_bar.up, Qt.LeftButton)
+    ok = wait_for(app, lambda: not window.scanning and window.root == root, 60)
+    check(ok, "« Remonter » ramène au dossier parent")
+    check(window.mode == MODE_FOLDERS, "et retrouve le mode dossiers")
+    check(window.current is not None and window.current.name == "Anniversaire",
+          f"sur le dossier d'où l'on était parti (obtenu "
+          f"{window.current.name if window.current else None})")
+    check(window.root_bar.up.isHidden(), "« Remonter » disparaît de nouveau")
+
+    print("\n[22] Profondeur et retour par Échap")
+    QTest.keyClick(window, Qt.Key_Down, Qt.ControlModifier)
+    wait_for(app, lambda: not window.scanning and window.root == parent_item.path, 60)
+    check(len(window.levels) == 1, "Ctrl+↓ entre aussi dans le dossier")
+    QTest.keyClick(window, Qt.Key_Escape)
+    ok = wait_for(app, lambda: not window.scanning and window.root == root, 60)
+    check(ok, "Échap remonte au lieu de quitter le tri")
+    check(window.stack.currentIndex() == 1, "on reste dans l'écran de tri")
+    check(window.levels == [], "la pile de navigation est vidée")
+    QTest.keyClick(window, Qt.Key_Escape)
+    pump(app, 0.4)
+    check(window.stack.currentIndex() == 0,
+          "au niveau racine, Échap quitte bien le tri")
+
+    print("\n[23] Un dossier sans vidéo directe se parcourt en dossiers")
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
+    position = [i.name for i in window.items].index("Sous-dossiers")
+    window.show_item(position)
+    QTest.mouseClick(window.root_bar.enter, Qt.LeftButton)
+    wait_for(app, lambda: not window.scanning and window.root.name == "Sous-dossiers", 60)
+    check(window.mode == MODE_FOLDERS,
+          f"pas de vidéo directe : on descend en mode dossiers (obtenu {window.mode})")
+    check([i.name for i in window.items] == ["interne"],
+          f"le sous-dossier est listé ({[i.name for i in window.items]})")
+    QTest.mouseClick(window.root_bar.enter, Qt.LeftButton)
+    wait_for(app, lambda: not window.scanning and window.root.name == "interne", 60)
+    check(len(window.levels) == 2, "on peut descendre de plusieurs niveaux")
+    check(window.mode == MODE_FILES, "et le dernier niveau contient les vidéos")
+    QTest.keyClick(window, Qt.Key_Up, Qt.ControlModifier)
+    wait_for(app, lambda: not window.scanning and window.root.name == "Sous-dossiers", 60)
+    check(len(window.levels) == 1, "Ctrl+↑ remonte d'un seul niveau")
 
 
 def main() -> int:

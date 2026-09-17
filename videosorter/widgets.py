@@ -901,6 +901,8 @@ class RootBar(QWidget):
     toggleMode = Signal()
     toggleTree = Signal()
     toggleMute = Signal()
+    enterItem = Signal()
+    goUp = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -921,17 +923,30 @@ class RootBar(QWidget):
         mode = QPushButton("Mode")
         tree = QPushButton("Arborescence")
         self.mute = QPushButton("Son coupé")
-        for button in (change, settings, mode, tree, self.mute):
+        self.enter = QPushButton("Entrer ▸")
+        self.enter.setObjectName("enterButton")
+        self.enter.setToolTip(
+            "Trier les vidéos de ce dossier, une par une   (Ctrl+↓)"
+        )
+        self.up = QPushButton("◂ Remonter")
+        self.up.setToolTip("Revenir au dossier parent   (Ctrl+↑ ou Échap)")
+        self.up.hide()
+        for button in (change, settings, mode, tree, self.mute, self.enter, self.up):
             button.setFocusPolicy(Qt.NoFocus)
         change.clicked.connect(self.changeRoot)
         settings.clicked.connect(self.openSettings)
         mode.clicked.connect(self.toggleMode)
         tree.clicked.connect(self.toggleTree)
         self.mute.clicked.connect(self.toggleMute)
+        self.enter.clicked.connect(self.enterItem)
+        self.up.clicked.connect(self.goUp)
 
+        self.root_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(self.root_label, 1)
         layout.addWidget(self.pending)
         layout.addWidget(self.counter)
+        layout.addWidget(self.up)
+        layout.addWidget(self.enter)
         layout.addWidget(self.mute)
         layout.addWidget(tree)
         layout.addWidget(mode)
@@ -941,6 +956,11 @@ class RootBar(QWidget):
     def set_muted(self, muted: bool) -> None:
         self.mute.setText("Son coupé" if muted else "Son actif")
         self.mute.setToolTip("Ctrl+M")
+
+    def set_navigation(self, can_enter: bool, nested: bool) -> None:
+        """N'offre « Entrer » que s'il y a un dossier ouvrable sous le curseur."""
+        self.enter.setVisible(can_enter)
+        self.up.setVisible(nested)
 
     def set_pending(self, count: int) -> None:
         """Rappelle discrètement que des copies se poursuivent en arrière-plan."""

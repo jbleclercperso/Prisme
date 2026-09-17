@@ -17,7 +17,7 @@ from .config import Config
 from .media import PreviewManager, Tools, probe
 from .scan import (
     MODE_FILES, MODE_FOLDERS, ScanThread, detect_mode, human_duration,
-    human_size,
+    human_size, list_entries,
 )
 from .transfer import Transfer, TransferQueue
 from .tree import TreePanel
@@ -115,6 +115,9 @@ class MainWindow(QMainWindow):
         self.stats = {"moved": 0, "deleted": 0, "skipped": 0}
         self.scan_thread: ScanThread | None = None
         self.scanning = False
+        # Pile des dossiers traverses, pour pouvoir remonter d'ou l'on vient.
+        self.levels: list = []
+        self._restore_id = ""
 
         self.transfers = TransferQueue(self)
         self.transfers.finished.connect(self.on_transfer_finished)
@@ -154,6 +157,8 @@ class MainWindow(QMainWindow):
         self.root_bar.toggleMode.connect(self.toggle_mode)
         self.root_bar.toggleTree.connect(self.toggle_tree)
         self.root_bar.toggleMute.connect(self.toggle_mute)
+        self.root_bar.enterItem.connect(self.enter_current)
+        self.root_bar.goUp.connect(self.go_up)
         self.root_bar.set_muted(self.cfg["muted"])
         layout.addWidget(self.root_bar)
 
@@ -225,7 +230,7 @@ class MainWindow(QMainWindow):
             "←/→ naviguer   ·   molette avancer/reculer   ·   Ctrl+Z annuler   "
             "·   Ctrl+F filtrer   ·   Ctrl+T arborescence   ·   Ctrl+M son   "
             "·   Ctrl+O ouvrir   ·   Ctrl+D destinations   ·   Entrée pause   "
-            "·   Échap quitter le tri",
+            "·   Ctrl+↓ entrer dans le dossier   ·   Échap remonter",
             sort_page,
         )
         hint.setObjectName("hint")
@@ -234,7 +239,9 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(sort_page)
 
         self.done_page = DonePage(self)
-        self.done_page.rescan.clicked.connect(lambda: self.start_root(self.root))
+        self.done_page.rescan.clicked.connect(
+            lambda: self.start_root(self.root, self.mode, reset_levels=False)
+        )
         self.done_page.change.clicked.connect(self.choose_root)
         self.stack.addWidget(self.done_page)
 
@@ -251,11 +258,15 @@ class MainWindow(QMainWindow):
         if chosen:
             self.start_root(Path(chosen))
 
-    def start_root(self, root: Path | None, mode: str = "") -> None:
+    def start_root(self, root: Path | None, mode: str = "",
+                   reset_levels: bool = True, restore_id: str = "") -> None:
         if root is None or not Path(root).is_dir():
             QMessageBox.warning(self, "Dossier introuvable", f"{root} n'existe plus.")
             return
         self.stop_scan()
+        if reset_levels:
+            self.levels = []
+        self._restore_id = restore_id
         self.root = Path(root)
         self.mode = mode or detect_mode(self.root, self.cfg["skip_hidden"])
         self.all_items = []
@@ -270,8 +281,12 @@ class MainWindow(QMainWindow):
         self.cfg.save()
         self.welcome.set_recent(self.cfg["recent_roots"])
 
-        self.root_bar.root_label.setText(
-            f"{self.root}   ·   mode {'dossiers' if self.mode == MODE_FOLDERS else 'fichiers'}"
+        depth = f"   ·   niveau {len(self.levels) + 1}" if self.levels else ""
+        mode_name = "dossiers" if self.mode == MODE_FOLDERS else "fichiers"
+        self.root_bar.root_label.setText(f"{self.root}   ·   mode {mode_name}{depth}")
+        self.root_bar.root_label.setToolTip(str(self.root))
+        self.root_bar.set_navigation(
+            can_enter=self.mode == MODE_FOLDERS, nested=bool(self.levels)
         )
         self.commands.rebuild(self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer"))
         self.viewer.setCurrentWidget(self.grid if self.mode == MODE_FOLDERS else self.single)
@@ -296,10 +311,49 @@ class MainWindow(QMainWindow):
         self.scanning = False
 
     def toggle_mode(self) -> None:
+        """Force l'autre mode sur la racine courante, sans changer de dossier."""
         if self.root is None:
             return
         new_mode = MODE_FILES if self.mode == MODE_FOLDERS else MODE_FOLDERS
-        self.start_root(self.root, new_mode)
+        self.start_root(self.root, new_mode, reset_levels=False)
+
+    # ------------------------------------------------------------------
+    # Descendre dans un dossier, et en revenir
+    # ------------------------------------------------------------------
+    def enter_current(self) -> None:
+        """Ouvre le dossier affiche pour en trier le contenu piece par piece.
+
+        Le cas vise : un dossier trop melange pour recevoir une seule etiquette.
+        On y entre en mode fichier s'il contient des videos directement, sinon
+        on laisse la detection choisir — un dossier de dossiers se parcourt.
+        """
+        item = self.current
+        if item is None or item.kind != MODE_FOLDERS or item.locked:
+            return
+        target = Path(item.path)
+        if not target.is_dir():
+            self.show_banner(f"Introuvable : {item.name}", "#3a2226")
+            return
+
+        direct = list_entries(target, MODE_FILES, self.cfg["skip_hidden"])
+        mode = MODE_FILES if direct else ""
+        self.levels.append({
+            "root": self.root,
+            "mode": self.mode,
+            "item_id": item.item_id,
+        })
+        self.start_root(target, mode, reset_levels=False)
+
+    def go_up(self) -> bool:
+        """Remonte d'un niveau, en retrouvant le dossier d'ou l'on etait parti."""
+        if not self.levels:
+            return False
+        level = self.levels.pop()
+        self.start_root(
+            level["root"], level["mode"],
+            reset_levels=False, restore_id=level["item_id"],
+        )
+        return True
 
     def on_scan_progress(self, done: int, total: int, name: str) -> None:
         self.progress.setRange(0, max(1, total))
@@ -314,6 +368,10 @@ class MainWindow(QMainWindow):
             return
         first = not self.items
         self.items.append(item)
+        if self._restore_id and item.item_id == self._restore_id:
+            self._restore_id = ""
+            self.show_item(len(self.items) - 1)
+            return
         if first:
             self.show_item(0)
             return
@@ -407,6 +465,11 @@ class MainWindow(QMainWindow):
         elif item.processed:
             tone = "#22331f" if item.status == "moved" else "#3a2226"
             self.show_banner(f"Déjà traité : {item.status_detail}", tone)
+
+        self.root_bar.set_navigation(
+            can_enter=item.kind == MODE_FOLDERS and not item.locked,
+            nested=bool(self.levels),
+        )
 
         viewer = self.grid if item.kind == MODE_FOLDERS else self.single
         self.viewer.setCurrentWidget(viewer)
@@ -779,11 +842,17 @@ class MainWindow(QMainWindow):
     # Clavier
     # ------------------------------------------------------------------
     def keyPressEvent(self, event):
-        if self.stack.currentIndex() != PAGE_SORT:
-            return super().keyPressEvent(event)
-
         key = event.key()
         ctrl = bool(event.modifiers() & Qt.ControlModifier)
+
+        if self.stack.currentIndex() == PAGE_DONE:
+            # Le tri d'un sous-dossier fini, on revient d'ou l'on venait.
+            if key == Qt.Key_Escape or (ctrl and key == Qt.Key_Up):
+                if self.go_up():
+                    return
+            return super().keyPressEvent(event)
+        if self.stack.currentIndex() != PAGE_SORT:
+            return super().keyPressEvent(event)
 
         # Les commandes de l'application sont toutes sur Ctrl ou sur une touche
         # de navigation : chiffres et lettres restent libres pour les destinations.
@@ -800,6 +869,11 @@ class MainWindow(QMainWindow):
                 return self.edit_destinations()
             if key == Qt.Key_F:
                 return self.focus_filter()
+            if key == Qt.Key_Down:
+                return self.enter_current()
+            if key == Qt.Key_Up:
+                self.go_up()
+                return
             return super().keyPressEvent(event)
 
         if key in (Qt.Key_Delete, Qt.Key_Backspace):
@@ -811,6 +885,8 @@ class MainWindow(QMainWindow):
         if key == Qt.Key_Left:
             return self.show_item(self.index - 1)
         if key == Qt.Key_Escape:
+            if self.go_up():
+                return
             self.stop_scan()
             self._release_media()
             self.stack.setCurrentIndex(PAGE_WELCOME)

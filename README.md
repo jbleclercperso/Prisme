@@ -14,7 +14,20 @@ L'application regarde ce que contient la racine et choisit toute seule :
 | Des sous-dossiers | **dossiers** | Un sous-dossier à la fois, avec 10 aperçus pris dans ses vidéos (y compris celles des sous-dossiers imbriqués) |
 | Uniquement des vidéos | **fichiers** | Une vidéo à la fois, lue en grand, avec une pellicule de 10 instants |
 
-Le bouton **Mode** force l'autre mode si la détection ne correspond pas à l'envie du moment.
+Le bouton **Mode** force l'autre mode si la détection ne correspond pas à l'envie
+du moment.
+
+### Entrer dans un dossier
+
+Un dossier trop mélangé pour recevoir une seule étiquette ? **Entrer** (ou
+`Ctrl+↓`) en fait la nouvelle racine et bascule sur ses vidéos, à trier une par
+une. **Remonter** (`Ctrl+↑`, ou `Échap`) revient au dossier parent, **et
+repositionne le curseur sur le dossier d'où l'on était parti** — le parcours
+reprend là où il s'était arrêté.
+
+On peut descendre de plusieurs niveaux : l'entête indique la profondeur. Si le
+dossier ouvert ne contient pas de vidéo directement mais d'autres dossiers, on y
+entre en mode dossiers, et l'on continue à descendre.
 
 ## Les aperçus
 
@@ -47,12 +60,14 @@ déjà vu est instantané.
 | **molette** | Avance ou recule dans la vidéo survolée (`Ctrl` pour des sauts six fois plus grands) |
 | `Ctrl+Z` | Annuler la dernière action |
 | `Ctrl+F` | Aller au champ de filtre |
+| `Ctrl+↓` | Entrer dans le dossier affiché pour en trier les vidéos |
+| `Ctrl+↑` | Remonter au dossier parent |
 | `Ctrl+T` | Afficher ou masquer l'arborescence |
 | `Ctrl+M` | Couper ou remettre le son |
 | `Ctrl+O` | Ouvrir l'élément courant dans l'explorateur |
 | `Ctrl+D` | Ouvrir la configuration des destinations |
 | `Entrée` | Pause / reprise (mode fichier) |
-| `Échap` | Quitter le tri et revenir à l'écran d'accueil |
+| `Échap` | Remonter d'un niveau, ou quitter le tri si l'on est à la racine |
 
 Chaque vignette de la barre du bas est aussi **un bouton** : un clic déclenche
 exactement la même action que sa touche, et enchaîne sur l'élément suivant. Le
@@ -160,9 +175,9 @@ python tests/test_app.py
 Fabrique une arborescence avec de vraies vidéos (ffmpeg), puis vérifie l'analyse,
 la répartition des aperçus, les déplacements, les suppressions, les annulations,
 les collisions de noms, les deux modes, la molette, l'arborescence, la barre de
-commandes à la souris, le filtre par nom, les métadonnées des vignettes et les
-transferts en tâche de fond — interface comprise, en mode sans affichage.
-108 vérifications.
+commandes à la souris, le filtre par nom, les métadonnées des vignettes, la
+descente dans les sous-dossiers et les transferts en tâche de fond — interface
+comprise, en mode sans affichage. 132 vérifications.
 
 ```bash
 python tests/test_recycle_and_render.py <dossier_fixture> <sortie.png>
