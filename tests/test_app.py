@@ -1144,6 +1144,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           f"et rien d'autre ({[i.name for i in window.items]})")
 
     print("\n[49] Un onglet à trois entrées dit où l'on est")
+    # Sans mode imposé : c'est le chemin de l'écran d'accueil, celui que prend
+    # « Choisir un dossier racine ». Il doit aboutir comme les autres.
+    window.start_root(tagged)
+    ok = wait_for(app, lambda: not window.scanning and bool(window.items), 60)
+    check(ok, "choisir une racine, sans rien préciser, ouvre bien le tri")
+
     window.set_tab(TAB_FOLDERS)
     window.start_root(tagged, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning, 60)

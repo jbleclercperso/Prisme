@@ -121,6 +121,11 @@ class MainWindow(QMainWindow):
         self.index = 0                 # index dans self.items
         # Un seul onglet dit ou l'on est : dossiers, videos, ou edition.
         self.tab = cfg["tab"] if cfg["tab"] in TABS else TAB_FOLDERS
+        # L'onglet d'edition ne dit pas ce qu'on regarde : on garde a part la
+        # collection en cours, dossiers ou videos, pour la retrouver en sortant.
+        self.content = (CONTENT_VIDEOS if self.tab == TAB_VIDEOS else
+                        CONTENT_FOLDERS if self.tab == TAB_FOLDERS else
+                        cfg["content"])
         self.tag_family = cfg["tag_family"]
         self.tags: list = list(cfg["tags"])
         self.mode = MODE_FOLDERS
