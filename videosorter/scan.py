@@ -58,6 +58,32 @@ class Item:
         return self.processed or self.pending
 
 
+def known_media(item) -> tuple:
+    """(durée totale connue, hauteur maximale connue) d'après le cache de sondage.
+
+    Un dossier n'est jamais sondé en entier : on ne connaît que les vidéos déjà
+    regardées pour un aperçu. Les filtres chiffrés s'appuient donc sur ce qu'on
+    sait, et laissent passer ce dont on ne sait rien plutôt que de le masquer.
+    """
+    from .media import PROBE_CACHE
+    total = 0.0
+    height = 0
+    known = 0
+    for video in item.videos:
+        info = PROBE_CACHE.get(Path(video))
+        if not info:
+            continue
+        known += 1
+        total += info.get("duration") or 0.0
+        height = max(height, info.get("height") or 0)
+    if not known:
+        return (0.0, 0)
+    # Extrapole la durée du dossier à partir de l'échantillon connu.
+    if item.kind == MODE_FOLDERS and known < len(item.videos):
+        total = total / known * len(item.videos)
+    return (total, height)
+
+
 def human_size(num: float) -> str:
     for unit in ("o", "Ko", "Mo", "Go", "To"):
         if num < 1024 or unit == "To":

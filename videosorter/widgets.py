@@ -14,7 +14,8 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout, QLineEdit,
-    QListView, QMessageBox, QPushButton, QSizePolicy, QTreeView, QTreeWidget,
+    QComboBox, QListView, QMessageBox, QPushButton, QSizePolicy, QTreeView,
+    QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -55,8 +56,12 @@ QLabel#tileDuration { background: rgba(0,0,0,0.78); color: #ffffff;
                      font-size: 13px; font-weight: 700; }
 QLabel#tileCaption { color: #9aa6b4; font-size: 11px; font-weight: 600; }
 QLabel#tilePlaceholder { color: #59616d; font-size: 12px; }
-QFrame#playRail { background: rgba(255,255,255,0.14); border: 0; }
-QFrame#playProgress { background: #4c8dff; border: 0; }
+QFrame#playRail { background: rgba(255,255,255,0.22); border: 0;
+                  border-radius: 4px; }
+QFrame#playProgress { background: #5c9dff; border: 0; border-radius: 4px; }
+QLabel#remaining { background: rgba(0,0,0,0.82); color: #ffffff;
+                   border-radius: 5px; padding: 3px 9px;
+                   font-size: 14px; font-weight: 700; }
 QPushButton { background: #232932; border: 1px solid #323a45; border-radius: 6px;
               padding: 6px 12px; color: #e6e8ea; }
 QPushButton:hover { background: #2c333e; }
@@ -79,6 +84,10 @@ QLineEdit { background: #0e1013; border: 1px solid #323a45; border-radius: 6px;
             padding: 5px 8px; }
 QLineEdit:focus { border-color: #4c8dff; }
 QLineEdit#excludeEdit:focus { border-color: #d4707c; }
+QComboBox { background: #232932; border: 1px solid #323a45;
+            border-radius: 6px; padding: 5px 8px; }
+QComboBox QAbstractItemView { background: #1b1f26; border: 1px solid #323a45;
+                              selection-background-color: #2f6fed; }
 QProgressBar { background: #1b1f26; border: 0; border-radius: 2px; }
 QProgressBar::chunk { background: #2f6fed; border-radius: 2px; }
 """
@@ -422,7 +431,7 @@ class PreviewGrid(QWidget):
             return
         rect = self.tiles[self.hovered_slot].geometry()
         width = max(1, int(rect.width() * fraction))
-        self.progress.setGeometry(rect.x(), rect.bottom() - 21, width, 3)
+        self.progress.setGeometry(rect.x(), rect.bottom() - 24, width, 5)
         self.progress.raise_()
         self.progress.show()
 
@@ -500,6 +509,13 @@ class SinglePlayer(QWidget):
         self.progress.setObjectName("playProgress")
         self.progress.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
+        # Le temps restant, en permanence : c'est la question qu'on se pose en
+        # regardant, bien plus que la position absolue.
+        self.remaining = QLabel("", self)
+        self.remaining.setObjectName("remaining")
+        self.remaining.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.remaining.hide()
+
         strip = QWidget(self)
         self.strip_layout = QHBoxLayout(strip)
         self.strip_layout.setContentsMargins(0, 0, 0, 0)
@@ -570,17 +586,35 @@ class SinglePlayer(QWidget):
             self.player.setPosition(0)
             self.player.play()
 
+    RAIL_HEIGHT = 8
+
     def _on_position(self, position: int) -> None:
         duration = self.player.duration()
         fraction = (position / duration) if duration > 0 else 0.0
         area = self.video_area.geometry()
-        self.progress_rail.setGeometry(area.x(), area.bottom() - 4, area.width(), 4)
+        top = area.bottom() - self.RAIL_HEIGHT - 1
+        self.progress_rail.setGeometry(area.x(), top, area.width(), self.RAIL_HEIGHT)
         self.progress.setGeometry(
-            area.x(), area.bottom() - 4,
-            max(0, int(area.width() * max(0.0, min(1.0, fraction)))), 4,
+            area.x(), top,
+            max(0, int(area.width() * max(0.0, min(1.0, fraction)))), self.RAIL_HEIGHT,
         )
+        self.progress_rail.show()
+        self.progress.show()
         self.progress_rail.raise_()
         self.progress.raise_()
+
+        if duration > 0:
+            left = max(0, duration - position) / 1000.0
+            self.remaining.setText(f"−{human_duration(left)}")
+            self.remaining.adjustSize()
+            self.remaining.move(
+                area.right() - self.remaining.width() - 12,
+                top - self.remaining.height() - 8,
+            )
+            self.remaining.raise_()
+            self.remaining.show()
+        else:
+            self.remaining.hide()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -860,7 +894,7 @@ class StarStrip(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(size * 5 + 8, size + 4)
-        self.setToolTip("Noter de 1 à 5 étoiles   (Ctrl+1…5, Ctrl+0 pour effacer)")
+        self.setToolTip("Noter de 1 à 5 étoiles   (touches 1 à 5, 0 pour effacer)")
 
     def set_value(self, value: int) -> None:
         self.value = max(0, min(5, int(value)))
@@ -954,6 +988,110 @@ class PageBar(QWidget):
     def set_sort(self, mode: str) -> None:
         labels = {"": "Ordre du dossier", "desc": "Durée ▼", "asc": "Durée ▲"}
         self.sort.setText(labels.get(mode, "Durée ▼"))
+
+
+class AdvancedFilterBar(QWidget):
+    """Filtres chiffrés : durée, résolution, note, avec des opérateurs écrits.
+
+    « plus longue que » se lit mieux que « > » quand on revient sur un réglage
+    posé la veille.
+    """
+
+    changed = Signal(dict)
+
+    RESOLUTIONS = (
+        ("peu importe", 0), ("360p", 360), ("480p", 480), ("720p", 720),
+        ("1080p", 1080), ("1440p", 1440), ("4K", 2160),
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        def label(text):
+            widget = QLabel(text, self)
+            widget.setObjectName("hint")
+            return widget
+
+        self.duration_op = QComboBox(self)
+        self.duration_op.addItem("peu importe", "")
+        self.duration_op.addItem("plus longue que", "gt")
+        self.duration_op.addItem("plus courte que", "lt")
+        self.duration_value = QLineEdit(self)
+        self.duration_value.setPlaceholderText("minutes")
+        self.duration_value.setFixedWidth(80)
+
+        self.resolution_op = QComboBox(self)
+        self.resolution_op.addItem("au moins", "gte")
+        self.resolution_op.addItem("au plus", "lte")
+        self.resolution_value = QComboBox(self)
+        for text, height in self.RESOLUTIONS:
+            self.resolution_value.addItem(text, height)
+
+        self.stars_value = QComboBox(self)
+        self.stars_value.addItem("peu importe", -1)
+        for count in range(6):
+            self.stars_value.addItem("★" * count if count else "aucune", count)
+
+        layout.addWidget(label("Durée"))
+        layout.addWidget(self.duration_op)
+        layout.addWidget(self.duration_value)
+        layout.addSpacing(10)
+        layout.addWidget(label("Résolution"))
+        layout.addWidget(self.resolution_op)
+        layout.addWidget(self.resolution_value)
+        layout.addSpacing(10)
+        layout.addWidget(label("Note au moins"))
+        layout.addWidget(self.stars_value)
+        layout.addStretch(1)
+
+        self.reset_button = QPushButton("Tout afficher", self)
+        self.reset_button.setFocusPolicy(Qt.NoFocus)
+        self.reset_button.clicked.connect(self.reset)
+        layout.addWidget(self.reset_button)
+
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(220)
+        self.timer.timeout.connect(self._emit)
+        for widget in (self.duration_op, self.resolution_op,
+                       self.resolution_value, self.stars_value):
+            widget.currentIndexChanged.connect(lambda _i: self.timer.start())
+        self.duration_value.textChanged.connect(lambda _t: self.timer.start())
+
+    def criteria(self) -> dict:
+        try:
+            minutes = float(self.duration_value.text().replace(",", "."))
+        except ValueError:
+            minutes = 0.0
+        return {
+            "duration_op": self.duration_op.currentData() if minutes > 0 else "",
+            "duration_s": minutes * 60,
+            "resolution_op": self.resolution_op.currentData(),
+            "resolution": self.resolution_value.currentData(),
+            "stars": self.stars_value.currentData(),
+        }
+
+    def _emit(self) -> None:
+        self.changed.emit(self.criteria())
+
+    def is_active(self) -> bool:
+        rules = self.criteria()
+        return bool(rules["duration_op"]) or rules["resolution"] > 0 \
+            or rules["stars"] >= 0
+
+    def reset(self) -> None:
+        for widget in (self.duration_op, self.resolution_op,
+                       self.resolution_value, self.stars_value):
+            widget.blockSignals(True)
+            widget.setCurrentIndex(0)
+            widget.blockSignals(False)
+        self.duration_value.blockSignals(True)
+        self.duration_value.clear()
+        self.duration_value.blockSignals(False)
+        self._emit()
 
 
 class KeyCap(QFrame):
@@ -1084,6 +1222,10 @@ class CommandBar(QWidget):
         skip_cap = KeyCap("Espace", "Passer", "neutral")
         skip_cap.clicked.connect(self.skipRequested)
         self.layout_.addWidget(skip_cap)
+
+        stars_cap = KeyCap("0–5", "Noter", "neutral")
+        stars_cap.setToolTip("Les chiffres notent ; les destinations vont de 6 à z")
+        self.layout_.addWidget(stars_cap)
 
         for dest in destinations:
             cap = KeyCap(
@@ -1316,6 +1458,11 @@ class DestinationsDialog(QDialog):
             if not key:
                 rejected.append(f"{label} : aucune touche")
                 continue
+            if key in RESERVED_KEYS:
+                rejected.append(
+                    f"{label} : la touche « {key} » sert à noter"
+                )
+                continue
             if key in seen:
                 rejected.append(f"{label} : la touche « {key} » est déjà prise")
                 continue
@@ -1346,6 +1493,8 @@ class RootBar(QWidget):
     openTrash = Signal()
     toggleBoard = Signal()
     pickRandom = Signal()
+    goBack = Signal()
+    columnsChanged = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1366,6 +1515,12 @@ class RootBar(QWidget):
         mode = QPushButton("Mode")
         tree = QPushButton("Arborescence")
         self.mute = QPushButton("Son coupé")
+        self.back = QPushButton("◂ Précédent", self)
+        self.back.setToolTip("Revenir à l'endroit précédent   (Alt+←)")
+        self.back.setEnabled(False)
+        self.density = QComboBox(self)
+        self.density.setToolTip("Nombre de cartes par rangée")
+        self.density.hide()
         self.board = QPushButton("Planche", self)
         self.board.setToolTip("Voir les éléments en cartes   (Ctrl+P)")
         self.random = QPushButton("Au hasard", self)
@@ -1382,7 +1537,8 @@ class RootBar(QWidget):
         self.up.setToolTip("Revenir au dossier parent   (Ctrl+↑ ou Échap)")
         self.up.hide()
         for button in (change, settings, mode, tree, self.mute, self.enter,
-                       self.up, self.trash, self.board, self.random):
+                       self.up, self.trash, self.board, self.random, self.back,
+                       self.density):
             button.setFocusPolicy(Qt.NoFocus)
         change.clicked.connect(self.changeRoot)
         settings.clicked.connect(self.openSettings)
@@ -1394,13 +1550,19 @@ class RootBar(QWidget):
         self.trash.clicked.connect(self.openTrash)
         self.board.clicked.connect(self.toggleBoard)
         self.random.clicked.connect(self.pickRandom)
+        self.back.clicked.connect(self.goBack)
+        self.density.currentIndexChanged.connect(
+            lambda _i: self.columnsChanged.emit(int(self.density.currentData()))
+        )
 
         self.root_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(self.root_label, 1)
         layout.addWidget(self.pending)
         layout.addWidget(self.counter)
         layout.addWidget(self.trash)
+        layout.addWidget(self.density)
         layout.addWidget(self.random)
+        layout.addWidget(self.back)
         layout.addWidget(self.board)
         layout.addWidget(self.up)
         layout.addWidget(self.enter)
@@ -1414,7 +1576,20 @@ class RootBar(QWidget):
         self.mute.setText("Son coupé" if muted else "Son actif")
         self.mute.setToolTip("Ctrl+M")
 
+    def set_columns_choices(self, choices, current: int) -> None:
+        self.density.blockSignals(True)
+        self.density.clear()
+        for count in choices:
+            self.density.addItem(f"{count} par rangée", count)
+        index = self.density.findData(current)
+        self.density.setCurrentIndex(index if index >= 0 else 0)
+        self.density.blockSignals(False)
+
+    def set_can_go_back(self, can: bool) -> None:
+        self.back.setEnabled(can)
+
     def set_board(self, active: bool) -> None:
+        self.density.setVisible(active)
         self.board.setText("Fiche" if active else "Planche")
         self.board.setToolTip(
             "Revenir à l'élément unique   (Ctrl+P)" if active

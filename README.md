@@ -62,7 +62,8 @@ déjà vu est instantané.
 |---|---|
 | `Suppr` / `Retour arrière` | Envoie à la corbeille, puis passe au suivant |
 | `Espace` | Passer (je ne sais pas encore), sans rien toucher |
-| `1`…`0`, `a`…`z` | Déplace vers la destination configurée, puis passe au suivant |
+| `0`…`5` | Note l'élément de 0 à 5 étoiles |
+| `6`…`9`, `a`…`z` | Déplace vers la destination configurée, puis passe au suivant |
 | `←` / `→` | Revenir en arrière / avancer sans décider |
 | **molette** | Avance ou recule dans la vidéo survolée |
 | **Ctrl+molette** | Zoome sur l'image, centré là où pointe la souris (×1 à ×6) |
@@ -70,9 +71,9 @@ déjà vu est instantané.
 | `Ctrl+F` | Aller au champ de filtre |
 | `Ctrl+P` | Basculer entre la fiche unique et la planche |
 | `Ctrl+H` | Se placer sur un élément au hasard |
-| `Ctrl+0`…`5` | Noter l'élément courant |
 | `Ctrl+←/→` | Page d'aperçus précédente / suivante |
 | `Ctrl+B` | Ouvrir la corbeille de session |
+| `Alt+←` | Revenir à l'endroit précédemment visité |
 | `Ctrl+R` | Réanalyser tout le disque, sans se fier au cache |
 | `Ctrl+↓` | Entrer dans le dossier affiché pour en trier les vidéos |
 | `Ctrl+↑` | Remonter au dossier parent |
@@ -87,10 +88,10 @@ Chaque vignette de la barre du bas est aussi **un bouton** : un clic déclenche
 exactement la même action que sa touche, et enchaîne sur l'élément suivant. Le
 clavier pour aller vite, la souris quand on n'a pas la main dessus.
 
-**Toutes** les touches simples sont libres pour vos destinations : les commandes
-de l'application sont sur `Ctrl` ou sur des touches de navigation. Cela fait
-36 destinations possibles, attribuées d'office dans l'ordre `1`…`0` puis
-`a z e r t y…` (ordre du clavier AZERTY). La barre de commandes passe à la ligne,
+Les commandes de l'application sont sur `Ctrl` ou sur des touches de
+navigation, ce qui laisse 30 destinations possibles, attribuées d'office dans l'ordre `6 7 8 9` puis
+`a z e r t y…` (ordre du clavier AZERTY) : **les chiffres 0 à 5 sont réservés à
+la notation**, une main note pendant que l'autre range. La barre de commandes passe à la ligne,
 elle ne déborde jamais.
 
 ## Vitesse de l'analyse
@@ -125,7 +126,19 @@ envoyer l'élément**. Les sous-dossiers deviennent des catégories sans rien de
 plus : ouvrir une carte réaffiche une planche.
 
 **Au hasard** (`Ctrl+H`) se place sur un élément non encore traité, dans l'une
-ou l'autre vue.
+ou l'autre vue. Un **sélecteur de densité** choisit de 2 à 8 cartes par rangée :
+moins de colonnes, donc des cartes plus grandes.
+
+Les filtres chiffrés accompagnent la planche : durée *plus longue que* / *plus
+courte que*, résolution *au moins* / *au plus*, note *au moins*. La durée d'un
+dossier n'est pas mesurée mais **extrapolée** à partir des vidéos déjà sondées
+pour les aperçus — sonder une collection entière coûterait des heures sur un
+NAS. Un élément dont on ne sait rien passe le filtre plutôt que de disparaître
+sans explication, et l'estimation se précise à mesure que vous parcourez.
+
+**◂ Précédent** (`Alt+←`) revient à l'endroit visité juste avant, y compris
+après un déplacement latéral — à distinguer de **Remonter**, qui monte d'un
+niveau dans l'arborescence.
 
 ## Notation
 
@@ -134,7 +147,8 @@ Survoler montre la note qui serait posée, cliquer la pose, et **rappuyer sur la
 même valeur l'efface** — pas besoin d'un bouton de remise à zéro. Au clavier :
 `Ctrl+1` à `Ctrl+5`, `Ctrl+0` pour effacer.
 
-Les notes vivent dans `%LOCALAPPDATA%\VideoSorteratings.json` : rien n'est
+Les notes vivent dans `%LOCALAPPDATA%\VideoSorter
+atings.json` : rien n'est
 écrit dans vos dossiers. Elles **suivent l'élément quand il est déplacé**, sans
 quoi ranger une vidéo notée lui aurait fait perdre sa note.
 
@@ -241,7 +255,9 @@ les collisions de noms, les deux modes, la molette, l'arborescence, la barre de
 commandes à la souris, le filtre par nom, les métadonnées des vignettes, la
 descente dans les sous-dossiers, le cache d'analyse, la gestion des destinations,
 la corbeille de session, la vue planche, la notation, le zoom et les transferts
-en tâche de fond — interface comprise, en mode sans affichage. 204 vérifications.
+la densité de la planche, les filtres chiffrés, l'historique de navigation et
+les transferts en tâche de fond — interface comprise, en mode sans affichage.
+228 vérifications.
 
 La suite porte un garde-fou : passé un délai, elle imprime la pile plutôt que
 d'attendre indéfiniment. Une interface graphique arrêtée sur une boîte de

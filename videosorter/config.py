@@ -23,8 +23,10 @@ VIDEO_EXTS = {
 # Ordre d'attribution automatique des touches : les chiffres d'abord, puis les
 # lettres dans l'ordre du clavier AZERTY. Toutes les lettres sont disponibles,
 # les commandes de l'application etant sur Ctrl ou sur des touches de navigation.
-KEY_ORDER = "1234567890azertyuiopqsdfghjklmwxcvbn"
-RESERVED_KEYS: set = set()
+# 0 a 5 sont la notation : une main sur les chiffres note, l'autre range.
+# Les destinations prennent donc la suite, a partir de 6.
+KEY_ORDER = "6789azertyuiopqsdfghjklmwxcvbn"
+RESERVED_KEYS = {"0", "1", "2", "3", "4", "5"}
 
 DEFAULTS = {
     "root": "",
@@ -47,6 +49,7 @@ DEFAULTS = {
     "use_scan_cache": True,      # reutiliser l analyse precedente
     "sort_mode": "",             # "" | "desc" | "asc" : classement des apercus
     "board_view": False,         # vue planche plutot que fiche unique
+    "board_columns": 5,          # cartes par rangee en vue planche
 }
 
 

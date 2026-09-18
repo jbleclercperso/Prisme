@@ -12,21 +12,21 @@ from PySide6.QtWidgets import (
 )
 
 from . import actions
-from .board import BoardView
+from .board import COLUMN_CHOICES, BoardView
 from .actions import ActionError, HistoryEntry
 from .config import Config
 from .media import PreviewManager, Tools, page_count, probe
 from .ratings import Ratings
 from .scan import (
     MODE_FILES, MODE_FOLDERS, ScanThread, detect_mode, human_duration,
-    human_resolution, human_size, list_entries,
+    human_resolution, human_size, known_media, list_entries,
 )
 from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
     STYLESHEET, CommandBar, DestinationsDialog, FilterBar, PageBar, PreviewGrid,
-    RootBar, SinglePlayer, StarStrip, TrashDialog,
+    AdvancedFilterBar, RootBar, SinglePlayer, StarStrip, TrashDialog,
 )
 
 PAGE_WELCOME, PAGE_SORT, PAGE_DONE = 0, 1, 2
@@ -116,6 +116,7 @@ class MainWindow(QMainWindow):
         self.plans: dict = {}       # cle "chemin@page" -> plan d'apercus
         self.pages: dict = {}       # page d'apercus courante par element
         self.sort_mode = ""         # "" | "desc" | "asc" : classement des apercus
+        self.criteria: dict = {}    # filtres chiffres de la planche
         self.history: list = []
         self.stats = {"moved": 0, "deleted": 0, "skipped": 0}
         self.scan_thread: ScanThread | None = None
@@ -123,6 +124,9 @@ class MainWindow(QMainWindow):
         # Pile des dossiers traverses, pour pouvoir remonter d'ou l'on vient.
         self.levels: list = []
         self._restore_id = ""
+        # Historique de navigation, distinct de la pile des niveaux : il retient
+        # les endroits visites, y compris lateralement, pour un vrai « Precedent ».
+        self.visited: list = []
 
         self.ratings = Ratings(parent=self)
         self.board_view = self.cfg["board_view"]
@@ -173,6 +177,9 @@ class MainWindow(QMainWindow):
         self.root_bar.openTrash.connect(self.open_trash)
         self.root_bar.toggleBoard.connect(self.toggle_board)
         self.root_bar.pickRandom.connect(self.pick_random)
+        self.root_bar.goBack.connect(self.go_back)
+        self.root_bar.columnsChanged.connect(self.set_board_columns)
+        self.root_bar.set_columns_choices(COLUMN_CHOICES, self.cfg["board_columns"])
         self.root_bar.set_board(self.board_view)
         self.root_bar.set_muted(self.cfg["muted"])
         layout.addWidget(self.root_bar)
@@ -182,6 +189,11 @@ class MainWindow(QMainWindow):
         self.filter_bar.released.connect(self.setFocus)
         self.filter_bar.set_terms(self.cfg["filter_include"], self.cfg["filter_exclude"])
         layout.addWidget(self.filter_bar)
+
+        self.advanced_filter = AdvancedFilterBar(sort_page)
+        self.advanced_filter.changed.connect(self.on_advanced_filter)
+        self.advanced_filter.hide()
+        layout.addWidget(self.advanced_filter)
 
         self.progress = QProgressBar(sort_page)
         self.progress.setTextVisible(False)
@@ -238,7 +250,9 @@ class MainWindow(QMainWindow):
         self.single = SinglePlayer(
             self.cfg["thumb_count"], self.cfg["scroll_seconds"], self.viewer
         )
-        self.board = BoardView(self.cfg["preview_seconds"], self.viewer)
+        self.board = BoardView(
+            self.cfg["preview_seconds"], self.cfg["board_columns"], self.viewer
+        )
         self.board.openRequested.connect(self.on_board_open)
         self.board.rateRequested.connect(self.on_board_rate)
         self.board.previewNeeded.connect(self.on_board_preview)
@@ -267,7 +281,7 @@ class MainWindow(QMainWindow):
             "·   Ctrl+F filtrer   ·   Ctrl+T arborescence   ·   Ctrl+M son   "
             "·   Ctrl+O ouvrir   ·   Ctrl+D destinations   ·   Entrée pause   "
             "·   Ctrl+←/→ page d'aperçus   ·   Ctrl+↓ entrer dans le dossier   "
-            "·   Ctrl+P planche   ·   Ctrl+H au hasard   ·   Ctrl+0…5 noter   "
+            "·   Ctrl+P planche   ·   Ctrl+H au hasard   ·   0…5 noter   "
             "·   Ctrl+molette zoomer   ·   Ctrl+B corbeille   ·   Échap remonter",
             sort_page,
         )
@@ -301,6 +315,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Dossier introuvable", f"{root} n'existe plus.")
             return
         self.stop_scan()
+        if self.root is not None and Path(root) != self.root:
+            self.visited.append({
+                "root": self.root, "mode": self.mode,
+                "levels": list(self.levels), "board": self.board_view,
+                "item_id": self.current.item_id if self.current else "",
+            })
+            del self.visited[:-40]
+            self.root_bar.set_can_go_back(True)
         if reset_levels:
             self.levels = []
         self._restore_id = restore_id
@@ -436,6 +458,29 @@ class MainWindow(QMainWindow):
             "item_id": item.item_id,
         })
         self.start_root(target, mode, reset_levels=False)
+
+    def go_back(self) -> bool:
+        """Revient a l'endroit precedemment visite, quel qu'en soit le niveau."""
+        if not self.visited:
+            self.show_banner("Rien avant cet endroit", "#2a2f38")
+            return False
+        previous = self.visited.pop()
+        self.root_bar.set_can_go_back(bool(self.visited))
+        self.levels = list(previous["levels"])
+        if previous["board"] != self.board_view:
+            self.board_view = previous["board"]
+            self.cfg["board_view"] = self.board_view
+            self.root_bar.set_board(self.board_view)
+        # start_root empilerait a nouveau : on neutralise le temps du retour.
+        target, self.root = previous["root"], None
+        self.start_root(target, previous["mode"], reset_levels=False,
+                        restore_id=previous["item_id"])
+        return True
+
+    def set_board_columns(self, columns: int) -> None:
+        self.cfg["board_columns"] = columns
+        self.cfg.save()
+        self.board.set_columns(columns)
 
     def go_up(self) -> bool:
         """Remonte d'un niveau, en retrouvant le dossier d'ou l'on etait parti."""
@@ -799,6 +844,7 @@ class MainWindow(QMainWindow):
         self.cfg["board_view"] = self.board_view
         self.cfg.save()
         self.root_bar.set_board(self.board_view)
+        self.advanced_filter.setVisible(self.board_view)
         self._release_media()
         if self.board_view:
             self.refresh_board()
@@ -946,7 +992,44 @@ class MainWindow(QMainWindow):
         exclude = self._terms(self.cfg["filter_exclude"])
         if include and not any(term in name for term in include):
             return False
-        return not any(term in name for term in exclude)
+        if any(term in name for term in exclude):
+            return False
+        return self._matches_numeric(item)
+
+    def _matches_numeric(self, item) -> bool:
+        """Durée, résolution et note. Ce qu'on ignore encore passe le filtre."""
+        rules = self.criteria
+        if not rules:
+            return True
+
+        stars_min = rules.get("stars", -1)
+        if stars_min >= 0 and self.ratings.get(item.path) < stars_min:
+            return False
+
+        needs_media = rules.get("duration_op") or rules.get("resolution", 0) > 0
+        if not needs_media:
+            return True
+        duration, height = known_media(item)
+
+        op = rules.get("duration_op")
+        if op and duration > 0:
+            wanted = rules.get("duration_s", 0)
+            if op == "gt" and duration <= wanted:
+                return False
+            if op == "lt" and duration >= wanted:
+                return False
+
+        wanted_height = rules.get("resolution", 0)
+        if wanted_height and height > 0:
+            if rules.get("resolution_op") == "gte" and height < wanted_height:
+                return False
+            if rules.get("resolution_op") == "lte" and height > wanted_height:
+                return False
+        return True
+
+    def on_advanced_filter(self, criteria: dict) -> None:
+        self.criteria = criteria
+        self.apply_filter(self.cfg["filter_include"], self.cfg["filter_exclude"])
 
     def apply_filter(self, include: str, exclude: str) -> None:
         self.cfg["filter_include"] = include
@@ -1213,6 +1296,9 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, event):
         key = event.key()
         ctrl = bool(event.modifiers() & Qt.ControlModifier)
+        if event.modifiers() & Qt.AltModifier and key == Qt.Key_Left:
+            self.go_back()
+            return
 
         if self.stack.currentIndex() == PAGE_DONE:
             # Le tri d'un sous-dossier fini, on revient d'ou l'on venait.
@@ -1244,8 +1330,7 @@ class MainWindow(QMainWindow):
                 return self.toggle_board()
             if key == Qt.Key_H:
                 return self.pick_random()
-            if Qt.Key_0 <= key <= Qt.Key_5:
-                return self.rate_current(key - Qt.Key_0)
+
             if key == Qt.Key_R:
                 return self.refresh_root()
             if key == Qt.Key_Right:
@@ -1280,6 +1365,8 @@ class MainWindow(QMainWindow):
             return
 
         text = event.text().lower().strip()
+        if text in ("0", "1", "2", "3", "4", "5"):
+            return self.rate_current(int(text))
         if text:
             dest = self.cfg.destination_for_key(text)
             if dest:

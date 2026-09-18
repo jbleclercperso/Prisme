@@ -145,9 +145,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     print("\n[14] Raccourcis au-delà des chiffres")
     from videosorter.config import KEY_ORDER
-    check(KEY_ORDER.startswith("1234567890azertyuiop"),
-          "chiffres puis lettres dans l'ordre AZERTY")
-    check(len(KEY_ORDER) == 36, f"36 raccourcis possibles (obtenu {len(KEY_ORDER)})")
+    check(KEY_ORDER.startswith("6789azertyuiop"),
+          "les destinations commencent à 6, puis suivent l'ordre AZERTY")
+    check(len(KEY_ORDER) == 30,
+          f"30 destinations possibles (obtenu {len(KEY_ORDER)})")
+    check(not set(KEY_ORDER) & set("012345"),
+          "les chiffres 0 à 5 restent à la notation")
     many = [
         {"key": KEY_ORDER[i], "label": f"dest{i}", "path": str(tri / f"d{i}")}
         for i in range(20)
@@ -155,7 +158,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.cfg.set_destinations(many)
     window.commands.rebuild(many, "Corbeille")
     caps = window.commands.layout_.count()
-    check(caps == 22, f"les 20 destinations sont toutes affichées (obtenu {caps - 2})")
+    check(caps == 23, f"les 20 destinations sont toutes affichées (obtenu {caps - 3})")
     window.commands.setFixedWidth(600)
     window.commands.layout_.setGeometry(window.commands.rect())
     height = window.commands.layout_.heightForWidth(600)
@@ -192,22 +195,23 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     print("\n[16] Barre de commandes cliquable")
     fresh_root(app, window, base, tri, "clics", 5)
     window.cfg.set_destinations([
-        {"key": "1", "label": "Souris", "path": str(tri / "souris")},
+        {"key": "6", "label": "Souris", "path": str(tri / "souris")},
     ])
     window.commands.rebuild(window.cfg.destinations, "Corbeille")
     caps = [
         window.commands.layout_.itemAt(i).widget()
         for i in range(window.commands.layout_.count())
     ]
-    check(len(caps) == 3, f"trois vignettes : Suppr, Espace, 1 destination ({len(caps)})")
+    check(len(caps) == 4,
+          f"quatre vignettes : Suppr, Espace, Noter, 1 destination ({len(caps)})")
     check(all(c.cursor().shape() == Qt.PointingHandCursor for c in caps),
           "les vignettes se signalent comme cliquables")
-    check("touche 1" in caps[2].toolTip(), "l'infobulle rappelle la touche")
+    check("touche 6" in caps[3].toolTip(), "l'infobulle rappelle la touche")
 
     window.show_item(first_untouched(window))
     name = window.current.name
     index_before = window.index
-    QTest.mouseClick(caps[2], Qt.LeftButton)
+    QTest.mouseClick(caps[3], Qt.LeftButton)
     settle(app, window)
     check((tri / "souris" / name).exists(),
           f"un clic sur la vignette « 1 » envoie « {name} » vers sa destination")
@@ -230,9 +234,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     # Relâcher en dehors de la vignette ne doit rien déclencher.
     window.show_item(first_untouched(window))
     intact = window.current.name
-    QTest.mousePress(caps[2], Qt.LeftButton)
-    QTest.mouseRelease(caps[2], Qt.LeftButton, Qt.NoModifier,
-                       QPoint(caps[2].width() + 40, 5))
+    QTest.mousePress(caps[3], Qt.LeftButton)
+    QTest.mouseRelease(caps[3], Qt.LeftButton, Qt.NoModifier,
+                       QPoint(caps[3].width() + 40, 5))
     settle(app, window, 5)
     check(not (tri / "souris" / intact).exists(),
           "un clic relâché en dehors est sans effet")
@@ -255,10 +259,10 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         window.show_item(first_untouched(window))
         slow_name = window.current.name
         dest_dir = tri / "fond"
-        window.cfg.set_destinations([{"key": "1", "label": "Fond", "path": str(dest_dir)}])
+        window.cfg.set_destinations([{"key": "6", "label": "Fond", "path": str(dest_dir)}])
         index_before = window.index
         begin = time.time()
-        QTest.keyClick(window, Qt.Key_1)
+        QTest.keyClick(window, Qt.Key_6)
         elapsed = time.time() - begin
         check(elapsed < 0.5, f"la main est rendue tout de suite ({elapsed:.2f} s)")
         check(window.index == index_before + 1, "on est déjà sur l'élément suivant")
@@ -395,9 +399,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     # On trie une vidéo à l'intérieur, pour vérifier que tout fonctionne en profondeur.
     inner_dest = tri / "interieur"
-    window.cfg.set_destinations([{"key": "1", "label": "Intérieur", "path": str(inner_dest)}])
+    window.cfg.set_destinations([{"key": "6", "label": "Intérieur", "path": str(inner_dest)}])
     inner_name = window.current.name
-    QTest.keyClick(window, Qt.Key_1)
+    QTest.keyClick(window, Qt.Key_6)
     settle(app, window)
     check((inner_dest / inner_name).exists(),
           f"une vidéo du sous-dossier part vers sa destination ({inner_name})")
@@ -558,9 +562,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     from videosorter.widgets import DestinationsDialog
 
     dialog = DestinationsDialog([
-        {"key": "1", "label": "2019", "path": str(tri / "2019")},
-        {"key": "2", "label": "2020", "path": str(tri / "2020")},
-        {"key": "3", "label": "2021", "path": str(tri / "2021")},
+        {"key": "6", "label": "2019", "path": str(tri / "2019")},
+        {"key": "7", "label": "2020", "path": str(tri / "2020")},
+        {"key": "8", "label": "2021", "path": str(tri / "2021")},
     ])
     rows = dialog._rows()
     check(len(rows) == 3, f"trois lignes reprises (obtenu {len(rows)})")
@@ -579,11 +583,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(order == ["2020", "2021", "2019"],
           f"le résultat suit l'ordre affiché (obtenu {order})")
     keys = [d["key"] for d in dialog.result_destinations()]
-    check(keys == ["2", "3", "1"], f"les touches suivent leur destination ({keys})")
+    check(keys == ["7", "8", "6"], f"les touches suivent leur destination ({keys})")
 
     dialog.renumber()
     renumbered = dialog.result_destinations()
-    check([d["key"] for d in renumbered] == ["1", "2", "3"],
+    check([d["key"] for d in renumbered] == ["6", "7", "8"],
           "« Renuméroter » réattribue les touches dans l'ordre")
     check([d["label"] for d in renumbered] == ["2020", "2021", "2019"],
           "sans toucher à l'ordre ni aux libellés")
@@ -591,7 +595,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     added = dialog._add_paths([tri / "2019", tri / "souris"])
     check(added == 1, f"un dossier déjà présent n'est pas ajouté deux fois ({added})")
     check(len(dialog._rows()) == 4, "et le nouveau prend la suite")
-    check(dialog._rows()[3].text(DestinationsDialog.COL_KEY) == "4",
+    check(dialog._rows()[3].text(DestinationsDialog.COL_KEY) == "9",
           "avec la première touche libre")
 
     dialog.tree.clear()
@@ -618,16 +622,16 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(window.ratings.get(target.path) == 0,
           "rappuyer sur la même valeur efface la note")
     window.rate_current(2)
-    QTest.keyClick(window, Qt.Key_0, Qt.ControlModifier)
-    check(window.ratings.get(target.path) == 0, "Ctrl+0 efface aussi")
-    QTest.keyClick(window, Qt.Key_5, Qt.ControlModifier)
-    check(window.ratings.get(target.path) == 5, "Ctrl+5 attribue cinq étoiles")
+    QTest.keyClick(window, Qt.Key_0)
+    check(window.ratings.get(target.path) == 0, "la touche 0 efface la note")
+    QTest.keyClick(window, Qt.Key_5)
+    check(window.ratings.get(target.path) == 5, "la touche 5 attribue cinq étoiles")
 
     # La note doit suivre l'élément quand il change de place.
     moved_dir = tri / "notes"
-    window.cfg.set_destinations([{"key": "1", "label": "Notes", "path": str(moved_dir)}])
+    window.cfg.set_destinations([{"key": "6", "label": "Notes", "path": str(moved_dir)}])
     name = target.name
-    QTest.keyClick(window, Qt.Key_1)
+    QTest.keyClick(window, Qt.Key_6)
     settle(app, window)
     check(window.ratings.get(moved_dir / name) == 5,
           "la note suit l'élément déplacé")
@@ -714,12 +718,114 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(len(seen) > 1, f"le tirage visite plusieurs éléments ({len(seen)})")
     check(all(0 <= i < len(window.items) for i in seen), "toujours dans la liste")
 
+    print("\n[33] Densité de la planche et clic sur toute la carte")
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
+    window.toggle_board(True)
+    window.resize(1400, 900)
+    window.show()
+    pump(app, 0.5)
+    window.set_board_columns(3)
+    pump(app, 0.3)
+    check(window.board.columns == 3, "le sélecteur change le nombre de colonnes")
+    wide = window.board.cards[0].width()
+    window.set_board_columns(6)
+    pump(app, 0.3)
+    narrow = window.board.cards[0].width()
+    check(narrow < wide, f"moins de colonnes donne de plus grandes cartes ({wide} > {narrow})")
+    check(window.cfg["board_columns"] == 6, "le choix est mémorisé")
+
+    card = window.board.cards[0]
+    for child in (card.image, card.name, card.meta):
+        check(child.testAttribute(Qt.WA_TransparentForMouseEvents),
+              f"un clic traverse « {child.objectName() or 'image'} »")
+    opened = []
+    card.opened.connect(opened.append)
+    QTest.mouseClick(card, Qt.LeftButton, Qt.NoModifier,
+                     QPoint(card.width() // 2, 30))
+    check(opened == [0], "un clic sur l'image ouvre bien la carte")
+
+    print("\n[34] Filtres chiffrés de la planche")
+    filters = window.advanced_filter
+    check(not filters.isHidden(), "les filtres chiffrés accompagnent la planche")
+    check(not filters.is_active(), "et ne masquent rien au départ")
+    check(filters.duration_op.itemText(1) == "plus longue que",
+          "les opérateurs sont écrits en toutes lettres")
+    check(filters.duration_op.itemText(2) == "plus courte que", "dans les deux sens")
+
+    window.ratings.data.clear()
+    window.apply_filter(window.cfg["filter_include"], window.cfg["filter_exclude"])
+    pump(app, 0.3)
+    total = len(window.items)
+    window.on_board_rate(0, 4)
+    filters.stars_value.setCurrentIndex(filters.stars_value.findData(4))
+    pump(app, 0.6)
+    check(len(window.items) == 1,
+          f"filtrer sur 4 étoiles ne garde que l'élément noté ({len(window.items)})")
+    filters.reset()
+    pump(app, 0.6)
+    check(len(window.items) == total, "« Tout afficher » rend la liste entière")
+
+    # La durée s'appuie sur ce que le sondage a appris.
+    wait_for(app, lambda: any(c._pixmap for c in window.board.cards), 90)
+    filters.duration_op.setCurrentIndex(2)          # plus courte que
+    filters.duration_value.setText("120")
+    pump(app, 0.6)
+    check(len(window.items) <= total, "un filtre de durée restreint ou laisse tel quel")
+    filters.duration_op.setCurrentIndex(1)          # plus longue que
+    filters.duration_value.setText("600")
+    pump(app, 0.6)
+    check(len(window.items) < total,
+          f"aucun dossier ne dure plus de 10 heures ({len(window.items)} restants)")
+    filters.reset()
+    pump(app, 0.6)
+    check(len(window.items) == total,
+          f"réinitialiser après un filtre vidant la liste la rétablit "
+          f"({len(window.items)} sur {total})")
+
+    print("\n[35] Précédent et temps restant")
+    window.toggle_board(False)
+    # Le clic de l'étape 33 a réellement ouvert un dossier : on revient à la
+    # racine avant d'éprouver la navigation.
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    pump(app, 0.3)
+    start = str(window.root)
+    # Un dossier quelconque encore présent : les étapes précédentes en ont
+    # déplacé plusieurs, viser un nom précis rendrait le test fragile.
+    position = next(i for i, item in enumerate(window.items)
+                    if item.kind == MODE_FOLDERS and Path(item.path).is_dir())
+    entered = window.items[position].name
+    window.show_item(position)
+    window.enter_current()
+    wait_for(app, lambda: not window.scanning and window.root.name == entered, 60)
+    check(window.root_bar.back.isEnabled(), "« Précédent » devient disponible")
+    check(window.go_back(), "le retour aboutit")
+    ok = wait_for(app, lambda: not window.scanning and str(window.root) == start, 60)
+    check(ok, "et ramène à l'endroit précédent")
+
+    player = window.single
+    player.resize(900, 600)
+    player._on_position(0)
+    check(player.progress_rail.height() >= 8,
+          f"la barre d'avancement fait {player.progress_rail.height()} px")
+    check(not player.progress_rail.isHidden(), "et reste visible")
+    window.start_root(flat) if flat.exists() else None
+    wait_for(app, lambda: not window.scanning, 30)
+    if window.items and window.current.kind == MODE_FILES:
+        wait_for(app, lambda: player.player.duration() > 0, 30)
+        player.player.setPosition(1000)
+        pump(app, 0.4)
+        check(player.remaining.text().startswith("−"),
+              f"le temps restant s'affiche (obtenu {player.remaining.text()!r})")
+        check(not player.remaining.isHidden(), "et il est visible")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,
           "trois dossiers choisis d'un coup donnent trois raccourcis")
     results = probe_dialog.result_destinations()
-    check([d["key"] for d in results] == ["1", "2", "3"],
+    check([d["key"] for d in results] == ["6", "7", "8"],
           f"chacun reçoit une touche distincte ({[d['key'] for d in results]})")
     check([d["label"] for d in results] == ["2019", "2020", "2021"],
           "et le nom du dossier sert de libellé")
@@ -759,8 +865,8 @@ def main() -> int:
     cfg = Config(path=sandbox / "config.json")
     cfg["delete_mode"] = "local_trash"
     cfg.set_destinations([
-        {"key": "1", "label": "2019", "path": str(tri / "2019")},
-        {"key": "2", "label": "2020", "path": str(tri / "2020")},
+        {"key": "6", "label": "2019", "path": str(tri / "2019")},
+        {"key": "7", "label": "2020", "path": str(tri / "2020")},
     ])
     window = MainWindow(cfg)
 
@@ -815,7 +921,7 @@ def main() -> int:
     window.show_item(0)
     first = window.current
     first_name = first.name
-    QTest.keyClick(window, Qt.Key_1)
+    QTest.keyClick(window, Qt.Key_6)
     settle(app, window)
     moved = tri / "2019" / first_name
     check(moved.exists(), f"« {first_name} » déplacé dans tri/2019")
@@ -859,7 +965,7 @@ def main() -> int:
     print("\n[8] Collision de noms")
     (tri / "2019" / first_name).mkdir(parents=True, exist_ok=True)
     window.show_item(0)
-    QTest.keyClick(window, Qt.Key_1)
+    QTest.keyClick(window, Qt.Key_6)
     settle(app, window)
     check((tri / "2019" / f"{first_name} (2)").exists(),
           "le doublon est suffixé « (2) » au lieu d'écraser")
@@ -886,7 +992,7 @@ def main() -> int:
 
     print("\n[10] Déplacement d'un fichier seul")
     video_name = window.current.name
-    QTest.keyClick(window, Qt.Key_2)
+    QTest.keyClick(window, Qt.Key_7)
     settle(app, window)
     check((tri / "2020" / video_name).exists(), f"« {video_name} » déplacé dans tri/2020")
     check(not (flat / video_name).exists(), "fichier libéré par le lecteur puis déplacé")

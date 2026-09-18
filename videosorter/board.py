@@ -21,8 +21,11 @@ from PySide6.QtWidgets import (
 from .scan import MODE_FOLDERS, human_duration, human_size
 from .widgets import StarStrip, elide
 
-CARD_WIDTH = 260
-CARD_IMAGE_HEIGHT = 146
+# Densites proposees : moins de colonnes, donc des cartes plus grandes.
+COLUMN_CHOICES = (2, 3, 4, 5, 6, 8)
+DEFAULT_COLUMNS = 5
+CARD_GAP = 10
+MIN_CARD_WIDTH = 150
 
 
 class BoardCard(QFrame):
@@ -40,7 +43,6 @@ class BoardCard(QFrame):
         self.ts: float = 0.0
         self.item = None
         self._pixmap: QPixmap | None = None
-        self.setFixedWidth(CARD_WIDTH)
         self.setCursor(Qt.PointingHandCursor)
 
         layout = QVBoxLayout(self)
@@ -50,7 +52,7 @@ class BoardCard(QFrame):
         self.image = QLabel(self)
         self.image.setObjectName("boardImage")
         self.image.setAlignment(Qt.AlignCenter)
-        self.image.setFixedHeight(CARD_IMAGE_HEIGHT)
+        self.image.setMinimumHeight(110)
         self.image.setText("…")
         layout.addWidget(self.image)
 
@@ -69,6 +71,11 @@ class BoardCard(QFrame):
         self.duration_chip = QLabel("", self)
         self.duration_chip.setObjectName("tileDuration")
         self.duration_chip.hide()
+
+        # Sans cela, un clic tombant sur l'image ou le texte n'atteindrait pas
+        # la carte : seules ses marges auraient repondu.
+        for child in (self.image, self.name, self.meta, self.duration_chip):
+            child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
     def set_item(self, item, stars: int) -> None:
         self.item = item
@@ -117,11 +124,17 @@ class BoardCard(QFrame):
         self.image.setText("")
         self._rescale()
 
+    def set_card_width(self, width: int) -> None:
+        """Fixe la largeur, l'image gardant un cadre 16:9."""
+        self.setFixedWidth(width)
+        self.image.setFixedHeight(int((width - 16) * 9 / 16))
+        self._rescale()
+
     def _rescale(self) -> None:
         if self._pixmap is None:
             return
         self.image.setPixmap(self._pixmap.scaled(
-            self.image.width(), CARD_IMAGE_HEIGHT,
+            self.image.width(), self.image.height(),
             Qt.KeepAspectRatio, Qt.SmoothTransformation,
         ))
 
@@ -149,9 +162,11 @@ class BoardView(QWidget):
     rateRequested = Signal(int, int)
     previewNeeded = Signal(int)
 
-    def __init__(self, preview_seconds: int = 10, parent=None):
+    def __init__(self, preview_seconds: int = 10, columns: int = DEFAULT_COLUMNS,
+                 parent=None):
         super().__init__(parent)
         self.preview_seconds = preview_seconds
+        self.columns = columns
         self.items: list = []
         self.cards: list = []
         self.hovered = -1
@@ -221,13 +236,15 @@ class BoardView(QWidget):
             card.rated.connect(self.rateRequested)
             self.cards.append(card)
 
-        columns = max(1, (self.width() - 10) // (CARD_WIDTH + 10))
+        width = self._card_width()
         for position, card in enumerate(self.cards):
             self.grid.removeWidget(card)
             if position < len(self.items):
                 card.index = position
+                card.set_card_width(width)
                 card.set_item(self.items[position], stars_of(self.items[position].path))
-                self.grid.addWidget(card, position // columns, position % columns)
+                self.grid.addWidget(card, position // self.columns,
+                                    position % self.columns)
                 card.show()
             else:
                 card.hide()
@@ -263,11 +280,21 @@ class BoardView(QWidget):
         if self.items:
             self._relayout()
 
+    def _card_width(self) -> int:
+        available = self.scroll.viewport().width() - CARD_GAP * (self.columns + 1)
+        return max(MIN_CARD_WIDTH, available // max(1, self.columns))
+
+    def set_columns(self, columns: int) -> None:
+        self.columns = max(1, columns)
+        self._relayout()
+
     def _relayout(self) -> None:
-        columns = max(1, (self.width() - 10) // (CARD_WIDTH + 10))
+        width = self._card_width()
         for position, card in enumerate(self.cards[:len(self.items)]):
             self.grid.removeWidget(card)
-            self.grid.addWidget(card, position // columns, position % columns)
+            card.set_card_width(width)
+            self.grid.addWidget(card, position // self.columns,
+                                position % self.columns)
 
     # -- survol et lecture ----------------------------------------------
     def _poll_hover(self) -> None:
