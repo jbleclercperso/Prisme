@@ -48,6 +48,31 @@ class Tools:
         return bool(cls.ffmpeg and cls.ffprobe)
 
 
+DRIVE_REMOTE = 4
+
+
+def is_network_path(path) -> bool:
+    """Vrai si le chemin vit sur un partage réseau (UNC ou lecteur mappé).
+
+    Sur un NAS, ce n'est pas le processeur qui limite mais la latence : chaque
+    lecture attend un aller-retour. Il vaut alors mieux lancer plus d'extractions
+    de front, là où en local on saturerait le disque pour rien.
+    """
+    text = str(path)
+    if text.startswith("\\\\") or text.startswith("//"):
+        return True
+    if sys.platform != "win32":
+        return False
+    drive = os.path.splitdrive(os.path.abspath(text))[0]
+    if not drive:
+        return False
+    try:
+        import ctypes
+        return ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\") == DRIVE_REMOTE
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
 def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str]:
     try:
         proc = subprocess.run(
@@ -207,34 +232,42 @@ def clear_cache() -> None:
     shutil.rmtree(THUMB_DIR, ignore_errors=True)
 
 
-def build_preview_plan(videos: list, count: int) -> list:
-    """Répartit `count` aperçus sur les vidéos disponibles.
+def page_count(videos: list, count: int, one_per_video: bool = True) -> int:
+    """Nombre de pages d'aperçus disponibles pour ces vidéos."""
+    if not one_per_video or not videos:
+        return 1
+    return max(1, -(-len(videos) // count))
+
+
+def build_preview_plan(videos: list, count: int, page: int = 0,
+                       one_per_video: bool = True) -> list:
+    """Construit une page d'aperçus.
 
     Chaque entrée est (fichier, instant, durée, hauteur) : le sondage ffprobe a
     déjà eu lieu ici, autant en faire profiter l'affichage plutôt que de le
     refaire depuis le fil de l'interface.
 
-    Beaucoup de vidéos : une image par vidéo, prise à des hauteurs variées.
-    Peu de vidéos : plusieurs instants échelonnés dans chacune.
+    Pour un dossier, une image par vidéo, par tranches de `count` : un dossier de
+    trois vidéos montre trois aperçus, pas trois vidéos étirées sur dix cases.
+    Pour une vidéo seule, `count` instants échelonnés à l'intérieur.
     """
     if not videos:
         return []
 
-    if len(videos) >= count:
-        # Échantillonne toute la liste plutôt que de prendre les N premières.
-        step = len(videos) / count
+    if one_per_video:
+        chunk = videos[page * count:(page + 1) * count]
+        # Les hauteurs varient d'une case à l'autre : deux plans pris au même
+        # endroit de deux épisodes se ressemblent souvent trop.
         pairs = [
-            (videos[min(len(videos) - 1, int(i * step))], (0.2, 0.35, 0.5, 0.65, 0.8)[i % 5])
-            for i in range(count)
+            (video, (0.2, 0.35, 0.5, 0.65, 0.8)[index % 5])
+            for index, video in enumerate(chunk)
         ]
     else:
-        per_video = [count // len(videos)] * len(videos)
-        for i in range(count % len(videos)):
-            per_video[i] += 1
-        pairs = []
-        for video, slots in zip(videos, per_video):
-            for i in range(slots):
-                pairs.append((video, 0.05 + 0.9 * ((i + 1) / (slots + 1))))
+        video = videos[0]
+        pairs = [
+            (video, 0.05 + 0.9 * ((index + 1) / (count + 1)))
+            for index in range(count)
+        ]
 
     plan = []
     for video, fraction in pairs:
@@ -258,18 +291,23 @@ class JobSignals(QObject):
 class PlanJob(QRunnable):
     """Sonde les vidéos retenues et calcule les instants des aperçus."""
 
-    def __init__(self, signals: JobSignals, item_id: str, videos: list, count: int):
+    def __init__(self, signals: JobSignals, item_id: str, videos: list, count: int,
+                 page: int = 0, one_per_video: bool = True):
         super().__init__()
         self.signals = signals
         self.item_id = item_id
         self.videos = videos
         self.count = count
+        self.page = page
+        self.one_per_video = one_per_video
         self.cancelled = False
 
     def run(self) -> None:
         if self.cancelled:
             return
-        plan = build_preview_plan(self.videos, self.count)
+        plan = build_preview_plan(
+            self.videos, self.count, self.page, self.one_per_video
+        )
         if not self.cancelled:
             self.signals.plan_ready.emit(self.item_id, plan)
 
@@ -313,7 +351,8 @@ class PreviewManager(QObject):
         self.signals.thumb_ready.connect(self.thumb_ready)
         self.signals.thumb_failed.connect(self.thumb_failed)
         self.pool = QThreadPool()
-        self.pool.setMaxThreadCount(max(2, min(4, (os.cpu_count() or 4) // 2)))
+        self.local_workers = max(2, min(4, (os.cpu_count() or 4) // 2))
+        self.pool.setMaxThreadCount(self.local_workers)
         self.jobs: list = []
 
     def _track(self, job) -> None:
@@ -335,8 +374,9 @@ class PreviewManager(QObject):
                 job.cancelled = True
         self.jobs = kept
 
-    def request_plan(self, item_id: str, videos: list, count: int) -> None:
-        job = PlanJob(self.signals, item_id, videos, count)
+    def request_plan(self, item_id: str, videos: list, count: int,
+                     page: int = 0, one_per_video: bool = True) -> None:
+        job = PlanJob(self.signals, item_id, videos, count, page, one_per_video)
         self._track(job)
         self.pool.start(job)
 
@@ -353,6 +393,12 @@ class PreviewManager(QObject):
         """
         self.cancel_all()
         self.pool.waitForDone(timeout_ms)
+
+    def tune_for(self, root) -> None:
+        """Adapte le nombre d'extractions simultanées au support de stockage."""
+        workers = 8 if is_network_path(root) else self.local_workers
+        if workers != self.pool.maxThreadCount():
+            self.pool.setMaxThreadCount(workers)
 
     def shutdown(self) -> None:
         self.quiesce(2000)

@@ -5,6 +5,7 @@ L'interface tourne en mode « offscreen », aucune fenêtre ne s'affiche.
 """
 from __future__ import annotations
 
+import faulthandler
 import os
 import shutil
 import sys
@@ -15,7 +16,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 # La console Windows est en cp1252 : sans cela, une flèche ou un accent dans un
 # libellé ferait échouer l'affichage du résultat plutôt que le test lui-même.
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+# line_buffering : rediriger la sortie la met sinon en tampon, et le journal
+# retarde alors sur l'exécution — de quoi croire à un blocage qui n'existe pas.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+
+# Une interface graphique peut se bloquer sur une boîte de dialogue modale
+# qu'aucun test ne ferme. Passé ce délai, on imprime la pile plutôt que
+# d'attendre indéfiniment.
+faulthandler.enable()
+faulthandler.dump_traceback_later(
+    int(os.environ.get("VS_TEST_WATCHDOG", "900")), exit=True
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -488,8 +499,17 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     check(signature(root / "Anniversaire") != "", "empreinte calculable sur un dossier")
     check(signature(root / "inexistant") == "", "et vide sur un dossier absent")
-    (victim.path / "ajout.mp4").unlink()
-    (nested.path / "interne" / "ajout2.mp4").unlink()
+    window.preview.quiesce()
+    for leftover in ((victim.path / "ajout.mp4"),
+                     (nested.path / "interne" / "ajout2.mp4")):
+        for _ in range(10):
+            try:
+                leftover.unlink()
+                break
+            except PermissionError:
+                time.sleep(0.2)
+            except FileNotFoundError:
+                break
 
     print("\n[25] Entête : arborescence complète et durée près du titre")
     window.start_root(root)
@@ -658,17 +678,18 @@ def main() -> int:
     ok = wait_for(app, lambda: len(window.plans) >= 3, 90)
     check(ok, f"plans calculés ({len(window.plans)} éléments)")
 
-    plan_anniv = window.plans.get(str(anniv.path), [])
+    plan_anniv = window.plans.get(f"{anniv.path}@0", [])
     check(len(plan_anniv) == 10, f"Anniversaire : 10 aperçus (obtenu {len(plan_anniv)})")
     check(len({entry[0] for entry in plan_anniv}) == 10,
           "Anniversaire : 10 vidéos distinctes échantillonnées")
 
     melange = by_name.get("Melange")
-    plan_mel = window.plans.get(str(melange.path), [])
-    check(len(plan_mel) == 10, f"Melange (2 vidéos) : 10 aperçus (obtenu {len(plan_mel)})")
-    check(len({entry[0] for entry in plan_mel}) == 2, "Melange : les 2 vidéos sont utilisées")
-    check(len({round(entry[1], 2) for entry in plan_mel}) >= 5,
-          "Melange : instants échelonnés dans chaque vidéo")
+    plan_mel = window.plans.get(f"{melange.path}@0", [])
+    check(len(plan_mel) == 2,
+          f"Melange (2 vidéos) : 2 aperçus, pas dix (obtenu {len(plan_mel)})")
+    check(len({entry[0] for entry in plan_mel}) == 2, "Melange : une image par vidéo")
+    check(window.grid.visible_count in (0, 2, 10),
+          "la grille n'affiche que les cases utiles")
     check(all(entry[1] > 0 for entry in plan_mel), "instants strictement positifs")
 
     window.show_item([i.name for i in window.items].index("Anniversaire"))
@@ -711,7 +732,11 @@ def main() -> int:
     QTest.keyClick(window, Qt.Key_Delete)
     settle(app, window)
     check(not (root / target_name).exists(), f"« {target_name} » retiré de la racine")
-    check((sandbox / "_TRASH" / target_name).exists(), "déplacé dans la corbeille locale")
+    check(window.trash.count == 1, f"écarté dans la corbeille de session ({window.trash.count})")
+    stored = window.trash.entries[0].stored
+    check(Path(stored).exists(), f"et retrouvable sur le disque ({Path(stored).name})")
+    check(".videosorter-corbeille" in str(stored),
+          "dans un dossier de session place sous la racine triee")
     check(window.stats["deleted"] == 1, "compteur de suppressions incrémenté")
 
     print("\n[7] Annulation d'une suppression réversible")
@@ -744,7 +769,7 @@ def main() -> int:
 
     ok = wait_for(app, lambda: sum(1 for t in window.single.tiles if t._pixmap) >= 10, 90)
     check(ok, "pellicule de 10 images pour la vidéo courante")
-    plan_file = window.plans.get(str(window.current.path), [])
+    plan_file = window.plans.get(f"{window.current.path}@0", [])
     check(len({round(entry[1], 2) for entry in plan_file}) == 10,
           "10 instants distincts dans la même vidéo")
 

@@ -14,16 +14,17 @@ from PySide6.QtWidgets import (
 from . import actions
 from .actions import ActionError, HistoryEntry
 from .config import Config
-from .media import PreviewManager, Tools, probe
+from .media import PreviewManager, Tools, page_count, probe
 from .scan import (
     MODE_FILES, MODE_FOLDERS, ScanThread, detect_mode, human_duration,
     human_resolution, human_size, list_entries,
 )
 from .transfer import Transfer, TransferQueue
+from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
-    STYLESHEET, CommandBar, DestinationsDialog, FilterBar, PreviewGrid, RootBar,
-    SinglePlayer,
+    STYLESHEET, CommandBar, DestinationsDialog, FilterBar, PageBar, PreviewGrid,
+    RootBar, SinglePlayer, TrashDialog,
 )
 
 PAGE_WELCOME, PAGE_SORT, PAGE_DONE = 0, 1, 2
@@ -110,7 +111,9 @@ class MainWindow(QMainWindow):
         self.index = 0                 # index dans self.items
         self.mode = MODE_FOLDERS
         self.root: Path | None = None
-        self.plans: dict = {}
+        self.plans: dict = {}       # cle "chemin@page" -> plan d'apercus
+        self.pages: dict = {}       # page d'apercus courante par element
+        self.sort_mode = ""         # "" | "desc" | "asc" : classement des apercus
         self.history: list = []
         self.stats = {"moved": 0, "deleted": 0, "skipped": 0}
         self.scan_thread: ScanThread | None = None
@@ -118,6 +121,9 @@ class MainWindow(QMainWindow):
         # Pile des dossiers traverses, pour pouvoir remonter d'ou l'on vient.
         self.levels: list = []
         self._restore_id = ""
+
+        self.trash = SessionTrash(self)
+        self.trash.changed.connect(lambda count: self.root_bar.set_trash(count))
 
         self.transfers = TransferQueue(self)
         self.transfers.finished.connect(self.on_transfer_finished)
@@ -159,6 +165,7 @@ class MainWindow(QMainWindow):
         self.root_bar.toggleMute.connect(self.toggle_mute)
         self.root_bar.enterItem.connect(self.enter_current)
         self.root_bar.goUp.connect(self.go_up)
+        self.root_bar.openTrash.connect(self.open_trash)
         self.root_bar.set_muted(self.cfg["muted"])
         layout.addWidget(self.root_bar)
 
@@ -193,6 +200,15 @@ class MainWindow(QMainWindow):
         self.banner.setObjectName("statusBanner")
         self.banner.hide()
         layout.addWidget(self.banner)
+
+        self.page_bar = PageBar(sort_page)
+        self.page_bar.previousPage.connect(lambda: self.change_page(-1))
+        self.page_bar.nextPage.connect(lambda: self.change_page(1))
+        self.page_bar.toggleSort.connect(self.cycle_sort)
+        self.sort_mode = self.cfg["sort_mode"]
+        self.page_bar.set_sort(self.sort_mode)
+        self.page_bar.hide()
+        layout.addWidget(self.page_bar)
 
         # Le panneau d'arborescence occupe la gauche, le lecteur le reste.
         middle = QHBoxLayout()
@@ -230,8 +246,8 @@ class MainWindow(QMainWindow):
             "←/→ naviguer   ·   molette avancer/reculer   ·   Ctrl+Z annuler   "
             "·   Ctrl+F filtrer   ·   Ctrl+T arborescence   ·   Ctrl+M son   "
             "·   Ctrl+O ouvrir   ·   Ctrl+D destinations   ·   Entrée pause   "
-            "·   Ctrl+↓ entrer dans le dossier   ·   Ctrl+R réanalyser   "
-            "·   Échap remonter",
+            "·   Ctrl+←/→ page d'aperçus   ·   Ctrl+↓ entrer dans le dossier   "
+            "·   Ctrl+R réanalyser   ·   Ctrl+B corbeille   ·   Échap remonter",
             sort_page,
         )
         hint.setObjectName("hint")
@@ -277,6 +293,8 @@ class MainWindow(QMainWindow):
         self.stats = {"moved": 0, "deleted": 0, "skipped": 0}
         self.preview.cancel_all()
 
+        self.preview.tune_for(self.root)
+        self.trash.set_base(self.levels[0]["root"] if self.levels else self.root)
         self.cfg.push_recent_root(str(self.root))
         self.cfg.save()
         self.welcome.set_recent(self.cfg["recent_roots"])
@@ -312,6 +330,50 @@ class MainWindow(QMainWindow):
             self.scan_thread.wait(3000)
             self.scan_thread = None
         self.scanning = False
+
+    # ------------------------------------------------------------------
+    # Corbeille de session
+    # ------------------------------------------------------------------
+    def open_trash(self) -> None:
+        """Liste ce qui a été écarté, avec de quoi le remettre en place."""
+        if not self.trash.count:
+            self.show_banner("La corbeille de session est vide", "#2a2f38")
+            return
+        dialog = TrashDialog(self.trash, self)
+        dialog.exec()
+        self.setFocus()
+        # Un élément restauré redevient triable.
+        for entry_path, item in list(self._restored_items()):
+            item.status = ""
+            item.status_detail = ""
+        self.update_counter()
+        if self.current is not None:
+            self.show_item(self.index)
+
+    def _restored_items(self):
+        """Éléments dont la suppression a été défaite depuis la corbeille."""
+        still_gone = {str(entry.origin) for entry in self.trash.entries}
+        for item in self.all_items:
+            if item.status == "deleted" and item.item_id not in still_gone:
+                if Path(item.path).exists():
+                    self.stats["deleted"] = max(0, self.stats["deleted"] - 1)
+                    yield item.item_id, item
+
+    def _flush_trash_on_close(self) -> None:
+        """Envoie le contenu de la corbeille de session vers celle de Windows.
+
+        Sans rien demander : la corbeille de Windows rend l'opération réversible
+        depuis l'explorateur, et une question posée à chaque fermeture finirait
+        par être approuvée sans être lue.
+        """
+        _done, problem = self.trash.flush(self.cfg["delete_mode"])
+        if problem:
+            QMessageBox.warning(
+                self, "Corbeille incomplète",
+                "Certains éléments écartés n'ont pas pu rejoindre la corbeille de "
+                f"Windows. Ils restent dans « {self.trash.FOLDER_NAME} ».\n\n"
+                f"Dernière erreur : {problem}",
+            )
 
     def refresh_root(self) -> None:
         """Relit tout le disque, sans se fier a l'analyse precedente."""
@@ -484,11 +546,12 @@ class MainWindow(QMainWindow):
             self.item_title.setText(
                 f"{item.name}   —   {duration}" if duration else item.name
             )
-            parts = [human_size(item.size)]
+            parts = []
             if info.get("height"):
                 parts.append(human_resolution(info["height"]))
             if info.get("width"):
                 parts.append(f"{info['width']}×{info['height']}")
+            parts.append(human_size(item.size))
             if info.get("codec"):
                 parts.append(info["codec"])
         if item.mtime:
@@ -521,58 +584,150 @@ class MainWindow(QMainWindow):
             return
 
         if item.kind == MODE_FOLDERS:
-            self.grid.set_item(item.item_id, "…")
+            self.grid.set_item(self._plan_key(item, self.page_of(item)), "…")
             if not item.videos:
                 self.grid.set_no_videos("aucune vidéo")
         else:
             self.single.set_item(str(item.path), "…")
 
+        self._sort_videos(item)
         self._request_previews(item, current=True)
-        keep = {item.item_id}
+        self._update_page_bar()
+        keep = {self._plan_key(item, self.page_of(item))}
         for offset in (1, 2):
             if self.index + offset < len(self.items):
                 nxt = self.items[self.index + offset]
-                keep.add(nxt.item_id)
+                keep.add(self._plan_key(nxt, self.page_of(nxt)))
                 self._request_previews(nxt, current=False)
         self.preview.cancel_except(keep)
 
-    def _request_previews(self, item, current: bool) -> None:
+    # ------------------------------------------------------------------
+    # Apercus, par pages de `thumb_count`
+    # ------------------------------------------------------------------
+    def page_of(self, item) -> int:
+        return self.pages.get(item.item_id, 0)
+
+    def total_pages(self, item) -> int:
+        if item.kind != MODE_FOLDERS:
+            return 1
+        return page_count(item.videos, self.cfg["thumb_count"])
+
+    def _plan_key(self, item, page: int) -> str:
+        """Identifiant porte par les signaux : il doit distinguer les pages."""
+        return f"{item.item_id}@{page}"
+
+    def _request_previews(self, item, current: bool, page: int | None = None) -> None:
         if not item.videos or item.locked:
             return
-        plan = self.plans.get(item.item_id)
+        page = self.page_of(item) if page is None else page
+        key = self._plan_key(item, page)
+        plan = self.plans.get(key)
         if plan is None:
-            self.preview.request_plan(item.item_id, item.videos, self.cfg["thumb_count"])
+            self.preview.request_plan(
+                key, item.videos, self.cfg["thumb_count"],
+                page=page, one_per_video=item.kind == MODE_FOLDERS,
+            )
             return
         if current:
             self._apply_plan(item, plan)
         for slot, entry in enumerate(plan):
-            self.preview.request_thumb(item.item_id, slot, entry[0], entry[1])
+            self.preview.request_thumb(key, slot, entry[0], entry[1])
 
     def _apply_plan(self, item, plan: list) -> None:
         viewer = self.grid if item.kind == MODE_FOLDERS else self.single
         viewer.set_plan(plan)
 
-    def on_plan_ready(self, item_id: str, plan: list) -> None:
-        self.plans[item_id] = plan
+    def _current_key(self) -> str:
         current = self.current
-        if current is not None and current.item_id == item_id:
-            self._apply_plan(current, plan)
-        for slot, entry in enumerate(plan):
-            self.preview.request_thumb(item_id, slot, entry[0], entry[1])
+        return self._plan_key(current, self.page_of(current)) if current else ""
 
-    def on_thumb_ready(self, item_id: str, slot: int, path: str) -> None:
+    def on_plan_ready(self, key: str, plan: list) -> None:
+        self.plans[key] = plan
         current = self.current
-        if current is None or current.item_id != item_id:
+        if current is not None and key == self._current_key():
+            self._apply_plan(current, plan)
+            self._update_page_bar()
+        for slot, entry in enumerate(plan):
+            self.preview.request_thumb(key, slot, entry[0], entry[1])
+
+    def on_thumb_ready(self, key: str, slot: int, path: str) -> None:
+        current = self.current
+        if current is None or key != self._current_key():
             return
         viewer = self.grid if current.kind == MODE_FOLDERS else self.single
         viewer.set_thumb(slot, path)
 
-    def on_thumb_failed(self, item_id: str, slot: int) -> None:
+    def on_thumb_failed(self, key: str, slot: int) -> None:
         current = self.current
-        if current is None or current.item_id != item_id:
+        if current is None or key != self._current_key():
             return
         viewer = self.grid if current.kind == MODE_FOLDERS else self.single
         viewer.set_failed(slot)
+
+    def change_page(self, step: int) -> None:
+        """Affiche les dix apercus suivants ou precedents du dossier courant."""
+        item = self.current
+        if item is None or item.kind != MODE_FOLDERS:
+            return
+        total = self.total_pages(item)
+        page = max(0, min(self.page_of(item) + step, total - 1))
+        if page == self.page_of(item):
+            return
+        self.pages[item.item_id] = page
+        self.grid.stop()
+        self.grid.set_item(self._plan_key(item, page), "…")
+        self._request_previews(item, current=True, page=page)
+        self._update_page_bar()
+
+    def cycle_sort(self) -> None:
+        """Ordre du dossier, puis les plus longues d'abord, puis les plus courtes."""
+        self.sort_mode = {"": "desc", "desc": "asc", "asc": ""}[self.sort_mode]
+        self.page_bar.set_sort(self.sort_mode)
+        self.cfg["sort_mode"] = self.sort_mode
+        self.cfg.save()
+        # Les plans deja calcules suivaient l'ancien ordre.
+        self.plans = {}
+        self.pages = {}
+        item = self.current
+        if item is not None:
+            self._sort_videos(item)
+            self.grid.set_item(self._plan_key(item, 0), "…")
+            self._request_previews(item, current=True, page=0)
+            self._update_page_bar()
+
+    def _sort_videos(self, item) -> None:
+        """Reclasse les vidéos d'un dossier selon le mode choisi.
+
+        Le tri s'appuie sur les durées déjà sondées ; celles qui ne le sont pas
+        encore comptent pour zéro et remonteront au prochain affichage.
+        """
+        if item.kind != MODE_FOLDERS or not item.videos:
+            return
+        if not self.sort_mode:
+            item.videos.sort(key=lambda path: str(path).lower())
+            return
+        from .media import PROBE_CACHE
+        def duration_of(path):
+            cached = PROBE_CACHE.get(Path(path))
+            return (cached or {}).get("duration", 0.0)
+        item.videos.sort(key=duration_of, reverse=self.sort_mode == "desc")
+
+    def _update_page_bar(self) -> None:
+        item = self.current
+        if item is None or item.kind != MODE_FOLDERS or not item.videos:
+            self.page_bar.hide()
+            return
+        page = self.page_of(item)
+        total = self.total_pages(item)
+        size = self.cfg["thumb_count"]
+        first = page * size + 1
+        last = min((page + 1) * size, len(item.videos))
+        more = " (les 400 premières)" if len(item.videos) < item.video_count else ""
+        self.page_bar.set_state(
+            f"aperçus {first}–{last} sur {len(item.videos)}{more}",
+            page > 0, page < total - 1,
+        )
+        self.page_bar.setVisible(total > 1)
 
     def show_banner(self, text: str, color: str = "#22303f") -> None:
         self.banner.setText(text)
@@ -690,21 +845,22 @@ class MainWindow(QMainWindow):
         self.advance()
 
     def act_delete(self) -> None:
+        """Écarte l'élément sans rien détruire : il part dans la corbeille de session."""
         item = self.current
         if item is None or item.locked:
             return self.advance()
-        mode = self.cfg["delete_mode"]
         if not Path(item.path).exists():
             self.show_banner(f"Introuvable : {item.name}", "#3a2226")
             return self.advance()
         self._release_media()
-        label = DELETE_LABELS.get(mode, "supprime")
         item.status = "pending_delete"
-        item.status_detail = label
+        item.status_detail = "Corbeille"
         self._enqueue(
-            Transfer(kind="delete", src=item.path, mode=mode,
-                     label=label, item_id=item.item_id),
-            f"« {item.name} » → {label}", "#3a2226",
+            Transfer(kind="move", purpose="delete", src=item.path,
+                     dest=self.trash.folder_for(item.path),
+                     label="Corbeille", item_id=item.item_id),
+            f"« {item.name} » → corbeille  ·  Ctrl+Z ou Ctrl+B pour la rouvrir",
+            "#3a2226",
         )
 
     def act_move(self, dest: dict) -> None:
@@ -800,7 +956,16 @@ class MainWindow(QMainWindow):
             self.update_counter()
             return
 
-        if job.kind == "move":
+        if job.kind == "move" and job.purpose == "delete":
+            if item is not None:
+                item.status = "deleted"
+            self.stats["deleted"] += 1
+            size = item.size if item is not None else 0
+            self.trash.record(Path(job.src), job.result, size)
+            self.history.append(
+                HistoryEntry("delete", Path(job.src), job.result, job.label, True)
+            )
+        elif job.kind == "move":
             if item is not None:
                 item.status = "moved"
             self.stats["moved"] += 1
@@ -816,6 +981,8 @@ class MainWindow(QMainWindow):
             )
         else:  # annulation
             entry = job.entry
+            if getattr(entry, "action", "") == "delete" and entry.dst:
+                self.trash.forget(Path(entry.dst))
             if item is not None:
                 item.status = ""
                 item.status_detail = ""
@@ -908,8 +1075,14 @@ class MainWindow(QMainWindow):
                 return self.edit_destinations()
             if key == Qt.Key_F:
                 return self.focus_filter()
+            if key == Qt.Key_B:
+                return self.open_trash()
             if key == Qt.Key_R:
                 return self.refresh_root()
+            if key == Qt.Key_Right:
+                return self.change_page(1)
+            if key == Qt.Key_Left:
+                return self.change_page(-1)
             if key == Qt.Key_Down:
                 return self.enter_current()
             if key == Qt.Key_Up:
@@ -987,6 +1160,7 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
                 self.transfers.wait(200)
             waiter.close()
+        self._flush_trash_on_close()
         self.preview.shutdown()
         self.cfg["window"] = {"w": self.width(), "h": self.height()}
         self.cfg.save()

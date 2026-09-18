@@ -95,13 +95,21 @@ def is_video(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXTS
 
 
-def _is_hidden(path: Path) -> bool:
-    if path.name.startswith("."):
+def _is_hidden(entry) -> bool:
+    """Teste l'attribut caché, en préférant les données déjà lues par scandir.
+
+    Sur un partage réseau, chaque `stat()` supplémentaire est un aller-retour :
+    l'énumération d'un répertoire rapporte déjà les attributs de ses entrées,
+    autant s'en servir plutôt que d'interroger le serveur une fois par élément.
+    """
+    name = entry.name if hasattr(entry, "name") else Path(entry).name
+    if name.startswith("."):
         return True
     try:
+        stat_result = entry.stat(follow_symlinks=False) if hasattr(entry, "stat")             else Path(entry).stat()
         # FILE_ATTRIBUTE_HIDDEN (0x2) | FILE_ATTRIBUTE_SYSTEM (0x4)
-        return bool(path.stat().st_file_attributes & 0x6)
-    except (OSError, AttributeError):
+        return bool(stat_result.st_file_attributes & 0x6)
+    except (OSError, AttributeError, TypeError):
         return False
 
 
@@ -174,8 +182,7 @@ def detect_mode(root: Path, skip_hidden: bool = True) -> str:
     try:
         for entry in os.scandir(root):
             if entry.is_dir(follow_symlinks=False):
-                candidate = Path(entry.path)
-                if skip_hidden and _is_hidden(candidate):
+                if skip_hidden and _is_hidden(entry):
                     continue
                 return MODE_FOLDERS
     except OSError:
@@ -188,13 +195,14 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True) -> list:
     entries = []
     try:
         for entry in sorted(os.scandir(root), key=lambda e: e.name.lower()):
-            path = Path(entry.path)
-            if skip_hidden and _is_hidden(path):
+            if skip_hidden and _is_hidden(entry):
                 continue
             if mode == MODE_FOLDERS and entry.is_dir(follow_symlinks=False):
-                entries.append(path)
-            elif mode == MODE_FILES and entry.is_file() and is_video(path):
-                entries.append(path)
+                entries.append(Path(entry.path))
+            elif mode == MODE_FILES and entry.is_file():
+                dot = entry.name.rfind(".")
+                if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
+                    entries.append(Path(entry.path))
     except OSError:
         pass
     return entries

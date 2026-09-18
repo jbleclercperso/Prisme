@@ -1,6 +1,7 @@
 """Composants d'interface : grille d'aperçus, lecteur, barre de commandes, réglages."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, QSize, QTimer, QUrl, Qt, Signal
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .actions import ActionError
 from .config import KEY_ORDER, RESERVED_KEYS
 from .scan import human_duration, human_resolution
 
@@ -21,13 +23,14 @@ GRID_COLUMNS = 5
 
 STYLESHEET = """
 QWidget { background: #14161a; color: #e6e8ea; font-size: 13px; }
+QLabel { border: none; background: transparent; }
 QLabel#title { font-size: 23px; font-weight: 600; color: #ffffff; }
 QLabel#subtitle { font-size: 15px; color: #b6c0cc; }
 QLabel#counter { font-size: 13px; color: #9aa4b0; }
 QLabel#rootPath { font-size: 13px; color: #9aa4b0; }
 QLabel#pending { font-size: 12px; color: #8fb4ff; background: #1b2434;
                  border-radius: 5px; padding: 3px 9px; }
-QLabel#parentPath { font-size: 13px; color: #8a94a2; }
+QLabel#parentPath { font-size: 15px; color: #a9b4c2; font-weight: 600; }
 QLabel#hint { color: #6f7885; }
 QFrame#card { background: #1b1f26; border: 1px solid #262c35; border-radius: 10px; }
 QFrame#tile { background: #0e1013; border: 1px solid #262c35; border-radius: 8px; }
@@ -39,6 +42,8 @@ QLabel#tileDuration { background: rgba(0,0,0,0.78); color: #ffffff;
                      font-size: 13px; font-weight: 700; }
 QLabel#tileCaption { color: #9aa6b4; font-size: 11px; font-weight: 600; }
 QLabel#tilePlaceholder { color: #59616d; font-size: 12px; }
+QFrame#playRail { background: rgba(255,255,255,0.14); border: 0; }
+QFrame#playProgress { background: #4c8dff; border: 0; }
 QPushButton { background: #232932; border: 1px solid #323a45; border-radius: 6px;
               padding: 6px 12px; color: #e6e8ea; }
 QPushButton:hover { background: #2c333e; }
@@ -230,14 +235,21 @@ class PreviewGrid(QWidget):
         self.hovered_slot = -1
         self.unplayable: set = set()
 
-        layout = QGridLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        self.grid_layout = QGridLayout(self)
+        self.grid_layout.setContentsMargins(0, 0, 0, 0)
+        self.grid_layout.setSpacing(8)
         self.tiles: list = []
         for slot in range(count):
             tile = PreviewTile(slot, self)
-            layout.addWidget(tile, slot // GRID_COLUMNS, slot % GRID_COLUMNS)
+            self.grid_layout.addWidget(tile, slot // GRID_COLUMNS, slot % GRID_COLUMNS)
             self.tiles.append(tile)
+        self.visible_count = count
+
+        # Trait d'avancement, pose sur le bas de la case en cours de lecture.
+        self.progress = QFrame(self)
+        self.progress.setObjectName("playProgress")
+        self.progress.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.progress.hide()
 
         # Le lecteur flotte au-dessus de la case survolée.
         self.video = QVideoWidget(self)
@@ -280,7 +292,25 @@ class PreviewGrid(QWidget):
             tile.reset()
             tile.placeholder.setText(message)
 
+    def set_visible_count(self, count: int) -> None:
+        """N'affiche que `count` cases, réparties sur le moins de rangées possible.
+
+        Un dossier de trois vidéos montre trois grandes cases, pas trois images
+        perdues au milieu de sept cadres vides.
+        """
+        count = max(0, min(count, len(self.tiles)))
+        self.visible_count = count
+        columns = min(GRID_COLUMNS, max(1, count))
+        for index, tile in enumerate(self.tiles):
+            self.grid_layout.removeWidget(tile)
+            if index < count:
+                self.grid_layout.addWidget(tile, index // columns, index % columns)
+                tile.show()
+            else:
+                tile.hide()
+
     def set_plan(self, plan: list) -> None:
+        self.set_visible_count(len(plan))
         for slot, tile in enumerate(self.tiles):
             if slot < len(plan):
                 tile.set_source(*plan[slot])
@@ -367,8 +397,21 @@ class PreviewGrid(QWidget):
     def _on_position(self, position: int) -> None:
         if self.hovered_slot == -1:
             return
-        if position > self._segment_start + self.preview_seconds * 1000:
+        span = self.preview_seconds * 1000
+        if position > self._segment_start + span:
             self.player.setPosition(self._segment_start)
+            position = self._segment_start
+        self._draw_progress(max(0.0, min(1.0, (position - self._segment_start) / span)))
+
+    def _draw_progress(self, fraction: float) -> None:
+        if self.hovered_slot == -1:
+            self.progress.hide()
+            return
+        rect = self.tiles[self.hovered_slot].geometry()
+        width = max(1, int(rect.width() * fraction))
+        self.progress.setGeometry(rect.x(), rect.bottom() - 21, width, 3)
+        self.progress.raise_()
+        self.progress.show()
 
     def _on_error(self, *_args) -> None:
         if 0 <= self.hovered_slot < len(self.tiles):
@@ -397,6 +440,7 @@ class PreviewGrid(QWidget):
     def stop(self) -> None:
         self.player.stop()
         self.video.hide()
+        self.progress.hide()
         for tile in self.tiles:
             tile.set_hovered(False)
 
@@ -428,6 +472,14 @@ class SinglePlayer(QWidget):
         self.position_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.position_label.hide()
 
+        # Rail et trait d'avancement : discrets, mais toujours la.
+        self.progress_rail = QFrame(self)
+        self.progress_rail.setObjectName("playRail")
+        self.progress_rail.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.progress = QFrame(self)
+        self.progress.setObjectName("playProgress")
+        self.progress.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
         strip = QWidget(self)
         self.strip_layout = QHBoxLayout(strip)
         self.strip_layout.setContentsMargins(0, 0, 0, 0)
@@ -447,6 +499,9 @@ class SinglePlayer(QWidget):
         self.player.setVideoOutput(self.video)
         self.player.setAudioOutput(self.audio)
         self.player.mediaStatusChanged.connect(self._on_status)
+        self.player.positionChanged.connect(self._on_position)
+        self.player.durationChanged.connect(lambda _d: self._on_position(
+            self.player.position()))
 
         self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(90)
@@ -493,6 +548,22 @@ class SinglePlayer(QWidget):
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             self.player.setPosition(0)
             self.player.play()
+
+    def _on_position(self, position: int) -> None:
+        duration = self.player.duration()
+        fraction = (position / duration) if duration > 0 else 0.0
+        area = self.video.geometry()
+        self.progress_rail.setGeometry(area.x(), area.bottom() - 4, area.width(), 4)
+        self.progress.setGeometry(
+            area.x(), area.bottom() - 4,
+            max(0, int(area.width() * max(0.0, min(1.0, fraction)))), 4,
+        )
+        self.progress_rail.raise_()
+        self.progress.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._on_position(self.player.position())
 
     def _poll_hover(self) -> None:
         # Survoler une image de la pellicule déplace la lecture à cet instant.
@@ -619,6 +690,138 @@ class FilterBar(QWidget):
     def set_count(self, shown: int, total: int) -> None:
         hidden = total - shown
         self.count.setText(f"{hidden} masqué{'s' if hidden > 1 else ''}" if hidden else "")
+
+
+class TrashDialog(QDialog):
+    """Ce qui a été écarté pendant la session, et de quoi le remettre en place."""
+
+    def __init__(self, trash, parent=None):
+        super().__init__(parent)
+        self.trash = trash
+        self.setWindowTitle("Corbeille de session")
+        self.resize(760, 420)
+
+        layout = QVBoxLayout(self)
+        self.summary = QLabel("", self)
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+
+        self.tree = QTreeWidget(self)
+        self.tree.setObjectName("destTree")
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels(["Élément", "Écarté à", "Emplacement d'origine"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+        header = self.tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        layout.addWidget(self.tree, 1)
+
+        buttons = QHBoxLayout()
+        restore = QPushButton("Restaurer la sélection", self)
+        restore.setObjectName("primary")
+        restore_all = QPushButton("Tout restaurer", self)
+        restore.clicked.connect(self.restore_selected)
+        restore_all.clicked.connect(self.restore_all)
+        buttons.addWidget(restore)
+        buttons.addWidget(restore_all)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        box = QDialogButtonBox(QDialogButtonBox.Close, self)
+        box.button(QDialogButtonBox.Close).setText("Fermer")
+        box.rejected.connect(self.accept)
+        layout.addWidget(box)
+
+        self.refresh()
+
+    def refresh(self) -> None:
+        self.tree.clear()
+        for entry in reversed(self.trash.entries):
+            row = QTreeWidgetItem([
+                entry.name,
+                time.strftime("%H:%M:%S", time.localtime(entry.at)),
+                str(Path(entry.origin).parent),
+            ])
+            row.setData(0, Qt.UserRole, entry)
+            self.tree.addTopLevelItem(row)
+        count = self.trash.count
+        self.summary.setText(
+            f"{count} élément(s) écartés. Rien n'est encore supprimé : le contenu "
+            "ne partira vers la corbeille de Windows qu'à la fermeture, et vous "
+            "pourrez encore l'en sortir depuis l'explorateur."
+            if count else "La corbeille de session est vide."
+        )
+
+    def _restore(self, entries: list) -> None:
+        failures = []
+        for entry in entries:
+            try:
+                self.trash.restore(entry)
+            except ActionError as exc:
+                failures.append(str(exc))
+        self.refresh()
+        if failures:
+            QMessageBox.warning(
+                self, "Restauration incomplète", "\n".join(failures[:6])
+            )
+
+    def restore_selected(self) -> None:
+        entries = [row.data(0, Qt.UserRole) for row in self.tree.selectedItems()]
+        if not entries:
+            QMessageBox.information(
+                self, "Rien à restaurer", "Sélectionnez d'abord une ou plusieurs lignes."
+            )
+            return
+        self._restore(entries)
+
+    def restore_all(self) -> None:
+        self._restore(list(self.trash.entries))
+
+
+class PageBar(QWidget):
+    """Navigation entre les pages d'aperçus d'un même dossier."""
+
+    previousPage = Signal()
+    nextPage = Signal()
+    toggleSort = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self.sort = QPushButton("Durée ▼", self)
+        self.sort.setToolTip("Classer les vidéos par durée, décroissante ou croissante")
+        self.previous = QPushButton("◂", self)
+        self.previous.setToolTip("Aperçus précédents   (Ctrl+←)")
+        self.label = QLabel("", self)
+        self.label.setObjectName("hint")
+        self.next = QPushButton("▸", self)
+        self.next.setToolTip("Aperçus suivants   (Ctrl+→)")
+        for button in (self.sort, self.previous, self.next):
+            button.setFocusPolicy(Qt.NoFocus)
+        self.previous.clicked.connect(self.previousPage)
+        self.next.clicked.connect(self.nextPage)
+        self.sort.clicked.connect(self.toggleSort)
+
+        layout.addWidget(self.sort)
+        layout.addStretch(1)
+        layout.addWidget(self.previous)
+        layout.addWidget(self.label)
+        layout.addWidget(self.next)
+
+    def set_state(self, text: str, has_previous: bool, has_next: bool) -> None:
+        self.label.setText(text)
+        self.previous.setEnabled(has_previous)
+        self.next.setEnabled(has_next)
+
+    def set_sort(self, mode: str) -> None:
+        labels = {"": "Ordre du dossier", "desc": "Durée ▼", "asc": "Durée ▲"}
+        self.sort.setText(labels.get(mode, "Durée ▼"))
 
 
 class KeyCap(QFrame):
@@ -1008,6 +1211,7 @@ class RootBar(QWidget):
     toggleMute = Signal()
     enterItem = Signal()
     goUp = Signal()
+    openTrash = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1028,6 +1232,9 @@ class RootBar(QWidget):
         mode = QPushButton("Mode")
         tree = QPushButton("Arborescence")
         self.mute = QPushButton("Son coupé")
+        self.trash = QPushButton("Corbeille", self)
+        self.trash.setToolTip("Ce qui a été écarté cette session   (Ctrl+B)")
+        self.trash.hide()
         self.enter = QPushButton("Entrer ▸")
         self.enter.setObjectName("enterButton")
         self.enter.setToolTip(
@@ -1036,7 +1243,8 @@ class RootBar(QWidget):
         self.up = QPushButton("◂ Remonter")
         self.up.setToolTip("Revenir au dossier parent   (Ctrl+↑ ou Échap)")
         self.up.hide()
-        for button in (change, settings, mode, tree, self.mute, self.enter, self.up):
+        for button in (change, settings, mode, tree, self.mute, self.enter,
+                       self.up, self.trash):
             button.setFocusPolicy(Qt.NoFocus)
         change.clicked.connect(self.changeRoot)
         settings.clicked.connect(self.openSettings)
@@ -1045,11 +1253,13 @@ class RootBar(QWidget):
         self.mute.clicked.connect(self.toggleMute)
         self.enter.clicked.connect(self.enterItem)
         self.up.clicked.connect(self.goUp)
+        self.trash.clicked.connect(self.openTrash)
 
         self.root_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(self.root_label, 1)
         layout.addWidget(self.pending)
         layout.addWidget(self.counter)
+        layout.addWidget(self.trash)
         layout.addWidget(self.up)
         layout.addWidget(self.enter)
         layout.addWidget(self.mute)
@@ -1061,6 +1271,10 @@ class RootBar(QWidget):
     def set_muted(self, muted: bool) -> None:
         self.mute.setText("Son coupé" if muted else "Son actif")
         self.mute.setToolTip("Ctrl+M")
+
+    def set_trash(self, count: int) -> None:
+        self.trash.setText(f"Corbeille ({count})")
+        self.trash.setVisible(count > 0)
 
     def set_navigation(self, can_enter: bool, nested: bool) -> None:
         """N'offre « Entrer » que s'il y a un dossier ouvrable sous le curseur."""

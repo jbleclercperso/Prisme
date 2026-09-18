@@ -29,7 +29,10 @@ class Transfer:
     """Une opération disque en attente, en cours ou terminée."""
 
     kind: str                       # "move" | "delete" | "undo"
-    src: Path
+    # "move" range l'element, "delete" l'ecarte dans la corbeille de session :
+    # meme operation disque, consequences differentes sur les compteurs.
+    purpose: str = "move"
+    src: Path = None
     label: str = ""
     item_id: str = ""
     dest: Path | None = None
