@@ -47,8 +47,10 @@ DEFAULTS = {
     "window": {"w": 1400, "h": 900},
     "skip_hidden": True,
     "use_scan_cache": True,      # reutiliser l analyse precedente
-    "sort_mode": "",             # "" | "desc" | "asc" : classement des apercus
-    "board_view": False,         # vue planche plutot que fiche unique
+    "sort_mode": "name",         # name | duration_desc | ... | random
+    "content": "folders",        # « Je regarde » : folders | videos
+    "view": "edit",              # « Je » : browse | edit
+    "tags": [],                  # mots-cles, un par ligne
     "board_columns": 5,          # cartes par rangee en vue planche
     "expand_parents": True,      # traverser les dossiers prefixes « + »
 }

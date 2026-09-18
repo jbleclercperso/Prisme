@@ -119,7 +119,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     """Dossier parent, molette, raccourcis illimités, arborescence, tâche de fond."""
 
     print("\n[12] Nom du dossier parent sous le titre")
-    window.start_root(flat)
+    window.start_root(flat, MODE_FLAT)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 1, 60)
     window.show_item(0)
     check(window.item_parent.text() == flat.name,
@@ -159,10 +159,16 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.commands.rebuild(many, "Corbeille")
     caps = window.commands.layout_.count()
     check(caps == 28, f"les 20 destinations sont toutes affichées (obtenu {caps - 8})")
-    window.commands.setFixedWidth(600)
-    window.commands.layout_.setGeometry(window.commands.rect())
-    height = window.commands.layout_.heightForWidth(600)
-    check(height > 40, f"la barre passe à la ligne au lieu de déborder ({height} px)")
+    # Sur un exemplaire dedie : redimensionner la barre vivante la fait
+    # reagencer par sa disposition parente, ce qui fausse la mesure.
+    from videosorter.widgets import CommandBar
+    probe_bar = CommandBar()
+    probe_bar.rebuild(many, "Corbeille")
+    narrow = probe_bar.layout_.heightForWidth(400)
+    wide = probe_bar.layout_.heightForWidth(2400)
+    check(narrow > wide > 0,
+          f"la barre passe à la ligne quand elle manque de place "
+          f"({narrow} px à 400, {wide} px à 2400)")
 
     # Une lettre lointaine doit déclencher le déplacement.
     letter = KEY_ORDER[12]           # au-delà des chiffres
@@ -269,11 +275,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
               f"la main est rendue sans subir la copie de 1,2 s ({elapsed:.2f} s)")
         check(window.index == index_before + 1, "on est déjà sur l'élément suivant")
         check(window.transfers.busy, "le transfert se poursuit derrière")
-        check(not window.root_bar.pending.isHidden(),
+        check(not window.pending_label.isHidden(),
               "un indicateur signale le transfert")
         settle(app, window, 30)
         check((dest_dir / slow_name).exists(), f"« {slow_name} » bien arrivé à destination")
-        check(window.root_bar.pending.isHidden(), "indicateur éteint une fois fini")
+        check(window.pending_label.isHidden(), "indicateur éteint une fois fini")
     finally:
         vs_actions.move_to = real_move
 
@@ -285,7 +291,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(human_resolution(2160) == "4K", "2160 -> 4K")
     check(human_resolution(0) == "", "hauteur inconnue : rien d'affiché")
 
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 1, 60)
     window.show_item(0)
     wait_for(app, lambda: window.grid.tiles[0].duration > 0, 90)
@@ -308,20 +314,20 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(tile.duration_chip.text() == "0:06", "la durée revient une fois le survol fini")
 
     print("\n[19] Bouton de son")
-    check(window.root_bar.mute.text() == "\U0001F507",
-          f"le pictogramme dit que le son est coupé (obtenu {window.root_bar.mute.text()!r})")
-    QTest.mouseClick(window.root_bar.mute, Qt.LeftButton)
+    check(window.mute_button.text() == "\U0001F507",
+          f"le pictogramme dit que le son est coupé (obtenu {window.mute_button.text()!r})")
+    QTest.mouseClick(window.mute_button, Qt.LeftButton)
     pump(app, 0.3)
     check(window.cfg["muted"] is False, "un clic réactive le son")
-    check(window.root_bar.mute.text() == "\U0001F50A", "il change quand le son revient")
+    check(window.mute_button.text() == "\U0001F50A", "il change quand le son revient")
     check(window.grid.audio.isMuted() is False, "le lecteur suit")
     QTest.keyClick(window, Qt.Key_M, Qt.ControlModifier)
     pump(app, 0.3)
     check(window.cfg["muted"] is True, "Ctrl+M recoupe le son")
-    check(window.root_bar.mute.text() == "\U0001F507", "et se remet à jour")
+    check(window.mute_button.text() == "\U0001F507", "et se remet à jour")
 
     print("\n[20] Filtre par nom")
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     total = len(window.all_items)
     names = [item.name for item in window.all_items]
@@ -332,9 +338,10 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check([i.name for i in window.items] == ["Anniversaire"],
           f"« contient » ne garde que la correspondance ({[i.name for i in window.items]})")
     check(len(window.all_items) == total, "la liste complète est conservée derrière")
-    check("filtrés" in window.root_bar.counter.text(),
-          "le compteur signale que des éléments sont masqués")
-    check("masqué" in window.filter_bar.count.text(), "et la barre de filtre aussi")
+    check("filtrés" in window.controls.count.text(),
+          f"le compteur signale les éléments masqués "
+          f"(obtenu {window.controls.count.text()!r})")
+    check(len(window.items) < len(window.all_items), "et la liste est bien réduite")
 
     window.apply_filter("", "melange")
     pump(app, 0.3)
@@ -346,7 +353,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     # il est devenu structurel, ces dossiers etant traverses et non listes.
     marked = root / "zz-a-ignorer"
     marked.mkdir(exist_ok=True)
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.all_items) >= 4, 60)
     window.apply_filter("", "zz-")
     pump(app, 0.3)
@@ -358,7 +365,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.apply_filter("", "")
     pump(app, 0.3)
     check(len(window.items) == len(window.all_items), "effacer le filtre rend tout")
-    check(window.filter_bar.count.text() == "", "et éteint l'indicateur")
+    check("filtrés" not in window.controls.count.text(),
+          "et le compteur ne signale plus rien de masqué")
 
     window.apply_filter("zzz-introuvable", "")
     pump(app, 0.3)
@@ -370,36 +378,36 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(len(window.items) > 0, "et l'on peut repartir de là")
 
     check(window.cfg["filter_exclude"] == "", "le filtre est mémorisé dans la configuration")
-    window.filter_bar.set_terms("abc", "def")
-    window.filter_bar._emit()
+    window.controls.set_terms("abc", "def")
+    window.on_controls_changed()
     pump(app, 0.5)
     check(window.cfg["filter_include"] == "abc" and window.cfg["filter_exclude"] == "def",
           "la saisie alimente bien la configuration")
-    window.filter_bar.clear()
+    window.controls.reset()
     pump(app, 0.5)
     check(window.cfg["filter_include"] == "", "le bouton Effacer remet tout à zéro")
 
     print("\n[21] Entrer dans un dossier, puis en revenir")
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     position = [i.name for i in window.items].index("Anniversaire")
     window.show_item(position)
     parent_item = window.current
     check(window.mode == MODE_FOLDERS, "on part du mode dossiers")
-    check(not window.root_bar.enter.isHidden(), "le bouton « Entrer » est proposé")
-    check(window.root_bar.up.isHidden(), "pas de « Remonter » au niveau racine")
+    check(not window.enter_button.isHidden(), "le bouton « Entrer » est proposé")
+    check(window.levels == [], "on est bien au niveau racine")
 
-    QTest.mouseClick(window.root_bar.enter, Qt.LeftButton)
+    QTest.mouseClick(window.enter_button, Qt.LeftButton)
     ok = wait_for(app, lambda: not window.scanning and window.root == parent_item.path, 60)
     check(ok, "la racine devient le dossier sur lequel on était")
-    check(window.mode == MODE_FILES,
-          f"et le mode bascule sur les fichiers (obtenu {window.mode})")
+    check(window.mode == MODE_FLAT,
+          f"et l'on bascule sur les vidéos, à plat (obtenu {window.mode})")
     check(len(window.items) == 12,
           f"les 12 vidéos du dossier sont listées (obtenu {len(window.items)})")
     check(all(i.kind == MODE_FILES for i in window.items), "ce sont bien des fichiers")
-    check(not window.root_bar.up.isHidden(), "« Remonter » apparaît")
-    check("niveau 2" in window.root_bar.root_label.text(),
-          f"la profondeur est indiquée (obtenu {window.root_bar.root_label.text()!r})")
+    check(len(window.levels) == 1, "un niveau est empilé")
+    check(window.crumbs.layout_.count() >= 3,
+          f"le fil d'Ariane montre la descente ({window.crumbs.layout_.count()})")
 
     # On trie une vidéo à l'intérieur, pour vérifier que tout fonctionne en profondeur.
     inner_dest = tri / "interieur"
@@ -410,14 +418,14 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check((inner_dest / inner_name).exists(),
           f"une vidéo du sous-dossier part vers sa destination ({inner_name})")
 
-    QTest.mouseClick(window.root_bar.up, Qt.LeftButton)
+    window.go_up()
     ok = wait_for(app, lambda: not window.scanning and window.root == root, 60)
     check(ok, "« Remonter » ramène au dossier parent")
     check(window.mode == MODE_FOLDERS, "et retrouve le mode dossiers")
     check(window.current is not None and window.current.name == "Anniversaire",
           f"sur le dossier d'où l'on était parti (obtenu "
           f"{window.current.name if window.current else None})")
-    check(window.root_bar.up.isHidden(), "« Remonter » disparaît de nouveau")
+    check(window.levels == [], "la pile est revenue à zéro")
 
     print("\n[22] Profondeur et retour par Échap")
     QTest.keyClick(window, Qt.Key_Down, Qt.ControlModifier)
@@ -434,20 +442,20 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "au niveau racine, Échap quitte bien le tri")
 
     print("\n[23] Un dossier sans vidéo directe se parcourt en dossiers")
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     position = [i.name for i in window.items].index("Sous-dossiers")
     window.show_item(position)
-    QTest.mouseClick(window.root_bar.enter, Qt.LeftButton)
+    QTest.mouseClick(window.enter_button, Qt.LeftButton)
     wait_for(app, lambda: not window.scanning and window.root.name == "Sous-dossiers", 60)
     check(window.mode == MODE_FOLDERS,
           f"pas de vidéo directe : on descend en mode dossiers (obtenu {window.mode})")
     check([i.name for i in window.items] == ["interne"],
           f"le sous-dossier est listé ({[i.name for i in window.items]})")
-    QTest.mouseClick(window.root_bar.enter, Qt.LeftButton)
+    QTest.mouseClick(window.enter_button, Qt.LeftButton)
     wait_for(app, lambda: not window.scanning and window.root.name == "interne", 60)
     check(len(window.levels) == 2, "on peut descendre de plusieurs niveaux")
-    check(window.mode == MODE_FILES, "et le dernier niveau contient les vidéos")
+    check(window.mode == MODE_FLAT, "et le dernier niveau montre ses vidéos")
     QTest.keyClick(window, Qt.Key_Up, Qt.ControlModifier)
     wait_for(app, lambda: not window.scanning and window.root.name == "Sous-dossiers", 60)
     check(len(window.levels) == 1, "Ctrl+↑ remonte d'un seul niveau")
@@ -456,7 +464,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     from videosorter.scan_cache import CACHE, signature
 
     CACHE.data = {}
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
     first_pass = window.scan_thread
     check(first_pass.reused == 0, "premier passage : rien à réutiliser")
@@ -466,7 +474,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           f"chaque dossier est mémorisé ({len(CACHE.data)})")
     reference = {i.name: (i.size, i.file_count, i.video_count) for i in window.all_items}
 
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
     second_pass = window.scan_thread
     check(second_pass.reused == len(window.all_items),
@@ -482,7 +490,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     # Un fichier ajouté doit invalider le dossier concerné, et lui seul.
     victim = next(i for i in window.all_items if i.name == "Anniversaire")
     (victim.path / "ajout.mp4").write_bytes(b"x" * 1024)
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
     third_pass = window.scan_thread
     check(third_pass.rescanned == 1,
@@ -494,7 +502,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     # Une modification au deuxième niveau doit compter aussi.
     nested = next(i for i in window.all_items if i.name == "Sous-dossiers")
     (nested.path / "interne" / "ajout2.mp4").write_bytes(b"x" * 512)
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
     check(window.scan_thread.rescanned == 1,
           "une modification dans un sous-dossier invalide le dossier parent")
@@ -520,7 +528,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
                 break
 
     print("\n[25] Entête : arborescence complète et durée près du titre")
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     position = [i.name for i in window.items].index("Anniversaire")
     window.show_item(position)
@@ -528,7 +536,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           f"au premier niveau, la racine seule (obtenu {window.item_parent.text()!r})")
 
     window.enter_current()
-    wait_for(app, lambda: not window.scanning and window.mode == MODE_FILES, 60)
+    wait_for(app, lambda: not window.scanning and window.mode == MODE_FLAT, 60)
     wait_for(app, lambda: bool(window.current.info.get("duration")), 30)
     window.show_item(0)
     crumbs = window.item_parent.text()
@@ -614,7 +622,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check("ExtendedSelection" in source, "les vues internes acceptent la sélection multiple")
 
     print("\n[28] Notation de 0 à 5 étoiles")
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     window.show_item(first_untouched(window))
     target = window.current
@@ -647,11 +655,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(reloaded.get(moved_dir / name) == 5, "la note survit à un redémarrage")
 
     print("\n[29] Vue planche")
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     window.toggle_board(True)
     pump(app, 0.5)
-    check(window.board_view, "la planche est active")
+    check(window.browsing, "la planche est active")
     check(window.viewer.currentWidget() is window.board, "et occupe la zone centrale")
     check(len(window.board.items) == len(window.items),
           f"une carte par élément ({len(window.board.items)})")
@@ -694,7 +702,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.toggle_tree(False)
     window.toggle_board(False)
     pump(app, 0.3)
-    check(not window.board_view, "retour à la fiche unique")
+    check(not window.browsing, "retour à la fiche unique")
 
     print("\n[31] Zoom au pointeur")
     player = window.single
@@ -718,7 +726,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     player.reset_zoom()
 
     print("\n[32] Tirage au hasard")
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     seen = set()
     for _ in range(12):
@@ -731,7 +739,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.3)
 
     print("\n[33] Densité de la planche et clic sur toute la carte")
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     window.toggle_board(True)
     window.resize(1400, 900)
@@ -758,9 +766,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(opened == [0], "un clic sur l'image ouvre bien la carte")
 
     print("\n[34] Filtres chiffrés de la planche")
-    filters = window.advanced_filter
-    check(not filters.isHidden(), "les filtres chiffrés accompagnent la planche")
-    check(not filters.is_active(), "et ne masquent rien au départ")
+    filters = window.controls
+    check(not filters.isHidden(), "la barre de réglages est visible")
+    check(filters.criteria()["stars"] == -1, "et ne masque rien au départ")
     check(filters.duration_op.itemText(1) == "plus longue que",
           "les opérateurs sont écrits en toutes lettres")
     check(filters.duration_op.itemText(2) == "plus courte que", "dans les deux sens")
@@ -770,7 +778,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.3)
     total = len(window.items)
     window.on_board_rate(0, 4)
-    filters.stars_value.setCurrentIndex(filters.stars_value.findData(4))
+    filters.stars.setCurrentIndex(filters.stars.findData(4))
     pump(app, 0.6)
     check(len(window.items) == 1,
           f"filtrer sur 4 étoiles ne garde que l'élément noté ({len(window.items)})")
@@ -799,7 +807,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.toggle_board(False)
     # Le clic de l'étape 33 a réellement ouvert un dossier : on revient à la
     # racine avant d'éprouver la navigation.
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
     pump(app, 0.3)
     start = str(window.root)
@@ -811,7 +819,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.show_item(position)
     window.enter_current()
     wait_for(app, lambda: not window.scanning and window.root.name == entered, 60)
-    check(window.root_bar.back.isEnabled(), "« Précédent » devient disponible")
+    check(bool(window.visited), "un endroit précédent est mémorisé")
     check(window.go_back(), "le retour aboutit")
     ok = wait_for(app, lambda: not window.scanning and str(window.root) == start, 60)
     check(ok, "et ramène à l'endroit précédent")
@@ -858,10 +866,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "et rien d'autre que des videos")
 
     # Le filtre par nom porte alors sur toute la collection.
-    window.apply_filter("clip_0", "")
+    lone = flat_items[0].name.rsplit(".", 1)[0]
+    window.apply_filter(lone, "")
     pump(app, 0.4)
-    check(0 < len(window.items) < len(flat_items),
-          f"filtrer par nom fouille tout le stock ({len(window.items)} trouvees)")
+    found = [i.name for i in window.items]
+    check(0 < len(found) <= len(flat_items) and all(lone in n for n in found),
+          f"filtrer par « {lone} » fouille tout le stock ({len(found)} trouvées)")
     window.apply_filter("", "")
     pump(app, 0.4)
 
@@ -976,7 +986,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(ScanThread.BATCH_SIZE > 1,
           f"les éléments partent groupés ({ScanThread.BATCH_SIZE} par paquet)")
     batches = []
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     window.scan_thread.items_ready.connect(lambda b: batches.append(len(b)))
     wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
     pump(app, 0.3)
@@ -1119,10 +1129,13 @@ def main() -> int:
         {"key": "7", "label": "2020", "path": str(tri / "2020")},
     ])
     window = MainWindow(cfg)
+    window.resize(1400, 900)
+    window.show()
+    pump(app, 0.2)
 
     # ---------------------------------------------------------------- scan
     print("\n[1] Analyse du dossier racine (mode dossiers)")
-    window.start_root(root)
+    window.start_root(root, MODE_FOLDERS)
     ok = wait_for(app, lambda: not window.scanning and len(window.items) >= 4, 60)
     check(ok, "analyse terminée")
     names = [item.name for item in window.items]
@@ -1225,10 +1238,11 @@ def main() -> int:
 
     # ---------------------------------------------------------- mode fichier
     print("\n[9] Mode fichier (racine remplie de vidéos)")
-    window.start_root(flat)
+    window.start_root(flat, MODE_FLAT)
     ok = wait_for(app, lambda: not window.scanning and len(window.items) == 4, 60)
     check(ok, f"4 vidéos listées (obtenu {len(window.items)})")
-    check(window.mode == MODE_FILES, f"mode détecté = fichiers (obtenu {window.mode})")
+    check(window.mode == MODE_FLAT,
+          f"un dossier sans sous-dossier montre ses vidéos (obtenu {window.mode})")
     ok = wait_for(app, lambda: bool(window.current.info.get("duration")), 30)
     check(ok, "durée lue par ffprobe")
     check(window.current.info.get("width") == 320, "résolution lue par ffprobe")

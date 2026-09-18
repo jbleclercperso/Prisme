@@ -850,6 +850,45 @@ class FilterBar(QWidget):
         self.count.setText(f"{hidden} masqué{'s' if hidden > 1 else ''}" if hidden else "")
 
 
+class TagsDialog(QDialog):
+    """Mots-cles automatiques : un par ligne, mot ou expression.
+
+    Chaque mot devient un dossier virtuel rassemblant les videos dont le nom le
+    comporte. Ce sont des vues, non des rangements : elles ne se deplacent pas,
+    mais on edite normalement les videos qu'elles reunissent.
+    """
+
+    def __init__(self, tags: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Mots-cles automatiques")
+        self.resize(560, 460)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Un mot ou une expression par ligne. Chaque ligne devient un dossier "
+            "virtuel reunissant les videos dont le nom la comporte, ou qu'elle "
+            "soit rangee. La casse et les accents sont ignores."
+        ))
+        self.editor = QPlainTextEdit(self)
+        self.editor.setPlaceholderText("plage\nmontagne\nsaison 2")
+        self.editor.setPlainText("\n".join(tags))
+        layout.addWidget(self.editor, 1)
+
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        box.button(QDialogButtonBox.Ok).setText("Enregistrer")
+        box.button(QDialogButtonBox.Cancel).setText("Annuler")
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        layout.addWidget(box)
+
+    def result_tags(self) -> list:
+        seen = []
+        for line in self.editor.toPlainText().splitlines():
+            term = line.strip()
+            if term and term.lower() not in [t.lower() for t in seen]:
+                seen.append(term)
+        return seen
+
+
 class TrashDialog(QDialog):
     """Ce qui a été écarté pendant la session, et de quoi le remettre en place."""
 

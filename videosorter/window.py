@@ -15,6 +15,10 @@ from . import actions
 from .board import COLUMN_CHOICES, BoardView
 from .actions import ActionError, HistoryEntry
 from .config import Config
+from .header import (
+    CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, VIEW_BROWSE, VIEW_EDIT,
+    Breadcrumb, ControlBar, Segmented, build_overflow,
+)
 from .media import PreviewManager, Tools, page_count, probe
 from .ratings import Ratings
 from .scan import (
@@ -26,8 +30,8 @@ from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
-    STYLESHEET, CommandBar, DestinationsDialog, FilterBar, PageBar, PreviewGrid,
-    AdvancedFilterBar, RootBar, SinglePlayer, StarStrip, TrashDialog,
+    STYLESHEET, CommandBar, DestinationsDialog, PreviewGrid, SinglePlayer,
+    StarStrip, TagsDialog, TrashDialog,
 )
 
 PAGE_WELCOME, PAGE_SORT, PAGE_DONE = 0, 1, 2
@@ -107,11 +111,15 @@ class MainWindow(QMainWindow):
         self.cfg = cfg
         self.setWindowTitle("VideoSorter")
         self.resize(cfg["window"].get("w", 1400), cfg["window"].get("h", 900))
-        self.setStyleSheet(STYLESHEET)
+        self.setStyleSheet(STYLESHEET + HEADER_STYLE)
 
         self.all_items: list = []      # tout ce que l'analyse a trouve
         self.items: list = []          # ce que le filtre laisse passer
         self.index = 0                 # index dans self.items
+        # Deux axes, la ou il y avait cinq boutons : ce qu'on regarde, et comment.
+        self.content = cfg["content"]
+        self.view = cfg["view"]
+        self.tags: list = list(cfg["tags"])
         self.mode = MODE_FOLDERS
         self.root: Path | None = None
         self.plans: dict = {}       # cle "chemin@page" -> plan d'apercus
@@ -130,10 +138,9 @@ class MainWindow(QMainWindow):
         self.visited: list = []
 
         self.ratings = Ratings(parent=self)
-        self.board_view = self.cfg["board_view"]
 
         self.trash = SessionTrash(self)
-        self.trash.changed.connect(lambda count: self.root_bar.set_trash(count))
+        self.trash.changed.connect(self.on_trash_changed)
 
         self.transfers = TransferQueue(self)
         self.transfers.finished.connect(self.on_transfer_finished)
@@ -167,37 +174,87 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(12)
 
-        self.root_bar = RootBar(sort_page)
-        self.root_bar.changeRoot.connect(self.choose_root)
-        self.root_bar.openSettings.connect(self.edit_destinations)
-        self.root_bar.toggleMode.connect(self.toggle_mode)
-        self.root_bar.toggleTree.connect(self.toggle_tree)
-        self.root_bar.toggleMute.connect(self.toggle_mute)
-        self.root_bar.enterItem.connect(self.enter_current)
-        self.root_bar.goUp.connect(self.go_up)
-        self.root_bar.openTrash.connect(self.open_trash)
-        self.root_bar.toggleBoard.connect(self.toggle_board)
-        self.root_bar.pickRandom.connect(self.pick_random)
-        self.root_bar.goBack.connect(self.go_back)
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(10)
+        self.crumbs = Breadcrumb(sort_page)
+        self.crumbs.jumped.connect(self.jump_to)
+        header_row.addWidget(self.crumbs, 1)
 
-        self.root_bar.set_board(self.board_view)
-        self.root_bar.set_muted(self.cfg["muted"])
-        layout.addWidget(self.root_bar)
+        self.pending_label = QLabel("", sort_page)
+        self.pending_label.setObjectName("pending")
+        self.pending_label.hide()
+        header_row.addWidget(self.pending_label)
 
-        self.filter_bar = FilterBar(sort_page)
-        self.filter_bar.changed.connect(self.apply_filter)
-        self.filter_bar.released.connect(self.setFocus)
-        self.filter_bar.set_terms(self.cfg["filter_include"], self.cfg["filter_exclude"])
-        layout.addWidget(self.filter_bar)
+        self.random_button = QPushButton("⚄ Au hasard", sort_page)
+        self.random_button.setToolTip("Une vidéo au hasard, partout   (Ctrl+H)")
+        self.random_button.setFocusPolicy(Qt.NoFocus)
+        self.random_button.clicked.connect(self.pick_random)
+        header_row.addWidget(self.random_button)
 
-        self.advanced_filter = AdvancedFilterBar(sort_page)
-        self.advanced_filter.changed.connect(self.on_advanced_filter)
-        self.advanced_filter.columnsChanged.connect(self.set_board_columns)
-        self.advanced_filter.set_columns_choices(
-            COLUMN_CHOICES, self.cfg["board_columns"]
-        )
-        self.advanced_filter.hide()
-        layout.addWidget(self.advanced_filter)
+        self.mute_button = QPushButton("🔇", sort_page)
+        self.mute_button.setFixedWidth(42)
+        self.mute_button.setFocusPolicy(Qt.NoFocus)
+        self.mute_button.clicked.connect(self.toggle_mute)
+        header_row.addWidget(self.mute_button)
+
+        self.more_button = QPushButton("⋯", sort_page)
+        self.more_button.setFixedWidth(42)
+        self.more_button.setToolTip("Destinations, corbeille, arborescence…")
+        self.more_button.setFocusPolicy(Qt.NoFocus)
+        self.overflow = build_overflow(self, [
+            ("Destinations…", self.edit_destinations),
+            ("Mots-clés automatiques…", self.edit_tags),
+            ("-", None),
+            ("Corbeille de session", self.open_trash),
+            ("Arborescence des destinations", self.toggle_tree),
+            ("-", None),
+            ("Réanalyser tout le disque", self.refresh_root),
+            ("Changer de racine…", self.choose_root),
+        ])
+        self.more_button.setMenu(self.overflow)
+        header_row.addWidget(self.more_button)
+        layout.addLayout(header_row)
+
+        selectors = QHBoxLayout()
+        selectors.setContentsMargins(0, 0, 0, 0)
+        selectors.setSpacing(20)
+        self.content_selector = Segmented("Je regarde", [
+            (CONTENT_FOLDERS, "Dossiers", "Les dossiers, comme des catégories"),
+            (CONTENT_VIDEOS, "Vidéos", "Toutes les vidéos d'ici, sans leurs dossiers"),
+        ], sort_page)
+        self.content_selector.chosen.connect(self.set_content)
+        self.view_selector = Segmented("Je", [
+            (VIEW_BROWSE, "Parcours", "Plusieurs éléments en cartes"),
+            (VIEW_EDIT, "Édite", "Un élément à la fois, avec les destinations"),
+        ], sort_page)
+        self.view_selector.chosen.connect(self.set_view)
+        selectors.addWidget(self.content_selector)
+        selectors.addWidget(self.view_selector)
+
+        self.enter_button = QPushButton("Entrer ▸", sort_page)
+        self.enter_button.setToolTip("Trier le contenu de ce dossier   (Ctrl+↓)")
+        self.enter_button.setFocusPolicy(Qt.NoFocus)
+        self.enter_button.clicked.connect(self.enter_current)
+        selectors.addWidget(self.enter_button)
+        selectors.addStretch(1)
+        layout.addLayout(selectors)
+
+        self.controls = ControlBar(COLUMN_CHOICES, sort_page)
+        self.controls.changed.connect(self.on_controls_changed)
+        self.controls.released.connect(self.setFocus)
+        self.controls.sortChanged.connect(self.set_sort)
+        self.controls.columnsChanged.connect(self.set_board_columns)
+        self.controls.previousPage.connect(lambda: self.change_page(-1))
+        self.controls.nextPage.connect(lambda: self.change_page(1))
+        self.controls.randomHere.connect(self.pick_random_here)
+        self.controls.set_terms(self.cfg["filter_include"], self.cfg["filter_exclude"])
+        self.controls.set_sort(self.cfg["sort_mode"] or "name")
+        self.controls.set_columns(self.cfg["board_columns"])
+        layout.addWidget(self.controls)
+        self.content_selector.set_value(self.content)
+        self.view_selector.set_value(self.view)
+        self.controls.set_browsing(self.browsing)
 
         self.progress = QProgressBar(sort_page)
         self.progress.setTextVisible(False)
@@ -224,16 +281,6 @@ class MainWindow(QMainWindow):
         self.banner.setObjectName("statusBanner")
         self.banner.hide()
         layout.addWidget(self.banner)
-
-        self.page_bar = PageBar(sort_page)
-        self.page_bar.previousPage.connect(lambda: self.change_page(-1))
-        self.page_bar.nextPage.connect(lambda: self.change_page(1))
-        self.page_bar.toggleSort.connect(self.cycle_sort)
-        self.page_bar.randomHere.connect(self.pick_random_here)
-        self.sort_mode = self.cfg["sort_mode"]
-        self.page_bar.set_sort(self.sort_mode)
-        self.page_bar.hide()
-        layout.addWidget(self.page_bar)
 
         # Le panneau d'arborescence occupe la gauche, le lecteur le reste.
         middle = QHBoxLayout()
@@ -327,16 +374,27 @@ class MainWindow(QMainWindow):
         if self.root is not None and Path(root) != self.root:
             self.visited.append({
                 "root": self.root, "mode": self.mode,
-                "levels": list(self.levels), "board": self.board_view,
+                "levels": list(self.levels), "board": self.browsing,
                 "item_id": self.current.item_id if self.current else "",
             })
             del self.visited[:-40]
-            self.root_bar.set_can_go_back(True)
         if reset_levels:
             self.levels = []
         self._restore_id = restore_id
         self.root = Path(root)
-        self.mode = mode or detect_mode(self.root, self.cfg["skip_hidden"])
+        # Un mode impose doit reconduire le selecteur, sinon l'entete annonce
+        # une chose et la liste en montre une autre.
+        if mode:
+            self.content = (CONTENT_FOLDERS if mode == MODE_FOLDERS
+                            else CONTENT_VIDEOS)
+        self.mode = mode or self.mode_for_content()
+        if self.mode == MODE_FOLDERS and not list_entries(
+                self.root, MODE_FOLDERS, self.cfg["skip_hidden"],
+                self.cfg["expand_parents"]):
+            # Rien a parcourir en dossiers : on bascule sur les videos plutot
+            # que de presenter une liste vide sans explication.
+            self.mode = MODE_FLAT
+            self.content = CONTENT_VIDEOS
         self.all_items = []
         self.items = []
         self.plans = {}
@@ -351,17 +409,9 @@ class MainWindow(QMainWindow):
         self.cfg.save()
         self.welcome.set_recent(self.cfg["recent_roots"])
 
-        depth = f"   ·   niveau {len(self.levels) + 1}" if self.levels else ""
-        mode_name = self.MODE_LABELS.get(self.mode, self.mode)
-        self.root_bar.root_label.setText(f"{self.root}   ·   {mode_name}{depth}")
-        self.root_bar.mode_button.setText(f"Mode : {mode_name}")
-        self.root_bar.mode_button.setToolTip(
-            "Dossiers, vidéos de ce dossier, ou toutes les vidéos à plat"
-        )
-        self.root_bar.root_label.setToolTip(str(self.root))
-        self.root_bar.set_navigation(
-            can_enter=self.mode == MODE_FOLDERS, nested=bool(self.levels)
-        )
+        top = Path(self.levels[0]["root"]) if self.levels else self.root
+        self.crumbs.set_path(top, self.root)
+        self._apply_selectors()
         self.commands.rebuild(self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer"))
         self.viewer.setCurrentWidget(self.grid if self.mode == MODE_FOLDERS else self.single)
         self.item_title.setText("Analyse en cours…")
@@ -439,25 +489,11 @@ class MainWindow(QMainWindow):
         self.show_banner("Réanalyse complète en cours…", "#22303f")
         self.start_root(self.root, self.mode, reset_levels=False, use_cache=False)
 
-    MODE_LABELS = {
-        MODE_FOLDERS: "Dossiers",
-        MODE_FILES: "Vidéos de ce dossier",
-        MODE_FLAT: "Toutes les vidéos",
-    }
-
     def toggle_mode(self) -> None:
-        """Fait tourner les trois façons de regarder la racine.
-
-        Dossiers : chaque sous-dossier comme une catégorie.
-        Vidéos de ce dossier : celles posées directement dedans.
-        Toutes les vidéos : l'arborescence entière mise à plat, pour chercher
-        par nom sans se soucier du rangement.
-        """
-        if self.root is None:
-            return
-        order = (MODE_FOLDERS, MODE_FILES, MODE_FLAT)
-        new_mode = order[(order.index(self.mode) + 1) % len(order)]             if self.mode in order else MODE_FOLDERS
-        self.start_root(self.root, new_mode, reset_levels=False)
+        """Bascule entre dossiers et videos, comme le selecteur."""
+        self.set_content(
+            CONTENT_VIDEOS if self.content == CONTENT_FOLDERS else CONTENT_FOLDERS
+        )
 
     # ------------------------------------------------------------------
     # Descendre dans un dossier, et en revenir
@@ -480,9 +516,12 @@ class MainWindow(QMainWindow):
         if item.loose_only:
             # L'entree ne porte que les videos en vrac : on va droit a elles.
             mode = MODE_FILES
+        elif list_entries(target, MODE_FOLDERS, self.cfg["skip_hidden"],
+                          self.cfg["expand_parents"]):
+            mode = self.mode_for_content()
         else:
-            direct = list_entries(target, MODE_FILES, self.cfg["skip_hidden"])
-            mode = MODE_FILES if direct else ""
+            # Pas de sous-dossier : il n'y a que des videos a montrer.
+            mode = MODE_FLAT
         self.levels.append({
             "root": self.root,
             "mode": self.mode,
@@ -496,13 +535,12 @@ class MainWindow(QMainWindow):
             self.show_banner("Rien avant cet endroit", "#2a2f38")
             return False
         previous = self.visited.pop()
-        self.root_bar.set_can_go_back(bool(self.visited))
         self.levels = list(previous["levels"])
-        if previous["board"] != self.board_view:
-            self.board_view = previous["board"]
-            self.cfg["board_view"] = self.board_view
-            self.root_bar.set_board(self.board_view)
-        # start_root empilerait a nouveau : on neutralise le temps du retour.
+        if previous["board"] != self.browsing:
+            self.browsing = previous["board"]
+            self._apply_selectors()
+            self.cfg["view"] = self.view
+            # start_root empilerait a nouveau : on neutralise le temps du retour.
         target, self.root = previous["root"], None
         self.start_root(target, previous["mode"], reset_levels=False,
                         restore_id=previous["item_id"])
@@ -541,13 +579,13 @@ class MainWindow(QMainWindow):
             self.all_items.append(item)
             if self._matches(item):
                 self._accept_item(item)
-        self.filter_bar.set_count(len(self.items), len(self.all_items))
+        self._show_counts()
         self.update_counter()
 
     def _accept_item(self, item) -> None:
         first = not self.items
         self.items.append(item)
-        if self.board_view:
+        if self.browsing:
             # Ajout d'une carte, sans reconstruire la planche : la rebatir a
             # chaque element qui arrive la faisait clignoter et redemandait des
             # vignettes deja obtenues.
@@ -567,7 +605,7 @@ class MainWindow(QMainWindow):
 
     def on_scan_finished(self, mode: str, total: int) -> None:
         self.scanning = False
-        self.filter_bar.set_count(len(self.items), len(self.all_items))
+        self._show_counts()
         thread = self.scan_thread
         if thread is not None and thread.reused:
             self.show_banner(
@@ -603,7 +641,7 @@ class MainWindow(QMainWindow):
         if hidden > 0:
             suffix += f" · {hidden} filtrés"
         done = self.stats["moved"] + self.stats["deleted"]
-        self.root_bar.counter.setText(
+        self.controls.count.setToolTip(
             f"{min(self.index + 1, total)} / {total}{suffix}   ·   "
             f"{self.stats['moved']} déplacés · {self.stats['deleted']} supprimés · "
             f"{self.stats['skipped']} passés"
@@ -682,10 +720,7 @@ class MainWindow(QMainWindow):
             tone = "#22331f" if item.status == "moved" else "#3a2226"
             self.show_banner(f"Déjà traité : {item.status_detail}", tone)
 
-        self.root_bar.set_navigation(
-            can_enter=item.kind == MODE_FOLDERS and not item.locked,
-            nested=bool(self.levels),
-        )
+        self._apply_selectors()
 
         viewer = self.grid if item.kind == MODE_FOLDERS else self.single
         self.viewer.setCurrentWidget(viewer)
@@ -792,18 +827,12 @@ class MainWindow(QMainWindow):
         viewer.set_failed(slot)
 
     def on_board_page(self, first: int, last: int, total: int) -> None:
-        """Affiche ou masque la navigation de pages de la planche."""
-        if not self.board_view:
-            return
-        self.page_bar.set_state(
-            f"{first}–{last} sur {total}",
-            self.board.page > 0, self.board.page < self.board.total_pages() - 1,
-        )
-        self.page_bar.setVisible(total > 0 and self.board.total_pages() > 1)
+        if self.browsing:
+            self._show_counts()
 
     def change_page(self, step: int) -> None:
         """Page suivante ou precedente : de cartes en planche, d'apercus en fiche."""
-        if self.board_view:
+        if self.browsing:
             self.board.set_page(self.board.page + step)
             return
         item = self.current
@@ -819,21 +848,45 @@ class MainWindow(QMainWindow):
         self._request_previews(item, current=True, page=page)
         self._update_page_bar()
 
-    def cycle_sort(self) -> None:
-        """Ordre du dossier, puis les plus longues d'abord, puis les plus courtes."""
-        self.sort_mode = {"": "desc", "desc": "asc", "asc": ""}[self.sort_mode]
-        self.page_bar.set_sort(self.sort_mode)
-        self.cfg["sort_mode"] = self.sort_mode
+    def set_sort(self, mode: str) -> None:
+        """Classement de la liste : nom, duree, note, taille, ou au hasard."""
+        if mode == self.sort_mode:
+            return
+        self.sort_mode = mode
+        self.cfg["sort_mode"] = mode
         self.cfg.save()
-        # Les plans deja calcules suivaient l'ancien ordre.
         self.plans = {}
         self.pages = {}
-        item = self.current
-        if item is not None:
-            self._sort_videos(item)
-            self.grid.set_item(self._plan_key(item, 0), "…")
-            self._request_previews(item, current=True, page=0)
-            self._update_page_bar()
+        self.apply_sort()
+        if self.browsing:
+            self.refresh_board()
+        elif self.items:
+            self.show_item(min(self.index, len(self.items) - 1))
+
+    def apply_sort(self) -> None:
+        """Reclasse la liste visible selon le mode choisi."""
+        import random
+        from .media import PROBE_CACHE
+
+        def duration_of(item):
+            total = 0.0
+            for video in item.videos[:8]:
+                info = PROBE_CACHE.get(Path(video))
+                total += (info or {}).get("duration", 0.0)
+            return total
+
+        if self.sort_mode == "random":
+            random.shuffle(self.items)
+        elif self.sort_mode == "duration_desc":
+            self.items.sort(key=duration_of, reverse=True)
+        elif self.sort_mode == "duration_asc":
+            self.items.sort(key=duration_of)
+        elif self.sort_mode == "stars_desc":
+            self.items.sort(key=lambda i: self.ratings.get(i.path), reverse=True)
+        elif self.sort_mode == "size_desc":
+            self.items.sort(key=lambda i: i.size, reverse=True)
+        else:
+            self.items.sort(key=lambda i: i.name.lower())
 
     def _sort_videos(self, item) -> None:
         """Reclasse les vidéos d'un dossier selon le mode choisi.
@@ -852,22 +905,29 @@ class MainWindow(QMainWindow):
             return (cached or {}).get("duration", 0.0)
         item.videos.sort(key=duration_of, reverse=self.sort_mode == "desc")
 
-    def _update_page_bar(self) -> None:
-        item = self.current
-        if self.board_view or item is None or item.kind != MODE_FOLDERS                 or not item.videos:
-            self.page_bar.hide()
+    def _show_counts(self) -> None:
+        """Une seule ligne dit ce qui est montre, ce qui est masque, et ou l'on en est."""
+        hidden = len(self.all_items) - len(self.items)
+        if self.browsing:
+            first, last = self.board._page_bounds()
+            shown = f"{first + 1 if self.items else 0}–{last} sur {len(self.items)}"
+            self.controls.set_page(
+                shown + (f"  ·  {hidden} filtrés" if hidden else ""),
+                self.board.page > 0,
+                self.board.page < self.board.total_pages() - 1,
+            )
             return
-        page = self.page_of(item)
-        total = self.total_pages(item)
-        size = self.cfg["thumb_count"]
-        first = page * size + 1
-        last = min((page + 1) * size, len(item.videos))
-        more = " (les 400 premières)" if len(item.videos) < item.video_count else ""
-        self.page_bar.set_state(
-            f"aperçus {first}–{last} sur {len(item.videos)}{more}",
-            page > 0, page < total - 1,
+        total = len(self.items)
+        done = self.stats["moved"] + self.stats["deleted"]
+        self.controls.set_page(
+            f"{min(self.index + 1, total)} / {total}"
+            + (f"  ·  {hidden} filtrés" if hidden else "")
+            + (f"  ·  {done} traités" if done else ""),
+            False, False,
         )
-        self.page_bar.setVisible(total > 1)
+
+    def _update_page_bar(self) -> None:
+        self._show_counts()
 
     def show_banner(self, text: str, color: str = "#22303f") -> None:
         self.banner.setText(text)
@@ -894,22 +954,70 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Vue planche et notation
     # ------------------------------------------------------------------
-    def toggle_board(self, visible: bool | None = None) -> None:
-        """Bascule entre la fiche unique et la planche de cartes."""
-        self.board_view = (not self.board_view) if visible is None else visible
-        self.cfg["board_view"] = self.board_view
+    @property
+    def browsing(self) -> bool:
+        """Vrai quand on parcourt plusieurs éléments, faux quand on en édite un."""
+        return self.view == VIEW_BROWSE
+
+    @browsing.setter
+    def browsing(self, value: bool) -> None:
+        self.view = VIEW_BROWSE if value else VIEW_EDIT
+
+    def set_view(self, view: str) -> None:
+        if view == self.view:
+            return
+        self.view = view
+        self.cfg["view"] = view
         self.cfg.save()
-        self.root_bar.set_board(self.board_view)
-        self.advanced_filter.setVisible(self.board_view)
+        self._apply_selectors()
         self._release_media()
-        if self.board_view:
+        if self.browsing:
             self.refresh_board()
         elif self.items:
             self.show_item(self.index)
         self.setFocus()
 
+    def set_content(self, content: str) -> None:
+        """Regarder les dossiers, ou les vidéos qu'ils contiennent."""
+        if content == self.content or self.root is None:
+            return
+        self.content = content
+        self.cfg["content"] = content
+        self.cfg.save()
+        self.start_root(self.root, self.mode_for_content(), reset_levels=False)
+
+    def mode_for_content(self) -> str:
+        return MODE_FOLDERS if self.content == CONTENT_FOLDERS else MODE_FLAT
+
+    def _apply_selectors(self) -> None:
+        """Aligne l'entête sur l'état réel, pour qu'il dise où l'on se trouve."""
+        self.content_selector.set_value(self.content)
+        self.view_selector.set_value(self.view)
+        self.controls.set_browsing(self.browsing)
+        item = self.current
+        self.enter_button.setVisible(
+            not self.browsing and item is not None
+            and item.kind == MODE_FOLDERS and not item.locked
+        )
+        self.stars.setVisible(not self.browsing)
+
+    def jump_to(self, path: str) -> None:
+        """Le fil d'Ariane ramène directement au dossier cliqué."""
+        target = Path(path)
+        if self.root is not None and target == self.root:
+            return
+        while self.levels and Path(self.levels[-1]["root"]) != target:
+            self.levels.pop()
+        if self.levels and Path(self.levels[-1]["root"]) == target:
+            self.levels.pop()
+        self.start_root(target, self.mode_for_content(), reset_levels=False)
+
+    def toggle_board(self, visible: bool | None = None) -> None:
+        target = (not self.browsing) if visible is None else visible
+        self.set_view(VIEW_BROWSE if target else VIEW_EDIT)
+
     def refresh_board(self) -> None:
-        if not self.board_view:
+        if not self.browsing:
             return
         self.viewer.setCurrentWidget(self.board)
         self.board.set_muted(self.cfg["muted"])
@@ -924,7 +1032,6 @@ class MainWindow(QMainWindow):
         )
         self.stars.hide()
         # En planche, la barre de pages compte les cartes et non les apercus.
-        self.page_bar.sort.setVisible(False)
 
     def on_board_preview(self, position: int) -> None:
         """Une carte réclame son image : on lui construit sa première vignette."""
@@ -1043,7 +1150,7 @@ class MainWindow(QMainWindow):
         C'est la seule différence d'intention entre les deux vues : parcourir
         d'un côté, décider de l'autre.
         """
-        if self.board_view:
+        if self.browsing:
             self.levels.append({
                 "root": self.root, "mode": self.mode,
                 "item_id": self.current.item_id if self.current else "",
@@ -1065,8 +1172,9 @@ class MainWindow(QMainWindow):
 
     def _matches(self, item) -> bool:
         name = item.name.lower()
-        include = self._terms(self.cfg["filter_include"])
-        exclude = self._terms(self.cfg["filter_exclude"])
+        rules = self.criteria or {}
+        include = self._terms(rules.get("include", self.cfg["filter_include"]))
+        exclude = self._terms(rules.get("exclude", self.cfg["filter_exclude"]))
         if include and not any(term in name for term in include):
             return False
         if any(term in name for term in exclude):
@@ -1104,18 +1212,29 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
-    def on_advanced_filter(self, criteria: dict) -> None:
-        self.criteria = criteria
-        self.apply_filter(self.cfg["filter_include"], self.cfg["filter_exclude"])
+    def on_controls_changed(self) -> None:
+        """Un reglage a bouge : on refiltre, puis on reclasse."""
+        rules = self.controls.criteria()
+        self.criteria = rules
+        self.cfg["filter_include"] = rules["include"]
+        self.cfg["filter_exclude"] = rules["exclude"]
+        self.cfg.save()
+        self.apply_filter(rules["include"], rules["exclude"])
 
     def apply_filter(self, include: str, exclude: str) -> None:
         self.cfg["filter_include"] = include
         self.cfg["filter_exclude"] = exclude
+        # Les criteres sont la seule source consultee par _matches : les laisser
+        # de cote ferait ignorer silencieusement les termes qu'on vient de poser.
+        self.criteria = dict(self.criteria or {})
+        self.criteria["include"] = include
+        self.criteria["exclude"] = exclude
         self.cfg.save()
 
         current = self.current
         self.items = [item for item in self.all_items if self._matches(item)]
-        self.filter_bar.set_count(len(self.items), len(self.all_items))
+        self.apply_sort()
+        self._show_counts()
 
         if not self.items:
             self.preview.cancel_all()
@@ -1137,14 +1256,13 @@ class MainWindow(QMainWindow):
             self.index = min(self.index, len(self.items) - 1)
         if self.stack.currentIndex() == PAGE_DONE:
             self.stack.setCurrentIndex(PAGE_SORT)
-        if self.board_view:
+        if self.browsing:
             self.refresh_board()
         else:
             self.show_item(self.index)
 
     def focus_filter(self) -> None:
-        self.filter_bar.include.setFocus()
-        self.filter_bar.include.selectAll()
+        self.controls.focus_search()
 
     def _item_by_id(self, item_id: str):
         # Sur self.all_items : un transfert peut aboutir alors que le filtre a
@@ -1323,14 +1441,33 @@ class MainWindow(QMainWindow):
                 self.show_item(self.index)
 
         self.update_counter()
-        if self.board_view and item is not None:
+        if self.browsing and item is not None:
             for position, listed in enumerate(self.items):
                 if listed is item:
                     self.board.set_state(position, item.status)
                     break
 
     def on_transfers_changed(self, active: int) -> None:
-        self.root_bar.set_pending(active)
+        self.pending_label.setText(
+            f"⟳ {active} transfert{'s' if active > 1 else ''}" if active else ""
+        )
+        self.pending_label.setVisible(active > 0)
+
+    def on_trash_changed(self, count: int) -> None:
+        for action in self.overflow.actions():
+            if action.text().startswith("Corbeille"):
+                action.setText(
+                    f"Corbeille de session ({count})" if count
+                    else "Corbeille de session"
+                )
+
+    def _refresh_mute(self) -> None:
+        muted = self.cfg["muted"]
+        self.mute_button.setText("🔇" if muted else "🔊")
+        self.mute_button.setToolTip(
+            "Son coupé — cliquer pour l'activer   (Ctrl+M)" if muted
+            else "Son actif — cliquer pour le couper   (Ctrl+M)"
+        )
 
     def advance(self) -> None:
         if self.index + 1 >= len(self.items):
@@ -1369,7 +1506,7 @@ class MainWindow(QMainWindow):
             tile = self.grid.tiles[slot]
             if tile.video:
                 return self.play_in_app(tile.video, tile.ts)
-        if self.board_view and self.board.hovered >= 0:
+        if self.browsing and self.board.hovered >= 0:
             card = self.board.cards[self.board.hovered]
             if card.video:
                 return self.play_in_app(card.video, card.ts)
@@ -1394,9 +1531,9 @@ class MainWindow(QMainWindow):
 
         parent = video.parent
         already_there = (self.root == parent and self.mode == MODE_FILES
-                         and not self.board_view)
+                         and not self.browsing)
         if not already_there:
-            if self.board_view:
+            if self.browsing:
                 self.toggle_board(False)
             if self.root is not None and self.root != parent:
                 self.levels.append({
@@ -1415,6 +1552,17 @@ class MainWindow(QMainWindow):
         target = Path(path) if path else (self.current.path if self.current else None)
         if target:
             actions.reveal(target)
+
+    def edit_tags(self) -> None:
+        """Saisit les mots-clés qui deviendront des dossiers virtuels."""
+        dialog = TagsDialog(self.tags, self)
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            self.tags = dialog.result_tags()
+            self.cfg["tags"] = self.tags
+            self.cfg.save()
+            if self.root is not None:
+                self.start_root(self.root, reset_levels=False)
+        self.setFocus()
 
     def edit_destinations(self) -> None:
         dialog = DestinationsDialog(self.cfg.destinations, self)
@@ -1532,7 +1680,7 @@ class MainWindow(QMainWindow):
         self.cfg.save()
         self.grid.set_muted(muted)
         self.single.set_muted(muted)
-        self.root_bar.set_muted(muted)
+        self._refresh_mute()
         self.show_banner("Son coupé" if muted else "Son activé", "#2a2f38")
 
     def closeEvent(self, event):
