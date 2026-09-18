@@ -40,6 +40,9 @@ from videosorter import media as vs_media  # noqa: E402
 from videosorter.config import Config  # noqa: E402
 from videosorter.media import Tools  # noqa: E402
 from videosorter.scan import MODE_FILES, MODE_FLAT, MODE_FOLDERS  # noqa: E402
+from videosorter.header import (  # noqa: E402
+    CONTENT_FOLDERS, CONTENT_VIDEOS, VIEW_BROWSE, VIEW_EDIT,
+)
 from videosorter.window import MainWindow  # noqa: E402
 
 from make_fixture import build  # noqa: E402
@@ -1079,6 +1082,104 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "sur un nouveau fichier, l'image reste masquée jusqu'à ce qu'elle soit prête")
     grid.stop()
     check(grid.video.isHidden(), "et à l'arrêt également")
+
+    print("\n[48] Mots-cles automatiques")
+    from videosorter.tagging import build_tag_items, fold, matches
+    from videosorter.widgets import TagsDialog
+
+    check(fold("Été") == fold("ete"), "accents ignorés à la comparaison")
+    check(fold("PLAGE") == fold("plage"), "casse ignorée aussi")
+    check(matches("été", "X/mon-ETE-2019.mp4"), "un mot se retrouve dans un nom")
+    check(not matches("ski", "X/plage.mp4"), "et ne se retrouve pas ailleurs")
+
+    sample = [Path(f"X/plage_{i}.mp4") for i in range(3)]
+    sample += [Path("X/MONTAGNE.mp4"), Path("X/autre.mp4")]
+    built = build_tag_items(["plage", "montagne", "introuvable"], sample)
+    check([b.path.name for b in built] == ["plage", "montagne"],
+          f"un élément par mot trouvé, dans l'ordre saisi ({[b.path.name for b in built]})")
+    check(built[0].video_count == 3, f"le premier réunit trois vidéos ({built[0].video_count})")
+    check(built[0].is_tag and not built[0].movable,
+          "un mot-clé est une vue, pas un rangement")
+    check(built[0].name.startswith("#"), f"et se distingue à l'œil ({built[0].name})")
+
+    dialog = TagsDialog(["plage", "  ", "Plage", "montagne"])
+    check(dialog.result_tags() == ["plage", "montagne"],
+          f"la saisie ignore les lignes vides et les doublons ({dialog.result_tags()})")
+
+    # De bout en bout : les mots-cles apparaissent en tete de la liste.
+    tagged = base / "motscles"
+    shutil.rmtree(tagged, ignore_errors=True)
+    origin = sorted(tri.rglob("*.mp4"))[0]
+    for folder, names in (("lot_a", ["plage_ete.mp4", "plage_hiver.mp4"]),
+                          ("lot_b", ["montagne_1.mp4", "divers.mp4"])):
+        (tagged / folder).mkdir(parents=True, exist_ok=True)
+        for name in names:
+            shutil.copy2(origin, tagged / folder / name)
+
+    window.tags = ["plage", "montagne"]
+    window.start_root(tagged, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 60)
+    pump(app, 0.4)
+    tags_found = [i for i in window.all_items if i.is_tag]
+    check(len(tags_found) == 2, f"deux dossiers virtuels ({len(tags_found)})")
+    check(window.all_items[0].is_tag, "placés en tête de liste")
+    check(tags_found[0].video_count == 2,
+          f"« plage » réunit les deux vidéos ({tags_found[0].video_count})")
+
+    # Un mot-cle refuse d'etre deplace, mais s'ouvre.
+    position = [i.item_id for i in window.items].index(tags_found[0].item_id)
+    window.show_item(position)
+    before = window.stats["moved"]
+    window.act_move({"path": str(tri / "2019"), "label": "2019"})
+    settle(app, window, 10)
+    check(window.stats["moved"] == before, "un mot-clé ne se déplace pas")
+
+    window.show_item(position)
+    window.enter_current()
+    pump(app, 0.5)
+    check(window.mode == MODE_FLAT, "l'ouvrir montre ses vidéos")
+    check(len(window.items) == 2, f"les deux vidéos du mot-clé ({len(window.items)})")
+    check(all("plage" in i.name.lower() for i in window.items),
+          f"et rien d'autre ({[i.name for i in window.items]})")
+
+    print("\n[49] Les deux sélecteurs disent où l'on est")
+    window.start_root(tagged, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 60)
+    check(window.content == CONTENT_FOLDERS, "contenu : dossiers")
+    check(window.content_selector.buttons[CONTENT_FOLDERS].property("chosen") == "true",
+          "et le sélecteur l'annonce")
+    window.set_content(CONTENT_VIDEOS)
+    wait_for(app, lambda: not window.scanning, 60)
+    check(window.mode == MODE_FLAT, "choisir « Vidéos » met la liste à plat")
+    check(window.content_selector.buttons[CONTENT_VIDEOS].property("chosen") == "true",
+          "le sélecteur suit")
+    check(all(i.kind == MODE_FILES for i in window.items), "ce sont des fichiers")
+
+    window.set_view(VIEW_BROWSE)
+    pump(app, 0.4)
+    check(window.browsing, "passer en parcours")
+    check(window.view_selector.buttons[VIEW_BROWSE].property("chosen") == "true",
+          "annoncé par le second sélecteur")
+    check(window.viewer.currentWidget() is window.board, "la planche est affichée")
+    window.set_view(VIEW_EDIT)
+    pump(app, 0.4)
+    check(not window.browsing, "et l'on revient à l'édition")
+
+    # Le fil d'Ariane doit montrer la descente et savoir y ramener.
+    window.set_content(CONTENT_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 60)
+    top = str(window.root)
+    position = next(i for i, item in enumerate(window.items)
+                    if item.movable and Path(item.path).is_dir())
+    window.show_item(position)
+    window.enter_current()
+    wait_for(app, lambda: not window.scanning and str(window.root) != top, 60)
+    check(window.crumbs.layout_.count() >= 3,
+          f"le fil montre la descente ({window.crumbs.layout_.count()} éléments)")
+    window.jump_to(top)
+    ok = wait_for(app, lambda: not window.scanning and str(window.root) == top, 60)
+    check(ok, "et cliquer un segment y ramène")
+    check(window.levels == [], "en dépilant les niveaux traversés")
 
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]

@@ -21,10 +21,11 @@ from .header import (
 )
 from .media import PreviewManager, Tools, page_count, probe
 from .ratings import Ratings
+from .tagging import build_tag_items
 from .scan import (
     MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, ScanThread,
     detect_mode, human_duration, human_resolution, human_size, known_media,
-    list_entries,
+    list_entries, scan_file,
 )
 from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
@@ -508,6 +509,8 @@ class MainWindow(QMainWindow):
         item = self.current
         if item is None or item.kind != MODE_FOLDERS or item.locked:
             return
+        if item.is_tag:
+            return self.open_tag(item)
         target = Path(item.path)
         if not target.is_dir():
             self.show_banner(f"Introuvable : {item.name}", "#3a2226")
@@ -550,6 +553,30 @@ class MainWindow(QMainWindow):
         self.cfg["board_columns"] = columns
         self.cfg.save()
         self.board.set_columns(columns)
+
+    def open_tag(self, item) -> None:
+        """Montre les vidéos réunies par un mot-clé, comme une liste ordinaire."""
+        self.levels.append({
+            "root": self.root, "mode": self.mode,
+            "item_id": item.item_id,
+        })
+        self.all_items = [scan_file(video) for video in item.videos]
+        self.items = [entry for entry in self.all_items if self._matches(entry)]
+        self.apply_sort()
+        self.mode = MODE_FLAT
+        self.content = CONTENT_VIDEOS
+        self.index = 0
+        self._apply_selectors()
+        self.crumbs.set_path(
+            Path(self.levels[0]["root"]) if self.levels else self.root, self.root
+        )
+        self.show_banner(
+            f"{len(self.items)} vidéo(s) portant « {item.path.name} »", "#22303f"
+        )
+        if self.browsing:
+            self.refresh_board()
+        elif self.items:
+            self.show_item(0)
 
     def go_up(self) -> bool:
         """Remonte d'un niveau, en retrouvant le dossier d'ou l'on etait parti."""
@@ -603,8 +630,30 @@ class MainWindow(QMainWindow):
         if len(self.items) - 1 <= self.index + 2:
             self._request_previews(item, current=False)
 
+    def _add_tag_items(self) -> None:
+        """Place les dossiers virtuels en tete, une fois l'analyse terminee.
+
+        Ils se calculent sur les videos deja trouvees : inutile de relire le
+        disque, l'analyse vient de le faire.
+        """
+        if not self.tags or self.mode != MODE_FOLDERS:
+            return
+        videos = [video for item in self.all_items if not item.is_tag
+                  for video in item.videos]
+        found = build_tag_items(self.tags, videos)
+        if not found:
+            return
+        self.all_items = found + [i for i in self.all_items if not i.is_tag]
+        self.items = [item for item in self.all_items if self._matches(item)]
+        self.apply_sort()
+        if self.browsing:
+            self.refresh_board()
+        elif self.items:
+            self.show_item(min(self.index, len(self.items) - 1))
+
     def on_scan_finished(self, mode: str, total: int) -> None:
         self.scanning = False
+        self._add_tag_items()
         self._show_counts()
         thread = self.scan_thread
         if thread is not None and thread.reused:
@@ -1283,9 +1332,10 @@ class MainWindow(QMainWindow):
         item = self.current
         if item is None or item.locked:
             return self.advance()
-        if item.loose_only or Path(item.path).name.startswith(PARENT_PREFIX):
+        if not item.movable or Path(item.path).name.startswith(PARENT_PREFIX):
             self.show_banner(
-                "Un dossier de tête ne se supprime pas depuis ici", "#3a2226"
+                "Un mot-clé ou un dossier de tête ne se supprime pas d'ici",
+                "#3a2226",
             )
             return
         if not Path(item.path).exists():
@@ -1323,6 +1373,9 @@ class MainWindow(QMainWindow):
 
     def _move_objection(self, item, dest_dir: Path) -> str:
         """Verifie d'avance ce qui condamnerait le transfert, pour ne pas avancer."""
+        if item.is_tag:
+            return (f"« {item.name} » est un mot-clé, pas un dossier : entrez "
+                    "dedans (Ctrl+↓) pour traiter les vidéos qu'il réunit.")
         if item.loose_only:
             return ("Cette entrée regroupe des vidéos en vrac : entrez dedans "
                     "(Ctrl+↓) pour les traiter une par une.")

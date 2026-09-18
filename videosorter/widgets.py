@@ -12,11 +12,10 @@ from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap, QPolygonF
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFrame,
-    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout, QLineEdit,
-    QComboBox, QListView, QMessageBox, QPushButton, QSizePolicy, QTreeView,
-    QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout, QLineEdit,
+    QListView, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy,
+    QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .actions import ActionError

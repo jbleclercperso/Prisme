@@ -42,15 +42,22 @@ class Item:
     # Vrai pour l'entree qui ne porte que les videos en vrac d'un rayonnage :
     # elle se trie, mais ne represente pas le dossier lui-meme.
     loose_only: bool = False
+    # Vrai pour un dossier virtuel batit sur un mot-cle : il n'existe pas sur
+    # le disque, on le parcourt mais on ne le deplace pas.
+    is_tag: bool = False
 
     @property
     def name(self) -> str:
+        if self.is_tag:
+            return f"# {self.path.name}"
         if self.loose_only:
             return f"{self.path.name} {LOOSE_LABEL}"
         return self.path.name
 
     @property
     def item_id(self) -> str:
+        if self.is_tag:
+            return f"#{self.path}"
         return f"{self.path}|vrac" if self.loose_only else str(self.path)
 
     @property
@@ -66,6 +73,11 @@ class Item:
     def locked(self) -> bool:
         """Ni relire ses apercus, ni agir dessus : il part ou il est deja parti."""
         return self.processed or self.pending
+
+    @property
+    def movable(self) -> bool:
+        """Un mot-cle et une entree « en vrac » sont des vues, non des rangements."""
+        return not (self.is_tag or self.loose_only)
 
 
 def known_media(item) -> tuple:
