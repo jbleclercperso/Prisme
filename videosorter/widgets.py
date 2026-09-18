@@ -1,11 +1,14 @@
 """Composants d'interface : grille d'aperçus, lecteur, barre de commandes, réglages."""
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, QSize, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QCursor, QPixmap
+from PySide6.QtCore import (
+    QPoint, QPointF, QRect, QSize, QTimer, QUrl, Qt, Signal,
+)
+from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap, QPolygonF
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -33,6 +36,16 @@ QLabel#pending { font-size: 12px; color: #8fb4ff; background: #1b2434;
 QLabel#parentPath { font-size: 15px; color: #a9b4c2; font-weight: 600; }
 QLabel#hint { color: #6f7885; }
 QFrame#card { background: #1b1f26; border: 1px solid #262c35; border-radius: 10px; }
+QFrame#boardCard { background: #171b21; border: 1px solid #262c35; border-radius: 10px; }
+QFrame#boardCard[hovered="true"] { border-color: #4c8dff; background: #1c222b; }
+QFrame#boardCard[state="rangé"] { border-color: #3f6b39; }
+QFrame#boardCard[state="écarté"] { border-color: #6d2f38; }
+QFrame#boardCard[state="passé"] { border-color: #4a4f5c; }
+QLabel#boardImage { background: #0b0d10; border-radius: 6px; color: #59616d; }
+QLabel#boardName { font-size: 14px; font-weight: 600; color: #e6e8ea; }
+QLabel#boardMeta { font-size: 12px; color: #8b95a3; }
+QScrollArea#boardScroll { background: transparent; border: 0; }
+QWidget#videoArea { background: #000000; }
 QFrame#tile { background: #0e1013; border: 1px solid #262c35; border-radius: 8px; }
 QFrame#tile[hovered="true"] { border: 1px solid #4c8dff; }
 QLabel#tileBadge { background: rgba(0,0,0,0.65); color: #dfe4ea; border-radius: 4px;
@@ -461,11 +474,18 @@ class SinglePlayer(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        self.video = QVideoWidget(self)
-        self.video.setMinimumHeight(320)
-        # La molette doit atteindre ce widget-ci, pas le widget vidéo natif.
+        # Le lecteur est posé dans un cadre qui le rogne : agrandir sa géométrie
+        # au-delà du cadre produit un zoom, sans passer par une scène graphique.
+        self.video_area = QWidget(self)
+        self.video_area.setObjectName("videoArea")
+        self.video_area.setMinimumHeight(320)
+        self.video_area.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.video = QVideoWidget(self.video_area)
         self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        layout.addWidget(self.video, 1)
+        layout.addWidget(self.video_area, 1)
+
+        self.zoom = 1.0
+        self.zoom_focus = QPointF(0.5, 0.5)   # point fixe, en proportion du cadre
 
         self.position_label = QLabel("", self)
         self.position_label.setObjectName("tileBadge")
@@ -525,6 +545,7 @@ class SinglePlayer(QWidget):
         self.audio.setMuted(muted)
 
     def set_item(self, path: str, message: str = "…") -> None:
+        self.reset_zoom()
         for tile in self.tiles:
             tile.reset()
             tile.placeholder.setText(message)
@@ -552,7 +573,7 @@ class SinglePlayer(QWidget):
     def _on_position(self, position: int) -> None:
         duration = self.player.duration()
         fraction = (position / duration) if duration > 0 else 0.0
-        area = self.video.geometry()
+        area = self.video_area.geometry()
         self.progress_rail.setGeometry(area.x(), area.bottom() - 4, area.width(), 4)
         self.progress.setGeometry(
             area.x(), area.bottom() - 4,
@@ -563,6 +584,7 @@ class SinglePlayer(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._apply_zoom()
         self._on_position(self.player.position())
 
     def _poll_hover(self) -> None:
@@ -585,7 +607,9 @@ class SinglePlayer(QWidget):
             self.player.play()
 
     def wheelEvent(self, event):
-        """La molette avance ou recule dans la vidéo lue."""
+        """Molette : parcourir la vidéo. Avec Ctrl : zoomer là où pointe la souris."""
+        if event.modifiers() & Qt.ControlModifier:
+            return self._zoom_at(event)
         if not self.player.source().isValid():
             return super().wheelEvent(event)
         position = max(0, self.player.position() + seek_step(event, self.scroll_seconds))
@@ -596,6 +620,44 @@ class SinglePlayer(QWidget):
         self._show_position(position)
         event.accept()
 
+    def _zoom_at(self, event) -> None:
+        """Agrandit ou réduit l'image en gardant fixe le point sous le pointeur."""
+        notches = event.angleDelta().y() / 120.0
+        if not notches:
+            return
+        area = self.video_area.geometry()
+        local = event.position().toPoint() - area.topLeft()
+        if area.width() > 0 and area.height() > 0:
+            self.zoom_focus = QPointF(
+                max(0.0, min(1.0, local.x() / area.width())),
+                max(0.0, min(1.0, local.y() / area.height())),
+            )
+        self.zoom = max(1.0, min(6.0, self.zoom * (1.25 ** notches)))
+        self._apply_zoom()
+        self.position_label.setText(f"×{self.zoom:.1f}" if self.zoom > 1 else "×1")
+        self.position_label.adjustSize()
+        self.position_label.move(area.right() - self.position_label.width() - 10,
+                                 area.top() + 10)
+        self.position_label.raise_()
+        self.position_label.show()
+        self.position_timer.start(1500)
+        event.accept()
+
+    def _apply_zoom(self) -> None:
+        """Place le lecteur dans son cadre selon le facteur et le point fixe."""
+        area = self.video_area.rect()
+        width = int(area.width() * self.zoom)
+        height = int(area.height() * self.zoom)
+        # Le point visé doit rester au même endroit à l'écran après l'agrandissement.
+        left = int(self.zoom_focus.x() * (area.width() - width))
+        top = int(self.zoom_focus.y() * (area.height() - height))
+        self.video.setGeometry(left, top, width, height)
+
+    def reset_zoom(self) -> None:
+        self.zoom = 1.0
+        self.zoom_focus = QPointF(0.5, 0.5)
+        self._apply_zoom()
+
     def _show_position(self, position: int) -> None:
         duration = self.player.duration()
         text = human_duration(position / 1000.0)
@@ -604,8 +666,8 @@ class SinglePlayer(QWidget):
         self.position_label.setText(text)
         self.position_label.adjustSize()
         self.position_label.move(
-            self.video.geometry().right() - self.position_label.width() - 10,
-            self.video.geometry().top() + 10,
+            self.video_area.geometry().right() - self.position_label.width() - 10,
+            self.video_area.geometry().top() + 10,
         )
         self.position_label.raise_()
         self.position_label.show()
@@ -779,6 +841,76 @@ class TrashDialog(QDialog):
 
     def restore_all(self) -> None:
         self._restore(list(self.trash.entries))
+
+
+class StarStrip(QWidget):
+    """Cinq étoiles cliquables : survoler montre la note, cliquer la pose.
+
+    Rappuyer sur l'étoile déjà atteinte efface la note, ce qui évite un bouton
+    « remettre à zéro » de plus.
+    """
+
+    rated = Signal(int)
+
+    def __init__(self, size: int = 20, parent=None):
+        super().__init__(parent)
+        self.star_size = size
+        self.value = 0
+        self.preview = -1
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(size * 5 + 8, size + 4)
+        self.setToolTip("Noter de 1 à 5 étoiles   (Ctrl+1…5, Ctrl+0 pour effacer)")
+
+    def set_value(self, value: int) -> None:
+        self.value = max(0, min(5, int(value)))
+        self.update()
+
+    def _index_at(self, x: int) -> int:
+        return max(0, min(4, (x - 4) // self.star_size))
+
+    def mouseMoveEvent(self, event):
+        self.preview = self._index_at(event.position().toPoint().x())
+        self.update()
+
+    def leaveEvent(self, event):
+        self.preview = -1
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.rated.emit(self._index_at(event.position().toPoint().x()) + 1)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        shown = (self.preview + 1) if self.preview >= 0 else self.value
+        for index in range(5):
+            filled = index < shown
+            if self.preview >= 0 and index < shown:
+                colour = QColor("#ffd479")
+            elif filled:
+                colour = QColor("#e0a53d")
+            else:
+                colour = QColor("#3a4150")
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(colour)
+            painter.drawPolygon(self._star(index))
+        painter.end()
+
+    def _star(self, index: int) -> QPolygonF:
+        size = self.star_size
+        cx = 4 + index * size + size / 2
+        cy = self.height() / 2
+        radius = size * 0.42
+        points = []
+        for step in range(10):
+            angle = math.pi / 2 + step * math.pi / 5
+            length = radius if step % 2 == 0 else radius * 0.45
+            points.append(QPointF(cx + length * math.cos(angle),
+                                  cy - length * math.sin(angle)))
+        return QPolygonF(points)
 
 
 class PageBar(QWidget):
@@ -1212,6 +1344,8 @@ class RootBar(QWidget):
     enterItem = Signal()
     goUp = Signal()
     openTrash = Signal()
+    toggleBoard = Signal()
+    pickRandom = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1232,6 +1366,10 @@ class RootBar(QWidget):
         mode = QPushButton("Mode")
         tree = QPushButton("Arborescence")
         self.mute = QPushButton("Son coupé")
+        self.board = QPushButton("Planche", self)
+        self.board.setToolTip("Voir les éléments en cartes   (Ctrl+P)")
+        self.random = QPushButton("Au hasard", self)
+        self.random.setToolTip("Se placer sur un élément au hasard   (Ctrl+H)")
         self.trash = QPushButton("Corbeille", self)
         self.trash.setToolTip("Ce qui a été écarté cette session   (Ctrl+B)")
         self.trash.hide()
@@ -1244,7 +1382,7 @@ class RootBar(QWidget):
         self.up.setToolTip("Revenir au dossier parent   (Ctrl+↑ ou Échap)")
         self.up.hide()
         for button in (change, settings, mode, tree, self.mute, self.enter,
-                       self.up, self.trash):
+                       self.up, self.trash, self.board, self.random):
             button.setFocusPolicy(Qt.NoFocus)
         change.clicked.connect(self.changeRoot)
         settings.clicked.connect(self.openSettings)
@@ -1254,12 +1392,16 @@ class RootBar(QWidget):
         self.enter.clicked.connect(self.enterItem)
         self.up.clicked.connect(self.goUp)
         self.trash.clicked.connect(self.openTrash)
+        self.board.clicked.connect(self.toggleBoard)
+        self.random.clicked.connect(self.pickRandom)
 
         self.root_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(self.root_label, 1)
         layout.addWidget(self.pending)
         layout.addWidget(self.counter)
         layout.addWidget(self.trash)
+        layout.addWidget(self.random)
+        layout.addWidget(self.board)
         layout.addWidget(self.up)
         layout.addWidget(self.enter)
         layout.addWidget(self.mute)
@@ -1271,6 +1413,13 @@ class RootBar(QWidget):
     def set_muted(self, muted: bool) -> None:
         self.mute.setText("Son coupé" if muted else "Son actif")
         self.mute.setToolTip("Ctrl+M")
+
+    def set_board(self, active: bool) -> None:
+        self.board.setText("Fiche" if active else "Planche")
+        self.board.setToolTip(
+            "Revenir à l'élément unique   (Ctrl+P)" if active
+            else "Voir les éléments en cartes   (Ctrl+P)"
+        )
 
     def set_trash(self, count: int) -> None:
         self.trash.setText(f"Corbeille ({count})")

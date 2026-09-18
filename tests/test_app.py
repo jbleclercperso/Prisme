@@ -605,6 +605,115 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "le sélecteur Qt remplace celui de Windows, qui ne sait pas sélectionner plusieurs dossiers")
     check("ExtendedSelection" in source, "les vues internes acceptent la sélection multiple")
 
+    print("\n[28] Notation de 0 à 5 étoiles")
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
+    window.show_item(first_untouched(window))
+    target = window.current
+    check(window.ratings.get(target.path) == 0, "un élément démarre sans note")
+    window.rate_current(4)
+    check(window.ratings.get(target.path) == 4, "une note s'attribue")
+    check(window.stars.value == 4, "et s'affiche dans la bande d'étoiles")
+    window.rate_current(4)
+    check(window.ratings.get(target.path) == 0,
+          "rappuyer sur la même valeur efface la note")
+    window.rate_current(2)
+    QTest.keyClick(window, Qt.Key_0, Qt.ControlModifier)
+    check(window.ratings.get(target.path) == 0, "Ctrl+0 efface aussi")
+    QTest.keyClick(window, Qt.Key_5, Qt.ControlModifier)
+    check(window.ratings.get(target.path) == 5, "Ctrl+5 attribue cinq étoiles")
+
+    # La note doit suivre l'élément quand il change de place.
+    moved_dir = tri / "notes"
+    window.cfg.set_destinations([{"key": "1", "label": "Notes", "path": str(moved_dir)}])
+    name = target.name
+    QTest.keyClick(window, Qt.Key_1)
+    settle(app, window)
+    check(window.ratings.get(moved_dir / name) == 5,
+          "la note suit l'élément déplacé")
+    check(window.ratings.get(target.path) == 0, "et ne reste pas sur l'ancien chemin")
+
+    window.ratings.flush()
+    from videosorter.ratings import Ratings
+    reloaded = Ratings(path=window.ratings.path)
+    check(reloaded.get(moved_dir / name) == 5, "la note survit à un redémarrage")
+
+    print("\n[29] Vue planche")
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
+    window.toggle_board(True)
+    pump(app, 0.5)
+    check(window.board_view, "la planche est active")
+    check(window.viewer.currentWidget() is window.board, "et occupe la zone centrale")
+    check(len(window.board.items) == len(window.items),
+          f"une carte par élément ({len(window.board.items)})")
+    visible = [c for c in window.board.cards if not c.isHidden()]
+    check(len(visible) == len(window.items), "toutes les cartes sont affichées")
+    check(visible[0].name.text() != "", "chaque carte porte son nom")
+    check("vidéo" in visible[0].meta.text(), "et ses chiffres")
+
+    ok = wait_for(app, lambda: any(c._pixmap for c in window.board.cards), 120)
+    check(ok, "les images des cartes arrivent")
+
+    # Noter depuis une carte.
+    window.on_board_rate(0, 3)
+    check(window.ratings.get(window.items[0].path) == 3, "on note depuis une carte")
+    check(window.board.cards[0].stars.value == 3, "l'étoile de la carte suit")
+
+    # Un clic sur une carte de dossier ouvre, il ne déplace rien.
+    before = str(window.root)
+    position = [i.name for i in window.items].index("Anniversaire")
+    window.on_board_open(position)
+    ok = wait_for(app, lambda: not window.scanning and window.root.name == "Anniversaire", 60)
+    check(ok, "un clic sur une carte ouvre le dossier")
+    check((Path(before) / "Anniversaire").exists(), "sans le déplacer")
+
+    print("\n[30] L'arborescence navigue en planche, envoie en fiche")
+    window.cfg["tree_root"] = str(tri)
+    window.toggle_tree(True)
+    window.toggle_board(True)
+    pump(app, 0.3)
+    index = window.tree.model.index(str(tri / "2019"))
+    window.tree.view.clicked.emit(index)
+    ok = wait_for(app, lambda: not window.scanning and window.root.name == "2019", 60)
+    check(ok, "en planche, un clic dans l'arbre ouvre le dossier visé")
+    check(window.transfers.active == 0, "et ne déclenche aucun transfert")
+    window.toggle_tree(False)
+    window.toggle_board(False)
+    pump(app, 0.3)
+    check(not window.board_view, "retour à la fiche unique")
+
+    print("\n[31] Zoom au pointeur")
+    player = window.single
+    player.resize(800, 500)
+    player.reset_zoom()
+    check(player.zoom == 1.0, "on part sans zoom")
+    wheel(player, 2, Qt.ControlModifier)
+    pump(app, 0.2)
+    check(player.zoom > 1.0, f"Ctrl+molette agrandit (×{player.zoom:.2f})")
+    widened = player.video.width()
+    check(widened > player.video_area.width(),
+          "l'image déborde son cadre, qui la rogne")
+    wheel(player, -2, Qt.ControlModifier)
+    pump(app, 0.2)
+    check(player.zoom == 1.0, "et l'on revient exactement à l'échelle d'origine")
+    wheel(player, -3, Qt.ControlModifier)
+    check(player.zoom == 1.0, "sans jamais réduire en deçà")
+    for _ in range(20):
+        wheel(player, 3, Qt.ControlModifier)
+    check(player.zoom <= 6.0, f"ni grossir sans fin (×{player.zoom:.1f})")
+    player.reset_zoom()
+
+    print("\n[32] Tirage au hasard")
+    window.start_root(root)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
+    seen = set()
+    for _ in range(25):
+        window.pick_random()
+        seen.add(window.index)
+    check(len(seen) > 1, f"le tirage visite plusieurs éléments ({len(seen)})")
+    check(all(0 <= i < len(window.items) for i in seen), "toujours dans la liste")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,
@@ -640,6 +749,8 @@ def main() -> int:
     vs_config.LOCAL_TRASH = sandbox / "_TRASH"
     import videosorter.actions as vs_actions
     vs_actions.LOCAL_TRASH = sandbox / "_TRASH"
+    import videosorter.ratings as vs_ratings
+    vs_ratings.RATINGS_PATH = sandbox / "ratings.json"
     import videosorter.scan_cache as vs_scan_cache
     vs_scan_cache.CACHE.path = sandbox / "scan-cache.json"
     vs_scan_cache.CACHE.data = {}

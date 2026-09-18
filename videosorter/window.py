@@ -12,9 +12,11 @@ from PySide6.QtWidgets import (
 )
 
 from . import actions
+from .board import BoardView
 from .actions import ActionError, HistoryEntry
 from .config import Config
 from .media import PreviewManager, Tools, page_count, probe
+from .ratings import Ratings
 from .scan import (
     MODE_FILES, MODE_FOLDERS, ScanThread, detect_mode, human_duration,
     human_resolution, human_size, list_entries,
@@ -24,7 +26,7 @@ from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
     STYLESHEET, CommandBar, DestinationsDialog, FilterBar, PageBar, PreviewGrid,
-    RootBar, SinglePlayer, TrashDialog,
+    RootBar, SinglePlayer, StarStrip, TrashDialog,
 )
 
 PAGE_WELCOME, PAGE_SORT, PAGE_DONE = 0, 1, 2
@@ -122,6 +124,9 @@ class MainWindow(QMainWindow):
         self.levels: list = []
         self._restore_id = ""
 
+        self.ratings = Ratings(parent=self)
+        self.board_view = self.cfg["board_view"]
+
         self.trash = SessionTrash(self)
         self.trash.changed.connect(lambda count: self.root_bar.set_trash(count))
 
@@ -166,6 +171,9 @@ class MainWindow(QMainWindow):
         self.root_bar.enterItem.connect(self.enter_current)
         self.root_bar.goUp.connect(self.go_up)
         self.root_bar.openTrash.connect(self.open_trash)
+        self.root_bar.toggleBoard.connect(self.toggle_board)
+        self.root_bar.pickRandom.connect(self.pick_random)
+        self.root_bar.set_board(self.board_view)
         self.root_bar.set_muted(self.cfg["muted"])
         layout.addWidget(self.root_bar)
 
@@ -230,24 +238,37 @@ class MainWindow(QMainWindow):
         self.single = SinglePlayer(
             self.cfg["thumb_count"], self.cfg["scroll_seconds"], self.viewer
         )
+        self.board = BoardView(self.cfg["preview_seconds"], self.viewer)
+        self.board.openRequested.connect(self.on_board_open)
+        self.board.rateRequested.connect(self.on_board_rate)
+        self.board.previewNeeded.connect(self.on_board_preview)
         self.viewer.addWidget(self.grid)
         self.viewer.addWidget(self.single)
+        self.viewer.addWidget(self.board)
         middle.addWidget(self.viewer, 1)
         layout.addLayout(middle, 1)
+
+        self.stars = StarStrip(22, sort_page)
+        self.stars.rated.connect(self.rate_current)
 
         self.commands = CommandBar(sort_page)
         # Les memes actions qu'au clavier, accessibles a la souris.
         self.commands.deleteRequested.connect(self.on_command_delete)
         self.commands.skipRequested.connect(self.on_command_skip)
         self.commands.moveRequested.connect(self.on_command_move)
-        layout.addWidget(self.commands)
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.addWidget(self.commands, 1)
+        bottom.addWidget(self.stars, 0, Qt.AlignBottom)
+        layout.addLayout(bottom)
 
         hint = QLabel(
             "←/→ naviguer   ·   molette avancer/reculer   ·   Ctrl+Z annuler   "
             "·   Ctrl+F filtrer   ·   Ctrl+T arborescence   ·   Ctrl+M son   "
             "·   Ctrl+O ouvrir   ·   Ctrl+D destinations   ·   Entrée pause   "
             "·   Ctrl+←/→ page d'aperçus   ·   Ctrl+↓ entrer dans le dossier   "
-            "·   Ctrl+R réanalyser   ·   Ctrl+B corbeille   ·   Échap remonter",
+            "·   Ctrl+P planche   ·   Ctrl+H au hasard   ·   Ctrl+0…5 noter   "
+            "·   Ctrl+molette zoomer   ·   Ctrl+B corbeille   ·   Échap remonter",
             sort_page,
         )
         hint.setObjectName("hint")
@@ -440,6 +461,9 @@ class MainWindow(QMainWindow):
             return
         first = not self.items
         self.items.append(item)
+        if self.board_view:
+            self.refresh_board()
+            return
         if self._restore_id and item.item_id == self._restore_id:
             self._restore_id = ""
             self.show_item(len(self.items) - 1)
@@ -558,6 +582,8 @@ class MainWindow(QMainWindow):
             parts.append("modifié le " + datetime.fromtimestamp(item.mtime).strftime("%d/%m/%Y"))
         self.item_subtitle.setText("   ·   ".join(parts))
 
+        self.stars.show()
+        self.stars.set_value(self.ratings.get(item.path))
         crumbs = self._breadcrumb(item)
         self.item_parent.setText(crumbs)
         self.item_parent.setToolTip(str(Path(item.path).parent))
@@ -643,6 +669,12 @@ class MainWindow(QMainWindow):
 
     def on_plan_ready(self, key: str, plan: list) -> None:
         self.plans[key] = plan
+        if key.startswith("board@"):
+            position = self._board_position_of(key)
+            if position >= 0 and plan:
+                self.board.set_source(position, plan[0])
+                self.preview.request_thumb(key, 0, plan[0][0], plan[0][1])
+            return
         current = self.current
         if current is not None and key == self._current_key():
             self._apply_plan(current, plan)
@@ -651,6 +683,11 @@ class MainWindow(QMainWindow):
             self.preview.request_thumb(key, slot, entry[0], entry[1])
 
     def on_thumb_ready(self, key: str, slot: int, path: str) -> None:
+        if key.startswith("board@"):
+            position = self._board_position_of(key)
+            if position >= 0:
+                self.board.set_thumb(position, path)
+            return
         current = self.current
         if current is None or key != self._current_key():
             return
@@ -658,6 +695,8 @@ class MainWindow(QMainWindow):
         viewer.set_thumb(slot, path)
 
     def on_thumb_failed(self, key: str, slot: int) -> None:
+        if key.startswith("board@"):
+            return
         current = self.current
         if current is None or key != self._current_key():
             return
@@ -714,7 +753,7 @@ class MainWindow(QMainWindow):
 
     def _update_page_bar(self) -> None:
         item = self.current
-        if item is None or item.kind != MODE_FOLDERS or not item.videos:
+        if self.board_view or item is None or item.kind != MODE_FOLDERS                 or not item.videos:
             self.page_bar.hide()
             return
         page = self.page_of(item)
@@ -752,6 +791,109 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
     # ------------------------------------------------------------------
+    # Vue planche et notation
+    # ------------------------------------------------------------------
+    def toggle_board(self, visible: bool | None = None) -> None:
+        """Bascule entre la fiche unique et la planche de cartes."""
+        self.board_view = (not self.board_view) if visible is None else visible
+        self.cfg["board_view"] = self.board_view
+        self.cfg.save()
+        self.root_bar.set_board(self.board_view)
+        self._release_media()
+        if self.board_view:
+            self.refresh_board()
+        elif self.items:
+            self.show_item(self.index)
+        self.setFocus()
+
+    def refresh_board(self) -> None:
+        if not self.board_view:
+            return
+        self.viewer.setCurrentWidget(self.board)
+        self.board.set_muted(self.cfg["muted"])
+        self.board.set_items(self.items, self.ratings.get)
+        self.item_title.setText(
+            f"{len(self.items)} élément(s)" if self.items else "Rien à afficher"
+        )
+        self.item_parent.setText(str(self.root) if self.root else "")
+        self.item_subtitle.setText(
+            "Survolez une carte pour la lire, cliquez pour l'ouvrir, "
+            "notez d'un clic sur les étoiles."
+        )
+        self.stars.hide()
+        # Pagination et tri portent sur les apercus d'un dossier : sans objet ici.
+        self.page_bar.hide()
+
+    def on_board_preview(self, position: int) -> None:
+        """Une carte réclame son image : on lui construit sa première vignette."""
+        if not (0 <= position < len(self.items)):
+            return
+        item = self.items[position]
+        if not item.videos or item.locked:
+            return
+        key = f"board@{item.item_id}"
+        plan = self.plans.get(key)
+        if plan is None:
+            self.preview.request_plan(
+                key, item.videos, 1, page=0,
+                one_per_video=item.kind == MODE_FOLDERS,
+            )
+            return
+        self.board.set_source(position, plan[0])
+        self.preview.request_thumb(key, 0, plan[0][0], plan[0][1])
+
+    def _board_position_of(self, key: str) -> int:
+        item_id = key[len("board@"):]
+        for position, item in enumerate(self.items):
+            if item.item_id == item_id:
+                return position
+        return -1
+
+    def on_board_open(self, position: int) -> None:
+        """Un clic sur une carte ouvre l'élément, sans rien déplacer."""
+        if not (0 <= position < len(self.items)):
+            return
+        self.index = position
+        item = self.items[position]
+        if item.kind == MODE_FOLDERS:
+            self.enter_current()
+        else:
+            self.toggle_board(False)
+            self.show_item(position)
+
+    def on_board_rate(self, position: int, stars: int) -> None:
+        if 0 <= position < len(self.items):
+            value = self.ratings.set(self.items[position].path, stars)
+            self.board.set_stars(position, value)
+            self.ratings.flush()
+
+    def rate_current(self, stars: int) -> None:
+        item = self.current
+        if item is None:
+            return
+        value = self.ratings.set(item.path, stars)
+        self.stars.set_value(value)
+        self.ratings.flush()
+        self.show_banner(
+            f"« {item.name} » : {value} étoile(s)" if value
+            else f"« {item.name} » : note effacée", "#2a2f38",
+        )
+
+    def pick_random(self) -> None:
+        """Se place sur un élément au hasard parmi ceux qui restent à voir."""
+        candidates = [i for i, item in enumerate(self.items) if not item.status]
+        if not candidates:
+            self.show_banner("Plus rien à tirer au sort ici", "#2a2f38")
+            return
+        import random
+        position = random.choice(candidates)
+        if self.board_view:
+            self.board.scroll_to(position)
+            self.index = position
+        else:
+            self.show_item(position)
+
+    # ------------------------------------------------------------------
     # Panneau d'arborescence
     # ------------------------------------------------------------------
     def toggle_tree(self, visible: bool | None = None) -> None:
@@ -773,7 +915,18 @@ class MainWindow(QMainWindow):
         self.setFocus()
 
     def on_tree_folder(self, path: str) -> None:
-        """Un clic dans l'arbre vaut décision : pas de confirmation."""
+        """Le clic envoie l'élément en fiche, et ouvre le dossier en planche.
+
+        C'est la seule différence d'intention entre les deux vues : parcourir
+        d'un côté, décider de l'autre.
+        """
+        if self.board_view:
+            self.levels.append({
+                "root": self.root, "mode": self.mode,
+                "item_id": self.current.item_id if self.current else "",
+            })
+            self.start_root(Path(path), reset_levels=False)
+            return
         self.act_move({"path": path, "label": Path(path).name})
 
     def on_tree_root_changed(self, path: str) -> None:
@@ -824,7 +977,10 @@ class MainWindow(QMainWindow):
             self.index = min(self.index, len(self.items) - 1)
         if self.stack.currentIndex() == PAGE_DONE:
             self.stack.setCurrentIndex(PAGE_SORT)
-        self.show_item(self.index)
+        if self.board_view:
+            self.refresh_board()
+        else:
+            self.show_item(self.index)
 
     def focus_filter(self) -> None:
         self.filter_bar.include.setFocus()
@@ -962,6 +1118,7 @@ class MainWindow(QMainWindow):
             self.stats["deleted"] += 1
             size = item.size if item is not None else 0
             self.trash.record(Path(job.src), job.result, size)
+            self.ratings.rename(job.src, job.result)
             self.history.append(
                 HistoryEntry("delete", Path(job.src), job.result, job.label, True)
             )
@@ -969,6 +1126,7 @@ class MainWindow(QMainWindow):
             if item is not None:
                 item.status = "moved"
             self.stats["moved"] += 1
+            self.ratings.rename(job.src, job.result)
             self.history.append(
                 HistoryEntry("move", Path(job.src), job.result, job.label, True)
             )
@@ -995,6 +1153,11 @@ class MainWindow(QMainWindow):
                 self.show_item(self.index)
 
         self.update_counter()
+        if self.board_view and item is not None:
+            for position, listed in enumerate(self.items):
+                if listed is item:
+                    self.board.set_state(position, item.status)
+                    break
 
     def on_transfers_changed(self, active: int) -> None:
         self.root_bar.set_pending(active)
@@ -1077,6 +1240,12 @@ class MainWindow(QMainWindow):
                 return self.focus_filter()
             if key == Qt.Key_B:
                 return self.open_trash()
+            if key == Qt.Key_P:
+                return self.toggle_board()
+            if key == Qt.Key_H:
+                return self.pick_random()
+            if Qt.Key_0 <= key <= Qt.Key_5:
+                return self.rate_current(key - Qt.Key_0)
             if key == Qt.Key_R:
                 return self.refresh_root()
             if key == Qt.Key_Right:
@@ -1162,6 +1331,7 @@ class MainWindow(QMainWindow):
             waiter.close()
         self._flush_trash_on_close()
         self.preview.shutdown()
+        self.ratings.flush()
         self.cfg["window"] = {"w": self.width(), "h": self.height()}
         self.cfg.save()
         super().closeEvent(event)

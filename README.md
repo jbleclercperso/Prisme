@@ -64,9 +64,15 @@ déjà vu est instantané.
 | `Espace` | Passer (je ne sais pas encore), sans rien toucher |
 | `1`…`0`, `a`…`z` | Déplace vers la destination configurée, puis passe au suivant |
 | `←` / `→` | Revenir en arrière / avancer sans décider |
-| **molette** | Avance ou recule dans la vidéo survolée (`Ctrl` pour des sauts six fois plus grands) |
+| **molette** | Avance ou recule dans la vidéo survolée |
+| **Ctrl+molette** | Zoome sur l'image, centré là où pointe la souris (×1 à ×6) |
 | `Ctrl+Z` | Annuler la dernière action |
 | `Ctrl+F` | Aller au champ de filtre |
+| `Ctrl+P` | Basculer entre la fiche unique et la planche |
+| `Ctrl+H` | Se placer sur un élément au hasard |
+| `Ctrl+0`…`5` | Noter l'élément courant |
+| `Ctrl+←/→` | Page d'aperçus précédente / suivante |
+| `Ctrl+B` | Ouvrir la corbeille de session |
 | `Ctrl+R` | Réanalyser tout le disque, sans se fier au cache |
 | `Ctrl+↓` | Entrer dans le dossier affiché pour en trier les vidéos |
 | `Ctrl+↑` | Remonter au dossier parent |
@@ -104,6 +110,33 @@ l'analyse précédente et combien ont dû être réanalysés.
 Le cache vit dans `%LOCALAPPDATA%\VideoSorter\scan-cache.json`, se limite aux
 30 000 dossiers les plus récemment consultés, et `use_scan_cache: false` dans la
 configuration le désactive.
+
+## Vue planche
+
+`Ctrl+P`, ou le bouton **Planche**. Les éléments passent en cartes : image,
+nom, nombre de vidéos, taille, durée, note. Survoler une carte la lit en boucle,
+cliquer l'ouvre.
+
+Ce n'est pas un second logiciel mais une autre présentation du même contenu :
+même racine, même filtre, même arborescence, mêmes touches de destination. Deux
+choses seulement changent — la densité, vingt éléments au lieu d'un, et
+l'intention, puisqu'**un clic dans l'arborescence ouvre le dossier au lieu d'y
+envoyer l'élément**. Les sous-dossiers deviennent des catégories sans rien de
+plus : ouvrir une carte réaffiche une planche.
+
+**Au hasard** (`Ctrl+H`) se place sur un élément non encore traité, dans l'une
+ou l'autre vue.
+
+## Notation
+
+Cinq étoiles en bas à droite de la fiche, et sur chaque carte de la planche.
+Survoler montre la note qui serait posée, cliquer la pose, et **rappuyer sur la
+même valeur l'efface** — pas besoin d'un bouton de remise à zéro. Au clavier :
+`Ctrl+1` à `Ctrl+5`, `Ctrl+0` pour effacer.
+
+Les notes vivent dans `%LOCALAPPDATA%\VideoSorteratings.json` : rien n'est
+écrit dans vos dossiers. Elles **suivent l'élément quand il est déplacé**, sans
+quoi ranger une vidéo notée lui aurait fait perdre sa note.
 
 ## Filtrer
 
@@ -206,9 +239,19 @@ Fabrique une arborescence avec de vraies vidéos (ffmpeg), puis vérifie l'analy
 la répartition des aperçus, les déplacements, les suppressions, les annulations,
 les collisions de noms, les deux modes, la molette, l'arborescence, la barre de
 commandes à la souris, le filtre par nom, les métadonnées des vignettes, la
-descente dans les sous-dossiers, le cache d'analyse, la gestion des destinations
-et les transferts en tâche de fond — interface comprise, en mode sans affichage.
-171 vérifications.
+descente dans les sous-dossiers, le cache d'analyse, la gestion des destinations,
+la corbeille de session, la vue planche, la notation, le zoom et les transferts
+en tâche de fond — interface comprise, en mode sans affichage. 204 vérifications.
+
+La suite porte un garde-fou : passé un délai, elle imprime la pile plutôt que
+d'attendre indéfiniment. Une interface graphique arrêtée sur une boîte de
+dialogue modale ne le signale pas autrement.
+
+```bash
+python tests/test_network.py
+```
+
+Vérifie la reconnaissance d'un stockage réseau et le parallélisme qui en découle.
 
 ```bash
 python tests/bench_scan.py
@@ -230,6 +273,9 @@ Vérifie la corbeille Windows réelle et exporte une capture de la fenêtre.
 | `videosorter/config.py` | Configuration persistante, emplacements |
 | `videosorter/scan.py` | Analyse de la racine, statistiques des dossiers |
 | `videosorter/scan_cache.py` | Mémoire des analyses précédentes |
+| `videosorter/board.py` | Vue planche : les éléments en cartes |
+| `videosorter/ratings.py` | Notes de 0 à 5 étoiles |
+| `videosorter/trash.py` | Corbeille de session |
 | `videosorter/media.py` | ffmpeg/ffprobe, cache, vignettes en arrière-plan |
 | `videosorter/actions.py` | Déplacer, supprimer, annuler |
 | `videosorter/transfer.py` | File de transferts en tâche de fond |

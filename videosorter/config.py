@@ -11,6 +11,7 @@ CONFIG_PATH = APP_DIR / "config.json"
 THUMB_DIR = APP_DIR / "thumbs"
 PROBE_CACHE_PATH = APP_DIR / "probe-cache.json"
 SCAN_CACHE_PATH = APP_DIR / "scan-cache.json"
+RATINGS_PATH = APP_DIR / "ratings.json"
 LOCAL_TRASH = APP_DIR / "_TRASH"
 
 VIDEO_EXTS = {
@@ -45,6 +46,7 @@ DEFAULTS = {
     "skip_hidden": True,
     "use_scan_cache": True,      # reutiliser l analyse precedente
     "sort_mode": "",             # "" | "desc" | "asc" : classement des apercus
+    "board_view": False,         # vue planche plutot que fiche unique
 }
 
 
