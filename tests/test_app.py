@@ -324,7 +324,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.3)
     check(window.cfg["muted"] is False, "un clic réactive le son")
     check(window.mute_button.text() == "\U0001F50A", "il change quand le son revient")
-    check(window.grid.audio.isMuted() is False, "le lecteur suit")
+    check(window.single.audio.isMuted() is False, "le lecteur suit")
+    check(not hasattr(window.grid, "audio") and not hasattr(window.board, "audio"),
+          "les apercus survoles n'ont aucune piste son a decoder")
     QTest.keyClick(window, Qt.Key_M, Qt.ControlModifier)
     pump(app, 0.3)
     check(window.cfg["muted"] is True, "Ctrl+M recoupe le son")

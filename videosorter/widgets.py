@@ -296,10 +296,11 @@ class PreviewGrid(QWidget):
         self.video = QVideoWidget(self)
         self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.video.hide()
-        self.audio = QAudioOutput(self)
+        # Aucune sortie audio : un aperçu survolé se regarde, il ne s'écoute
+        # pas. Sans sortie, Qt ne décode pas la piste son du tout — c'est
+        # autant de travail et de bande passante réseau en moins par vignette.
         self.player = QMediaPlayer(self)
         self.player.setVideoOutput(self.video)
-        self.player.setAudioOutput(self.audio)
         self.player.mediaStatusChanged.connect(self._on_status)
         self.player.positionChanged.connect(self._on_position)
         self.player.errorOccurred.connect(self._on_error)
@@ -324,7 +325,7 @@ class PreviewGrid(QWidget):
         self.stop()
 
     def set_muted(self, muted: bool) -> None:
-        self.audio.setMuted(muted)
+        """Sans piste son décodée, il n'y a rien à couper : conservé pour l'appel."""
 
     def set_item(self, item_id: str, message: str = "…") -> None:
         self.stop()
