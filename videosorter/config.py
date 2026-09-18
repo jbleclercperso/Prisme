@@ -70,6 +70,31 @@ class Config:
             for key, value in raw.items():
                 if key in DEFAULTS:
                     self.data[key] = value
+        self._migrate_reserved_keys()
+
+    def _migrate_reserved_keys(self) -> None:
+        """Deplace les destinations posees sur une touche devenue la notation.
+
+        Les configurations ecrites avant que 0 a 5 servent a noter gardaient ces
+        touches : le raccourci ne se serait plus jamais declenche, sans rien dire.
+        """
+        destinations = self.data.get("destinations") or []
+        taken = {d.get("key") for d in destinations if d.get("key") not in RESERVED_KEYS}
+        moved = False
+        for dest in destinations:
+            if dest.get("key") not in RESERVED_KEYS:
+                continue
+            for candidate in KEY_ORDER:
+                if candidate not in taken:
+                    dest["key"] = candidate
+                    taken.add(candidate)
+                    moved = True
+                    break
+            else:
+                dest["key"] = ""
+                moved = True
+        if moved:
+            self.save()
 
     def save(self) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)

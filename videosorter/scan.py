@@ -9,8 +9,9 @@ from PySide6.QtCore import QThread, Signal
 
 from .config import VIDEO_EXTS
 
-MODE_FOLDERS = "folders"
-MODE_FILES = "files"
+MODE_FOLDERS = "folders"   # les sous-dossiers, un par un
+MODE_FILES = "files"       # les videos posees directement dans la racine
+MODE_FLAT = "flat"         # toutes les videos de l'arborescence, sans leurs dossiers
 
 # Au-delà, on arrête de collecter les chemins de vidéos d'un même dossier :
 # dix aperçus n'en demandent pas plus et cela borne la mémoire sur les gros lots.
@@ -216,8 +217,43 @@ def detect_mode(root: Path, skip_hidden: bool = True) -> str:
     return MODE_FILES
 
 
+def list_all_videos(root: Path, skip_hidden: bool = True, limit: int = 50000) -> list:
+    """Toutes les vidéos de l'arborescence, à plat, quel que soit leur dossier.
+
+    C'est la vue qu'on veut pour chercher par nom dans toute une collection :
+    les dossiers n'y sont qu'un détail de rangement.
+    """
+    found = []
+    stack = [str(root)]
+    while stack and len(found) < limit:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if not (skip_hidden and _is_hidden(entry)):
+                        stack.append(entry.path)
+                    continue
+            except OSError:
+                continue
+            dot = entry.name.rfind(".")
+            if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
+                if skip_hidden and _is_hidden(entry):
+                    continue
+                found.append(entry.path)
+                if len(found) >= limit:
+                    break
+    found.sort(key=str.lower)
+    return [Path(path) for path in found]
+
+
 def list_entries(root: Path, mode: str, skip_hidden: bool = True) -> list:
     """Liste, sans les analyser, les chemins de premier niveau à traiter."""
+    if mode == MODE_FLAT:
+        return list_all_videos(root, skip_hidden)
     entries = []
     try:
         for entry in sorted(os.scandir(root), key=lambda e: e.name.lower()):
@@ -238,8 +274,13 @@ class ScanThread(QThread):
     """Analyse la racine en tâche de fond, en publiant les éléments au fil de l'eau."""
 
     progress = Signal(int, int, str)   # fait, total, nom courant
-    item_ready = Signal(object)
+    # Les elements partent par paquets : une mise a jour d'interface par
+    # element coutait plus cher que l'analyse elle-meme sur un gros dossier.
+    items_ready = Signal(list)
     finished_scan = Signal(str, int)   # mode, total
+
+    BATCH_SIZE = 40
+    BATCH_DELAY = 0.12                 # secondes
 
     def __init__(self, root: Path, mode: str = "", skip_hidden: bool = True,
                  use_cache: bool = True, parent=None):
@@ -260,13 +301,24 @@ class ScanThread(QThread):
         # creerait un cycle.
         from .scan_cache import CACHE, signature
 
+        import time as _time
+
         mode = self.mode or detect_mode(self.root, self.skip_hidden)
         paths = list_entries(self.root, mode, self.skip_hidden)
         total = len(paths)
+        batch: list = []
+        last_flush = _time.monotonic()
+
+        last_progress = 0.0
         for index, path in enumerate(paths, start=1):
             if self._stop:
                 return
-            self.progress.emit(index, total, path.name)
+            # L'avancement est annonce au rythme de l'oeil, pas du disque :
+            # un signal par element repeignait la barre six cents fois.
+            now_progress = _time.monotonic()
+            if now_progress - last_progress >= 0.10 or index == total:
+                self.progress.emit(index, total, path.name)
+                last_progress = now_progress
 
             if mode != MODE_FOLDERS:
                 item = scan_file(path)
@@ -282,7 +334,17 @@ class ScanThread(QThread):
 
             if self._stop:
                 return
-            self.item_ready.emit(item)
+            batch.append(item)
+            # Le premier element part seul : on veut pouvoir trier tout de suite,
+            # sans attendre que le paquet se remplisse.
+            now = _time.monotonic()
+            if (len(batch) >= self.BATCH_SIZE or index == 1
+                    or now - last_flush >= self.BATCH_DELAY):
+                self.items_ready.emit(batch)
+                batch = []
+                last_flush = now
 
+        if batch and not self._stop:
+            self.items_ready.emit(batch)
         CACHE.flush()
         self.finished_scan.emit(mode, total)

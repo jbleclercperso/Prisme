@@ -15,17 +15,20 @@ from PySide6.QtGui import QCursor, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from .scan import MODE_FOLDERS, human_duration, human_size
+from .scan import MODE_FOLDERS, human_duration, human_resolution, human_size
 from .widgets import StarStrip, elide
 
 # Densites proposees : moins de colonnes, donc des cartes plus grandes.
-COLUMN_CHOICES = (2, 3, 4, 5, 6, 8)
+COLUMN_CHOICES = (2, 3, 4, 5, 6, 7, 8, 9, 10)
 DEFAULT_COLUMNS = 5
 CARD_GAP = 10
 MIN_CARD_WIDTH = 150
+# Une carte coute cher a construire : six cents d'un coup prenaient plusieurs
+# secondes. On n'en batit qu'une page, et l'on tourne les pages.
+PAGE_SIZE = 60
 
 
 class BoardCard(QFrame):
@@ -61,13 +64,21 @@ class BoardCard(QFrame):
         self.name.setObjectName("boardName")
         layout.addWidget(self.name)
 
+        # Seconde ligne : ce qui qualifie la video a gauche, la note a droite.
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(8)
         self.meta = QLabel("", self)
         self.meta.setObjectName("boardMeta")
-        layout.addWidget(self.meta)
-
-        self.stars = StarStrip(17, self)
+        self.size_label = QLabel("", self)
+        self.size_label.setObjectName("boardMeta")
+        self.stars = StarStrip(16, self)
         self.stars.rated.connect(lambda value: self.rated.emit(self.index, value))
-        layout.addWidget(self.stars)
+        bottom.addWidget(self.meta)
+        bottom.addStretch(1)
+        bottom.addWidget(self.size_label)
+        bottom.addWidget(self.stars)
+        layout.addLayout(bottom)
 
         self.duration_chip = QLabel("", self)
         self.duration_chip.setObjectName("tileDuration")
@@ -75,7 +86,8 @@ class BoardCard(QFrame):
 
         # Sans cela, un clic tombant sur l'image ou le texte n'atteindrait pas
         # la carte : seules ses marges auraient repondu.
-        for child in (self.image, self.name, self.meta, self.duration_chip):
+        for child in (self.image, self.name, self.meta, self.size_label,
+                      self.duration_chip):
             child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
     def set_item(self, item, stars: int) -> None:
@@ -92,8 +104,8 @@ class BoardCard(QFrame):
                 pieces.append(f"{item.subdir_count} dossier(s)")
         else:
             pieces = []
-        pieces.append(human_size(item.size))
         self.meta.setText("   ·   ".join(pieces))
+        self.size_label.setText(human_size(item.size))
         self.stars.set_value(stars)
         self.duration_chip.hide()
         self.set_state(item.status)
@@ -108,6 +120,13 @@ class BoardCard(QFrame):
                    height: int = 0) -> None:
         self.video = video
         self.ts = ts
+        resolution = human_resolution(height)
+        if resolution:
+            current = self.meta.text()
+            if resolution not in current:
+                self.meta.setText(
+                    f"{resolution}   ·   {current}" if current else resolution
+                )
         if duration:
             self.duration_chip.setText(human_duration(duration))
             self.duration_chip.adjustSize()
@@ -167,6 +186,7 @@ class BoardView(QWidget):
     rateRequested = Signal(int, int)
     previewNeeded = Signal(int)
     playRequested = Signal(str, float)
+    pageChanged = Signal(int, int, int)   # premier, dernier, total
 
     def __init__(self, preview_seconds: int = 10, columns: int = DEFAULT_COLUMNS,
                  parent=None):
@@ -175,7 +195,9 @@ class BoardView(QWidget):
         self.columns = columns
         self.items: list = []
         self.cards: list = []
-        self.hovered = -1
+        self.page = 0
+        self.hovered = -1          # rang de la carte survolee, dans la page
+        self._stars_of = lambda _path: 0
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -235,54 +257,132 @@ class BoardView(QWidget):
     def set_muted(self, muted: bool) -> None:
         self.audio.setMuted(muted)
 
-    def set_items(self, items: list, stars_of) -> None:
-        """Remplit la planche. `stars_of` donne la note d'un élément."""
-        self.stop()
-        self.items = list(items)
-        self.empty.setVisible(not self.items)
-        self.scroll.setVisible(bool(self.items))
-
-        while len(self.cards) < len(self.items):
+    def _ensure_cards(self, count: int) -> None:
+        while len(self.cards) < count:
             card = BoardCard(len(self.cards), self.canvas)
             card.opened.connect(self.openRequested)
             card.rated.connect(self.rateRequested)
             card.played.connect(self._play_full)
             self.cards.append(card)
 
+    def set_items(self, items: list, stars_of) -> None:
+        """Remplit la planche, en ne refaisant que ce qui a changé.
+
+        Les cartes dont l'élément n'a pas bougé gardent leur image : tout
+        reconstruire ferait clignoter la planche et redemanderait des vignettes
+        déjà obtenues.
+        """
+        self.stop()
+        previous = self.items
+        same_head = bool(previous) and bool(items) and previous[:1] == items[:1]
+        self.items = list(items)
+        if not same_head:
+            self.page = 0
+        self.empty.setVisible(not self.items)
+        self.scroll.setVisible(bool(self.items))
+        self._stars_of = stars_of
+        self._fill_page(previous)
+
+    def _page_bounds(self) -> tuple:
+        first = self.page * PAGE_SIZE
+        return first, min(first + PAGE_SIZE, len(self.items))
+
+    def _fill_page(self, previous=None) -> None:
+        first, last = self._page_bounds()
+        shown = last - first
+        self._ensure_cards(shown)
         width = self._card_width()
-        for position, card in enumerate(self.cards):
-            self.grid.removeWidget(card)
-            if position < len(self.items):
-                card.index = position
-                card.set_card_width(width)
-                card.set_item(self.items[position], stars_of(self.items[position].path))
-                self.grid.addWidget(card, position // self.columns,
-                                    position % self.columns)
-                card.show()
-            else:
+        needed = []
+        for slot, card in enumerate(self.cards):
+            if slot >= shown:
+                self.grid.removeWidget(card)
                 card.hide()
-        for position in range(len(self.items)):
+                continue
+            position = first + slot
+            item = self.items[position]
+            unchanged = (previous is not None and position < len(previous)
+                         and previous[position] is item and card.video
+                         and card.index == position)
+            card.index = position
+            if card.width() != width:
+                card.set_card_width(width)
+            if not unchanged:
+                card.set_item(item, self._stars_of(item.path))
+                needed.append(position)
+            else:
+                card.stars.set_value(self._stars_of(item.path))
+                card.set_state(item.status)
+            self.grid.addWidget(card, slot // self.columns, slot % self.columns)
+            card.show()
+        self.pageChanged.emit(first + 1 if self.items else 0, last, len(self.items))
+        for position in needed:
             self.previewNeeded.emit(position)
 
+    def total_pages(self) -> int:
+        return max(1, -(-len(self.items) // PAGE_SIZE))
+
+    def set_page(self, page: int) -> None:
+        page = max(0, min(page, self.total_pages() - 1))
+        if page == self.page:
+            return
+        self.stop()
+        self.page = page
+        self.scroll.verticalScrollBar().setValue(0)
+        self._fill_page()
+
+    def append_item(self, item, stars: int) -> None:
+        """Ajoute une carte sans toucher aux autres, pendant que l'analyse avance."""
+        position = len(self.items)
+        self.items.append(item)
+        first, _last = self._page_bounds()
+        if not first <= position < first + PAGE_SIZE:
+            # Hors de la page regardee : rien a batir, on met juste le compte a jour.
+            self.pageChanged.emit(first + 1, first + PAGE_SIZE, len(self.items))
+            return
+        slot = position - first
+        self._ensure_cards(slot + 1)
+        card = self.cards[slot]
+        card.index = position
+        card.set_card_width(self._card_width())
+        card.set_item(item, stars)
+        self.grid.addWidget(card, slot // self.columns, slot % self.columns)
+        card.show()
+        self.empty.hide()
+        self.scroll.show()
+        self.pageChanged.emit(first + 1, position + 1, len(self.items))
+        self.previewNeeded.emit(position)
+
+    def _card_for(self, position: int):
+        """Carte montrant cet element, ou None s'il n'est pas sur la page vue."""
+        first, last = self._page_bounds()
+        if not first <= position < last:
+            return None
+        slot = position - first
+        return self.cards[slot] if slot < len(self.cards) else None
+
     def set_stars(self, position: int, stars: int) -> None:
-        if 0 <= position < len(self.cards):
-            self.cards[position].stars.set_value(stars)
+        card = self._card_for(position)
+        if card is not None:
+            card.stars.set_value(stars)
 
     def set_state(self, position: int, status: str) -> None:
-        if 0 <= position < len(self.cards):
-            self.cards[position].set_state(status)
+        card = self._card_for(position)
+        if card is not None:
+            card.set_state(status)
 
     def set_source(self, position: int, entry) -> None:
-        if 0 <= position < len(self.cards):
-            self.cards[position].set_source(*entry)
+        card = self._card_for(position)
+        if card is not None:
+            card.set_source(*entry)
 
     def set_thumb(self, position: int, path: str) -> None:
-        if 0 <= position < len(self.cards):
-            self.cards[position].set_thumb(path)
+        card = self._card_for(position)
+        if card is not None:
+            card.set_thumb(path)
 
     def _play_full(self, position: int) -> None:
-        if 0 <= position < len(self.cards) and self.cards[position].video:
-            card = self.cards[position]
+        card = self._card_for(position)
+        if card is not None and card.video:
             self.playRequested.emit(card.video, card.ts)
 
     def random_index(self) -> int:
@@ -290,8 +390,12 @@ class BoardView(QWidget):
         return random.choice(candidates) if candidates else -1
 
     def scroll_to(self, position: int) -> None:
-        if 0 <= position < len(self.cards):
-            self.scroll.ensureWidgetVisible(self.cards[position], 40, 40)
+        if not 0 <= position < len(self.items):
+            return
+        self.set_page(position // PAGE_SIZE)
+        card = self._card_for(position)
+        if card is not None:
+            self.scroll.ensureWidgetVisible(card, 40, 40)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -307,20 +411,21 @@ class BoardView(QWidget):
         self._relayout()
 
     def _relayout(self) -> None:
+        first, last = self._page_bounds()
         width = self._card_width()
-        for position, card in enumerate(self.cards[:len(self.items)]):
+        for slot, card in enumerate(self.cards[:last - first]):
             self.grid.removeWidget(card)
             card.set_card_width(width)
-            self.grid.addWidget(card, position // self.columns,
-                                position % self.columns)
+            self.grid.addWidget(card, slot // self.columns, slot % self.columns)
 
     # -- survol et lecture ----------------------------------------------
     def _poll_hover(self) -> None:
         if not self.isVisible() or not self.window().isActiveWindow():
             return
         cursor = QCursor.pos()
+        first, last = self._page_bounds()
         found = -1
-        for position, card in enumerate(self.cards[:len(self.items)]):
+        for position, card in enumerate(self.cards[:last - first]):
             if card.isVisible() and card.rect().contains(card.mapFromGlobal(cursor)):
                 found = position
                 break
@@ -344,7 +449,6 @@ class BoardView(QWidget):
         origin = area.mapTo(self.canvas, QPoint(0, 0))
         self.video.setGeometry(origin.x(), origin.y(), area.width(), area.height())
         self.video.raise_()
-        self.video.show()
 
         self._segment_start = int(card.ts * 1000)
         self._pending_seek = self._segment_start
@@ -358,9 +462,14 @@ class BoardView(QWidget):
     def _on_status(self, status) -> None:
         loaded = (QMediaPlayer.MediaStatus.LoadedMedia,
                   QMediaPlayer.MediaStatus.BufferedMedia)
-        if status in loaded and self._pending_seek:
-            self.player.setPosition(self._pending_seek)
-            self._pending_seek = 0
+        if status in loaded:
+            if self._pending_seek:
+                self.player.setPosition(self._pending_seek)
+                self._pending_seek = 0
+            # L'image n'est devoilee qu'une fois prete : la vignette reste
+            # visible jusque-la, au lieu d'un rectangle noir.
+            if self.hovered != -1:
+                self.video.show()
         elif status == QMediaPlayer.MediaStatus.EndOfMedia:
             self.player.setPosition(self._segment_start)
             self.player.play()

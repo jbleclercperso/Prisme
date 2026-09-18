@@ -39,7 +39,7 @@ from videosorter import config as vs_config  # noqa: E402
 from videosorter import media as vs_media  # noqa: E402
 from videosorter.config import Config  # noqa: E402
 from videosorter.media import Tools  # noqa: E402
-from videosorter.scan import MODE_FILES, MODE_FOLDERS  # noqa: E402
+from videosorter.scan import MODE_FILES, MODE_FLAT, MODE_FOLDERS  # noqa: E402
 from videosorter.window import MainWindow  # noqa: E402
 
 from make_fixture import build  # noqa: E402
@@ -158,7 +158,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.cfg.set_destinations(many)
     window.commands.rebuild(many, "Corbeille")
     caps = window.commands.layout_.count()
-    check(caps == 23, f"les 20 destinations sont toutes affichées (obtenu {caps - 3})")
+    check(caps == 28, f"les 20 destinations sont toutes affichées (obtenu {caps - 8})")
     window.commands.setFixedWidth(600)
     window.commands.layout_.setGeometry(window.commands.rect())
     height = window.commands.layout_.heightForWidth(600)
@@ -202,16 +202,17 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         window.commands.layout_.itemAt(i).widget()
         for i in range(window.commands.layout_.count())
     ]
-    check(len(caps) == 4,
-          f"quatre vignettes : Suppr, Espace, Noter, 1 destination ({len(caps)})")
+    check(len(caps) == 9,
+          f"neuf vignettes : Suppr, Espace, 5 notes, effacer, 1 destination "
+          f"({len(caps)})")
     check(all(c.cursor().shape() == Qt.PointingHandCursor for c in caps),
           "les vignettes se signalent comme cliquables")
-    check("touche 6" in caps[3].toolTip(), "l'infobulle rappelle la touche")
+    check("touche 6" in caps[8].toolTip(), "l'infobulle rappelle la touche")
 
     window.show_item(first_untouched(window))
     name = window.current.name
     index_before = window.index
-    QTest.mouseClick(caps[3], Qt.LeftButton)
+    QTest.mouseClick(caps[8], Qt.LeftButton)
     settle(app, window)
     check((tri / "souris" / name).exists(),
           f"un clic sur la vignette « 1 » envoie « {name} » vers sa destination")
@@ -234,9 +235,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     # Relâcher en dehors de la vignette ne doit rien déclencher.
     window.show_item(first_untouched(window))
     intact = window.current.name
-    QTest.mousePress(caps[3], Qt.LeftButton)
-    QTest.mouseRelease(caps[3], Qt.LeftButton, Qt.NoModifier,
-                       QPoint(caps[3].width() + 40, 5))
+    QTest.mousePress(caps[8], Qt.LeftButton)
+    QTest.mouseRelease(caps[8], Qt.LeftButton, Qt.NoModifier,
+                       QPoint(caps[8].width() + 40, 5))
     settle(app, window, 5)
     check(not (tri / "souris" / intact).exists(),
           "un clic relâché en dehors est sans effet")
@@ -306,16 +307,17 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(tile.duration_chip.text() == "0:06", "la durée revient une fois le survol fini")
 
     print("\n[19] Bouton de son")
-    check(window.root_bar.mute.text() == "Son coupé", "état initial visible dans l'entête")
+    check(window.root_bar.mute.text() == "\U0001F507",
+          f"le pictogramme dit que le son est coupé (obtenu {window.root_bar.mute.text()!r})")
     QTest.mouseClick(window.root_bar.mute, Qt.LeftButton)
     pump(app, 0.3)
     check(window.cfg["muted"] is False, "un clic réactive le son")
-    check(window.root_bar.mute.text() == "Son actif", "le bouton reflète le nouvel état")
+    check(window.root_bar.mute.text() == "\U0001F50A", "il change quand le son revient")
     check(window.grid.audio.isMuted() is False, "le lecteur suit")
     QTest.keyClick(window, Qt.Key_M, Qt.ControlModifier)
     pump(app, 0.3)
     check(window.cfg["muted"] is True, "Ctrl+M recoupe le son")
-    check(window.root_bar.mute.text() == "Son coupé", "et le bouton se remet à jour")
+    check(window.root_bar.mute.text() == "\U0001F507", "et se remet à jour")
 
     print("\n[20] Filtre par nom")
     window.start_root(root)
@@ -712,11 +714,16 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.start_root(root)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     seen = set()
-    for _ in range(25):
+    for _ in range(20):
         window.pick_random()
-        seen.add(window.index)
-    check(len(seen) > 1, f"le tirage visite plusieurs éléments ({len(seen)})")
-    check(all(0 <= i < len(window.items) for i in seen), "toujours dans la liste")
+        pump(app, 0.12)
+        source = window.focus.player.source().toLocalFile()
+        if source:
+            seen.add(Path(source))
+        window.focus.stop()
+        pump(app, 0.05)
+    check(len(seen) > 1, f"le tirage visite plusieurs vidéos ({len(seen)})")
+    pump(app, 0.3)
 
     print("\n[33] Densité de la planche et clic sur toute la carte")
     window.start_root(root)
@@ -824,7 +831,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.start_root(flat)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 1, 60)
     video = str(window.current.path)
-    check(window.focus.isHidden(), "le lecteur intégré reste caché tant qu'on ne l'ouvre pas")
+    window.focus.stop()
+    pump(app, 0.2)
+    check(window.focus.isHidden(), "le lecteur intégré part fermé")
     window.play_in_app(video, 1.0)
     pump(app, 0.6)
     check(not window.focus.isHidden(), "il s'ouvre sur demande")
@@ -872,6 +881,146 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(window.grid.remaining is not None, "la grille d'aperçus en a un")
     check(window.board.remaining is not None, "la planche aussi")
     check(window.grid.remaining.isHidden(), "masqué tant que rien ne se lit")
+
+    print("\n[39] Trois modes de lecture de la racine")
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    folders_count = len(window.items)
+    check(all(i.kind == MODE_FOLDERS for i in window.items),
+          "mode dossiers : des dossiers")
+
+    window.start_root(root, MODE_FLAT)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 90)
+    flat_items = window.items
+    check(all(i.kind == MODE_FILES for i in flat_items),
+          "mode a plat : des fichiers")
+    check(len(flat_items) > folders_count,
+          f"et bien plus nombreux ({len(flat_items)} contre {folders_count} dossiers)")
+    depths = {len(Path(i.path).relative_to(root).parts) for i in flat_items}
+    check(max(depths) >= 2,
+          f"des videos nichees dans des sous-dossiers y figurent (profondeurs {sorted(depths)})")
+    check(all(Path(i.path).suffix.lower() == ".mp4" for i in flat_items),
+          "et rien d'autre que des videos")
+
+    # Le filtre par nom porte alors sur toute la collection.
+    window.apply_filter("clip_0", "")
+    pump(app, 0.4)
+    check(0 < len(window.items) < len(flat_items),
+          f"filtrer par nom fouille tout le stock ({len(window.items)} trouvees)")
+    window.apply_filter("", "")
+    pump(app, 0.4)
+
+    print("\n[40] Tirage au hasard sur tout le stock")
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    pool = {Path(v) for item in window.all_items for v in item.videos}
+    check(len(pool) > len(window.items),
+          f"le vivier depasse la liste affichee ({len(pool)} videos)")
+    tirages = set()
+    for _ in range(30):
+        window.pick_random()
+        pump(app, 0.12)
+        source = window.focus.player.source().toLocalFile()
+        if source:
+            tirages.add(Path(source))
+        window.focus.stop()
+        pump(app, 0.05)
+    check(len(tirages) > 3,
+          f"le tirage varie vraiment ({len(tirages)} videos differentes)")
+    check(tirages <= pool,
+          f"et reste dans le stock analyse ({len(tirages - pool)} intrus)")
+
+    print("\n[41] Notation visuelle et touches de destination")
+    from videosorter.config import KEY_ORDER, RESERVED_KEYS
+    caps = [window.commands.layout_.itemAt(i).widget()
+            for i in range(window.commands.layout_.count())]
+    star_caps = [c for c in caps if type(c).__name__ == "StarCap"]
+    check(len(star_caps) == 5, f"cinq vignettes de notation ({len(star_caps)})")
+    check([c.count for c in star_caps] == [1, 2, 3, 4, 5],
+          "une par nombre d'etoiles")
+    check(star_caps[2].stars.value == 3, "la troisieme en dessine trois")
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.show_item(first_untouched(window))
+    target = window.current
+    window.ratings.set(target.path, 0)
+    star_caps[3].clicked.emit()
+    pump(app, 0.2)
+    check(window.ratings.get(target.path) == 4,
+          "cliquer la vignette « 4 » pose quatre etoiles")
+
+    print("\n[42] Une configuration ancienne migre ses touches")
+    import json, tempfile
+    from videosorter.config import Config as VSConfig
+    old = Path(tempfile.mkdtemp()) / "config.json"
+    old.write_text(json.dumps({"destinations": [
+        {"key": "1", "label": "A", "path": "C:/a"},
+        {"key": "3", "label": "B", "path": "C:/b"},
+        {"key": "9", "label": "C", "path": "C:/c"},
+    ]}), encoding="utf-8")
+    migrated = VSConfig(path=old)
+    keys = [d["key"] for d in migrated.destinations]
+    check(not set(keys) & RESERVED_KEYS,
+          f"plus aucune destination sur une touche de notation ({keys})")
+    check(keys[2] == "9", "celles deja valides ne bougent pas")
+    check(len(set(keys)) == 3, "et restent distinctes")
+
+    print("\n[43] La planche ne batit qu'une page de cartes")
+    from videosorter.board import PAGE_SIZE
+    from videosorter.scan import Item
+
+    window.toggle_board(True)
+    pump(app, 0.3)
+    many = [Item(path=Path(f"C:/faux/dossier_{i:03d}"), kind=MODE_FOLDERS,
+                 video_count=3, size=1024)
+            for i in range(PAGE_SIZE * 2 + 15)]
+    window.board.set_items(many, lambda _p: 0)
+    pump(app, 0.4)
+    built = sum(1 for c in window.board.cards if not c.isHidden())
+    check(built == PAGE_SIZE,
+          f"une page de {PAGE_SIZE} cartes, pas {len(many)} ({built} bâties)")
+    check(len(window.board.items) == len(many),
+          "alors que la liste complète est bien retenue")
+    check(window.board.total_pages() == 3,
+          f"trois pages pour {len(many)} éléments ({window.board.total_pages()})")
+
+    window.board.set_page(1)
+    pump(app, 0.3)
+    check(window.board.page == 1, "on tourne la page")
+    check(window.board.cards[0].index == PAGE_SIZE,
+          f"la première carte reprend au bon rang ({window.board.cards[0].index})")
+    still = sum(1 for c in window.board.cards if not c.isHidden())
+    check(still == PAGE_SIZE, f"toujours une page de cartes ({still})")
+
+    window.board.set_page(2)
+    pump(app, 0.3)
+    last = sum(1 for c in window.board.cards if not c.isHidden())
+    check(last == 15, f"la dernière page n'affiche que le reste ({last})")
+    window.board.set_page(99)
+    check(window.board.page == 2, "on ne déborde pas au-delà de la dernière")
+    window.board.set_page(-5)
+    check(window.board.page == 0, "ni en deçà de la première")
+
+    # Un element hors page ne doit pas planter les mises a jour.
+    window.board.set_stars(PAGE_SIZE + 3, 4)
+    window.board.set_state(PAGE_SIZE + 3, "moved")
+    window.board.set_thumb(PAGE_SIZE + 3, "C:/inexistant.jpg")
+    check(True, "agir sur un élément hors page reste sans incident")
+    window.toggle_board(False)
+    pump(app, 0.3)
+
+    print("\n[44] L'analyse livre par paquets")
+    from videosorter.scan import ScanThread
+    check(ScanThread.BATCH_SIZE > 1,
+          f"les éléments partent groupés ({ScanThread.BATCH_SIZE} par paquet)")
+    batches = []
+    window.start_root(root)
+    window.scan_thread.items_ready.connect(lambda b: batches.append(len(b)))
+    wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
+    pump(app, 0.3)
+    check(sum(batches) >= 1, f"des paquets ont bien été reçus ({batches})")
+    check(len(window.all_items) >= 3,
+          f"et tous les éléments sont arrivés ({len(window.all_items)})")
 
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]

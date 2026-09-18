@@ -18,7 +18,7 @@ from .config import Config
 from .media import PreviewManager, Tools, page_count, probe
 from .ratings import Ratings
 from .scan import (
-    MODE_FILES, MODE_FOLDERS, ScanThread, detect_mode, human_duration,
+    MODE_FILES, MODE_FLAT, MODE_FOLDERS, ScanThread, detect_mode, human_duration,
     human_resolution, human_size, known_media, list_entries,
 )
 from .transfer import Transfer, TransferQueue
@@ -179,8 +179,7 @@ class MainWindow(QMainWindow):
         self.root_bar.toggleBoard.connect(self.toggle_board)
         self.root_bar.pickRandom.connect(self.pick_random)
         self.root_bar.goBack.connect(self.go_back)
-        self.root_bar.columnsChanged.connect(self.set_board_columns)
-        self.root_bar.set_columns_choices(COLUMN_CHOICES, self.cfg["board_columns"])
+
         self.root_bar.set_board(self.board_view)
         self.root_bar.set_muted(self.cfg["muted"])
         layout.addWidget(self.root_bar)
@@ -193,6 +192,10 @@ class MainWindow(QMainWindow):
 
         self.advanced_filter = AdvancedFilterBar(sort_page)
         self.advanced_filter.changed.connect(self.on_advanced_filter)
+        self.advanced_filter.columnsChanged.connect(self.set_board_columns)
+        self.advanced_filter.set_columns_choices(
+            COLUMN_CHOICES, self.cfg["board_columns"]
+        )
         self.advanced_filter.hide()
         layout.addWidget(self.advanced_filter)
 
@@ -259,6 +262,7 @@ class MainWindow(QMainWindow):
         self.board.rateRequested.connect(self.on_board_rate)
         self.board.previewNeeded.connect(self.on_board_preview)
         self.board.playRequested.connect(self.play_in_app)
+        self.board.pageChanged.connect(self.on_board_page)
         self.viewer.addWidget(self.grid)
         self.viewer.addWidget(self.single)
         self.viewer.addWidget(self.board)
@@ -273,6 +277,7 @@ class MainWindow(QMainWindow):
         self.commands.deleteRequested.connect(self.on_command_delete)
         self.commands.skipRequested.connect(self.on_command_skip)
         self.commands.moveRequested.connect(self.on_command_move)
+        self.commands.rateRequested.connect(self.rate_current)
         bottom = QHBoxLayout()
         bottom.setContentsMargins(0, 0, 0, 0)
         bottom.addWidget(self.commands, 1)
@@ -350,8 +355,12 @@ class MainWindow(QMainWindow):
         self.welcome.set_recent(self.cfg["recent_roots"])
 
         depth = f"   ·   niveau {len(self.levels) + 1}" if self.levels else ""
-        mode_name = "dossiers" if self.mode == MODE_FOLDERS else "fichiers"
-        self.root_bar.root_label.setText(f"{self.root}   ·   mode {mode_name}{depth}")
+        mode_name = self.MODE_LABELS.get(self.mode, self.mode)
+        self.root_bar.root_label.setText(f"{self.root}   ·   {mode_name}{depth}")
+        self.root_bar.mode_button.setText(f"Mode : {mode_name}")
+        self.root_bar.mode_button.setToolTip(
+            "Dossiers, vidéos de ce dossier, ou toutes les vidéos à plat"
+        )
         self.root_bar.root_label.setToolTip(str(self.root))
         self.root_bar.set_navigation(
             can_enter=self.mode == MODE_FOLDERS, nested=bool(self.levels)
@@ -370,7 +379,7 @@ class MainWindow(QMainWindow):
             use_cache and self.cfg["use_scan_cache"], self,
         )
         self.scan_thread.progress.connect(self.on_scan_progress)
-        self.scan_thread.item_ready.connect(self.on_item_ready)
+        self.scan_thread.items_ready.connect(self.on_items_ready)
         self.scan_thread.finished_scan.connect(self.on_scan_finished)
         self.scan_thread.start()
 
@@ -432,11 +441,24 @@ class MainWindow(QMainWindow):
         self.show_banner("Réanalyse complète en cours…", "#22303f")
         self.start_root(self.root, self.mode, reset_levels=False, use_cache=False)
 
+    MODE_LABELS = {
+        MODE_FOLDERS: "Dossiers",
+        MODE_FILES: "Vidéos de ce dossier",
+        MODE_FLAT: "Toutes les vidéos",
+    }
+
     def toggle_mode(self) -> None:
-        """Force l'autre mode sur la racine courante, sans changer de dossier."""
+        """Fait tourner les trois façons de regarder la racine.
+
+        Dossiers : chaque sous-dossier comme une catégorie.
+        Vidéos de ce dossier : celles posées directement dedans.
+        Toutes les vidéos : l'arborescence entière mise à plat, pour chercher
+        par nom sans se soucier du rangement.
+        """
         if self.root is None:
             return
-        new_mode = MODE_FILES if self.mode == MODE_FOLDERS else MODE_FOLDERS
+        order = (MODE_FOLDERS, MODE_FILES, MODE_FLAT)
+        new_mode = order[(order.index(self.mode) + 1) % len(order)]             if self.mode in order else MODE_FOLDERS
         self.start_root(self.root, new_mode, reset_levels=False)
 
     # ------------------------------------------------------------------
@@ -506,15 +528,28 @@ class MainWindow(QMainWindow):
         if not self.items:
             self.item_subtitle.setText(f"Analyse {done}/{total} — {name}")
 
-    def on_item_ready(self, item) -> None:
-        self.all_items.append(item)
+    def on_items_ready(self, batch: list) -> None:
+        """Encaisse un paquet d'éléments, avec une seule mise à jour d'affichage.
+
+        Rafraîchir compteurs et planche à chaque élément coûtait plus cher que
+        l'analyse elle-même : sur six cents dossiers relus depuis le cache,
+        l'interface représentait l'essentiel du temps d'ouverture.
+        """
+        for item in batch:
+            self.all_items.append(item)
+            if self._matches(item):
+                self._accept_item(item)
         self.filter_bar.set_count(len(self.items), len(self.all_items))
-        if not self._matches(item):
-            return
+        self.update_counter()
+
+    def _accept_item(self, item) -> None:
         first = not self.items
         self.items.append(item)
         if self.board_view:
-            self.refresh_board()
+            # Ajout d'une carte, sans reconstruire la planche : la rebatir a
+            # chaque element qui arrive la faisait clignoter et redemandait des
+            # vignettes deja obtenues.
+            self.board.append_item(item, self.ratings.get(item.path))
             return
         if self._restore_id and item.item_id == self._restore_id:
             self._restore_id = ""
@@ -523,7 +558,6 @@ class MainWindow(QMainWindow):
         if first:
             self.show_item(0)
             return
-        self.update_counter()
         # L'analyse alimente la liste en continu : un élément qui arrive juste
         # après celui affiché doit être préchargé lui aussi.
         if len(self.items) - 1 <= self.index + 2:
@@ -755,8 +789,21 @@ class MainWindow(QMainWindow):
         viewer = self.grid if current.kind == MODE_FOLDERS else self.single
         viewer.set_failed(slot)
 
+    def on_board_page(self, first: int, last: int, total: int) -> None:
+        """Affiche ou masque la navigation de pages de la planche."""
+        if not self.board_view:
+            return
+        self.page_bar.set_state(
+            f"{first}–{last} sur {total}",
+            self.board.page > 0, self.board.page < self.board.total_pages() - 1,
+        )
+        self.page_bar.setVisible(total > 0 and self.board.total_pages() > 1)
+
     def change_page(self, step: int) -> None:
-        """Affiche les dix apercus suivants ou precedents du dossier courant."""
+        """Page suivante ou precedente : de cartes en planche, d'apercus en fiche."""
+        if self.board_view:
+            self.board.set_page(self.board.page + step)
+            return
         item = self.current
         if item is None or item.kind != MODE_FOLDERS:
             return
@@ -874,8 +921,8 @@ class MainWindow(QMainWindow):
             "notez d'un clic sur les étoiles."
         )
         self.stars.hide()
-        # Pagination et tri portent sur les apercus d'un dossier : sans objet ici.
-        self.page_bar.hide()
+        # En planche, la barre de pages compte les cartes et non les apercus.
+        self.page_bar.sort.setVisible(False)
 
     def on_board_preview(self, position: int) -> None:
         """Une carte réclame son image : on lui construit sa première vignette."""
@@ -933,18 +980,25 @@ class MainWindow(QMainWindow):
         )
 
     def pick_random(self) -> None:
-        """Se place sur un élément au hasard parmi ceux qui restent à voir."""
-        candidates = [i for i, item in enumerate(self.items) if not item.status]
-        if not candidates:
-            self.show_banner("Plus rien à tirer au sort ici", "#2a2f38")
-            return
+        """Lance une vidéo au hasard, piochée dans tout ce que l'analyse connaît.
+
+        Tirer parmi les seuls éléments affichés ramenait toujours les mêmes :
+        en mode dossier, la liste ne compte que quelques dizaines d'entrées.
+        """
         import random
-        position = random.choice(candidates)
-        if self.board_view:
-            self.board.scroll_to(position)
-            self.index = position
-        else:
-            self.show_item(position)
+        pool = []
+        for item in self.all_items:
+            if item.locked:
+                continue
+            pool.extend(str(video) for video in item.videos)
+        if not pool:
+            self.show_banner("Aucune vidéo à tirer au sort", "#2a2f38")
+            return
+        video = random.choice(pool)
+        self.show_banner(
+            f"Au hasard parmi {len(pool)} vidéos : « {Path(video).name} »", "#22303f"
+        )
+        self.play_in_app(video)
 
     # ------------------------------------------------------------------
     # Panneau d'arborescence

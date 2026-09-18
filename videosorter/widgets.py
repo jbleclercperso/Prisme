@@ -49,6 +49,8 @@ QScrollArea#boardScroll { background: transparent; border: 0; }
 QWidget#videoArea { background: #000000; }
 QWidget#focusPlayer { background: #07080a; }
 QLabel#focusTitle { font-size: 18px; font-weight: 600; color: #ffffff; }
+QPushButton#focusMute { background: rgba(0,0,0,0.7); border: 1px solid #39414d;
+                        border-radius: 6px; font-size: 16px; }
 QFrame#tile { background: #0e1013; border: 1px solid #262c35; border-radius: 8px; }
 QFrame#tile[hovered="true"] { border: 1px solid #4c8dff; }
 QLabel#tileBadge { background: rgba(0,0,0,0.65); color: #dfe4ea; border-radius: 4px;
@@ -146,6 +148,7 @@ class PreviewTile(QFrame):
 
         self.duration = 0.0
         self.height_px = 0
+        self.strip_mode = False
         self._pixmap: QPixmap | None = None
 
     # -- contenu ---------------------------------------------------------
@@ -154,6 +157,8 @@ class PreviewTile(QFrame):
         self.ts = 0.0
         self.duration = 0.0
         self.height_px = 0
+        if self.strip_mode:
+            self.badge.setText("")
         self._pixmap = None
         self.image.clear()
         self.placeholder.setText("…")
@@ -169,9 +174,15 @@ class PreviewTile(QFrame):
         self.duration = duration
         self.height_px = height
         name = Path(video).name if video else ""
-        resolution = human_resolution(height)
-        legend = f"{resolution}  ·  {name}" if resolution else name
-        self.caption.setText(elide(legend, 40))
+        if self.strip_mode:
+            # Pellicule d'une seule vidéo : l'instant capté est la seule chose
+            # utile, le numéro de case et le nom du fichier n'apprennent rien.
+            self.badge.setText(human_duration(ts))
+            self.caption.setText("")
+        else:
+            resolution = human_resolution(height)
+            legend = f"{resolution}  ·  {name}" if resolution else name
+            self.caption.setText(elide(legend, 40))
         self.caption.setToolTip(name)
         self.show_duration()
 
@@ -543,6 +554,8 @@ class SinglePlayer(QWidget):
         self.tiles: list = []
         for slot in range(count):
             tile = PreviewTile(slot, strip)
+            tile.strip_mode = True
+            tile.duration_chip.hide()
             tile.setMinimumSize(110, 72)
             tile.setMaximumHeight(86)
             self.strip_layout.addWidget(tile)
@@ -913,6 +926,35 @@ class TrashDialog(QDialog):
         self._restore(list(self.trash.entries))
 
 
+class _FocusGlass(QWidget):
+    """Surface transparente posée sur le lecteur, qui en capte les gestes.
+
+    Le widget vidéo de Qt est une fenêtre native : sous Windows il reçoit les
+    clics directement du système, sans que Qt puisse les faire traverser. La
+    seule façon fiable de garder la molette et les clics est donc d'interposer
+    un widget ordinaire au-dessus.
+    """
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setMouseTracking(True)
+
+    def wheelEvent(self, event):
+        self.owner.handle_wheel(event)
+
+    def mousePressEvent(self, event):
+        self.owner.handle_press(event)
+
+    def mouseDoubleClickEvent(self, event):
+        self.owner.closed.emit()
+
+    def keyPressEvent(self, event):
+        self.owner.keyPressEvent(event)
+
+
 class FocusPlayer(QWidget):
     """Lecteur plein écran, à l'intérieur de l'application.
 
@@ -953,6 +995,17 @@ class FocusPlayer(QWidget):
                       self.progress_rail, self.progress):
             child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
+        # Une vitre par-dessus tout capte souris et molette. Le widget vidéo est
+        # une fenêtre native : sous Windows, il reçoit les clics du système même
+        # marqué transparent aux événements, et les mangeait tous.
+        self.glass = _FocusGlass(self)
+
+        self.mute_button = QPushButton("", self)
+        self.mute_button.setObjectName("focusMute")
+        self.mute_button.setFixedSize(40, 32)
+        self.mute_button.setFocusPolicy(Qt.NoFocus)
+        self.mute_button.clicked.connect(self.toggle_mute)
+
         self.audio = QAudioOutput(self)
         self.player = QMediaPlayer(self)
         self.player.setVideoOutput(self.video)
@@ -963,6 +1016,17 @@ class FocusPlayer(QWidget):
         )
         self.player.mediaStatusChanged.connect(self._on_status)
         self._pending_seek = 0
+
+    def toggle_mute(self) -> None:
+        self.audio.setMuted(not self.audio.isMuted())
+        self._refresh_mute()
+
+    def _refresh_mute(self) -> None:
+        self.mute_button.setText("🔇" if self.audio.isMuted() else "🔊")
+        self.mute_button.setToolTip(
+            "Son coupé — cliquer pour l'activer (M)" if self.audio.isMuted()
+            else "Son actif — cliquer pour le couper (M)"
+        )
 
     # -- lecture ---------------------------------------------------------
     def play(self, path: str, start_s: float = 0.0, muted: bool = False) -> None:
@@ -976,6 +1040,7 @@ class FocusPlayer(QWidget):
         self.show()
         self.raise_()
         self._layout_children()
+        self.glass.setFocus()
 
     def stop(self) -> None:
         """Referme le lecteur et relâche le fichier.
@@ -1020,10 +1085,18 @@ class FocusPlayer(QWidget):
         rect = self.rect()
         self.video_area.setGeometry(0, 60, rect.width(), max(0, rect.height() - 110))
         self._apply_zoom()
+        self.glass.setGeometry(rect)
+        self.glass.raise_()
         self.title.adjustSize()
         self.title.move(24, 22)
         self.hint.adjustSize()
         self.hint.move(24, rect.bottom() - 24)
+        self.mute_button.move(rect.right() - self.mute_button.width() - 24, 58)
+        self.mute_button.raise_()
+        self._refresh_mute()
+        for widget in (self.title, self.remaining, self.hint,
+                       self.progress_rail, self.progress):
+            widget.raise_()
         self._on_position(self.player.position())
 
     def _apply_zoom(self) -> None:
@@ -1038,7 +1111,7 @@ class FocusPlayer(QWidget):
         super().resizeEvent(event)
         self._layout_children()
 
-    def wheelEvent(self, event):
+    def handle_wheel(self, event):
         notches = event.angleDelta().y() / 120.0
         if not notches:
             return
@@ -1058,23 +1131,38 @@ class FocusPlayer(QWidget):
             )
         event.accept()
 
-    def mousePressEvent(self, event):
+    def handle_press(self, event):
         if event.button() == Qt.RightButton:
             self.zoom = 1.0
             self.zoom_focus = QPointF(0.5, 0.5)
             self._apply_zoom()
 
+    def wheelEvent(self, event):
+        self.handle_wheel(event)
+
+    def mousePressEvent(self, event):
+        self.handle_press(event)
+
     def mouseDoubleClickEvent(self, event):
         self.closed.emit()
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Escape, Qt.Key_F):
+        key = event.key()
+        if key in (Qt.Key_Escape, Qt.Key_F):
             self.closed.emit()
-        elif event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
+        elif key in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
             if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                 self.player.pause()
             else:
                 self.player.play()
+        elif key == Qt.Key_M:
+            self.toggle_mute()
+        elif key == Qt.Key_Left:
+            self.player.setPosition(
+                max(0, self.player.position() - self.scroll_seconds * 1000)
+            )
+        elif key == Qt.Key_Right:
+            self.player.setPosition(self.player.position() + self.scroll_seconds * 1000)
         else:
             super().keyPressEvent(event)
 
@@ -1122,7 +1210,8 @@ class StarStrip(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         shown = (self.preview + 1) if self.preview >= 0 else self.value
-        for index in range(5):
+        drawn = self.value if not self.isEnabled() else 5
+        for index in range(drawn):
             filled = index < shown
             if self.preview >= 0 and index < shown:
                 colour = QColor("#ffd479")
@@ -1200,6 +1289,7 @@ class AdvancedFilterBar(QWidget):
     """
 
     changed = Signal(dict)
+    columnsChanged = Signal(int)
 
     RESOLUTIONS = (
         ("peu importe", 0), ("360p", 360), ("480p", 480), ("720p", 720),
@@ -1245,8 +1335,13 @@ class AdvancedFilterBar(QWidget):
         layout.addWidget(self.resolution_op)
         layout.addWidget(self.resolution_value)
         layout.addSpacing(10)
-        layout.addWidget(label("Note au moins"))
+        layout.addWidget(label("Note"))
         layout.addWidget(self.stars_value)
+        layout.addSpacing(10)
+        layout.addWidget(label("Par rangée"))
+        self.density = QComboBox(self)
+        self.density.setToolTip("Nombre de cartes par rangée")
+        layout.addWidget(self.density)
         layout.addStretch(1)
 
         self.reset_button = QPushButton("Tout afficher", self)
@@ -1262,6 +1357,18 @@ class AdvancedFilterBar(QWidget):
                        self.resolution_value, self.stars_value):
             widget.currentIndexChanged.connect(lambda _i: self.timer.start())
         self.duration_value.textChanged.connect(lambda _t: self.timer.start())
+        self.density.currentIndexChanged.connect(
+            lambda _i: self.columnsChanged.emit(int(self.density.currentData() or 5))
+        )
+
+    def set_columns_choices(self, choices, current: int) -> None:
+        self.density.blockSignals(True)
+        self.density.clear()
+        for count in choices:
+            self.density.addItem(str(count), count)
+        index = self.density.findData(current)
+        self.density.setCurrentIndex(index if index >= 0 else 0)
+        self.density.blockSignals(False)
 
     def criteria(self) -> dict:
         try:
@@ -1325,6 +1432,41 @@ class KeyCap(QFrame):
 
     def mouseReleaseEvent(self, event):
         # Relâcher en dehors annule le clic, comme sur un vrai bouton.
+        if event.button() == Qt.LeftButton and self.rect().contains(
+            event.position().toPoint()
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class StarCap(QFrame):
+    """Vignette de notation : le chiffre à presser, et les étoiles qu'il pose."""
+
+    clicked = Signal()
+
+    def __init__(self, count: int, parent=None):
+        super().__init__(parent)
+        self.setObjectName("keycap")
+        self.count = count
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"Noter {count} étoile{'s' if count > 1 else ''}   (touche {count})")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(9, 6, 11, 6)
+        layout.setSpacing(6)
+
+        digit = QLabel(str(count), self)
+        digit.setObjectName("keyLetter")
+        digit.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout.addWidget(digit)
+
+        self.stars = StarStrip(15, self)
+        self.stars.set_value(count)
+        self.stars.setEnabled(False)
+        self.stars.setFixedWidth(15 * count + 8)
+        self.stars.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout.addWidget(self.stars)
+
+    def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self.rect().contains(
             event.position().toPoint()
         ):
@@ -1406,6 +1548,7 @@ class CommandBar(QWidget):
     deleteRequested = Signal()
     skipRequested = Signal()
     moveRequested = Signal(dict)
+    rateRequested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1425,9 +1568,17 @@ class CommandBar(QWidget):
         skip_cap.clicked.connect(self.skipRequested)
         self.layout_.addWidget(skip_cap)
 
-        stars_cap = KeyCap("0–5", "Noter", "neutral")
-        stars_cap.setToolTip("Les chiffres notent ; les destinations vont de 6 à z")
-        self.layout_.addWidget(stars_cap)
+        # Une vignette par note : le chiffre, puis autant d'étoiles dessinées.
+        # « 0–5 Noter » n'apprenait rien à qui ne connaissait pas déjà.
+        for count in range(1, 6):
+            cap = StarCap(count)
+            cap.clicked.connect(
+                lambda checked=False, value=count: self.rateRequested.emit(value)
+            )
+            self.layout_.addWidget(cap)
+        clear = KeyCap("0", "Effacer la note", "neutral")
+        clear.clicked.connect(lambda: self.rateRequested.emit(0))
+        self.layout_.addWidget(clear)
 
         for dest in destinations:
             cap = KeyCap(
@@ -1683,7 +1834,12 @@ class DestinationsDialog(QDialog):
 
 
 class RootBar(QWidget):
-    """Entête : racine courante, avancement, accès aux réglages."""
+    """Entête : racine courante, avancement, accès aux réglages.
+
+    Les boutons sont posés sur une disposition qui passe à la ligne : sur un
+    écran étroit ou en plein écran sur un format inattendu, ils s'empilent au
+    lieu de sortir du cadre.
+    """
 
     changeRoot = Signal()
     openSettings = Signal()
@@ -1700,9 +1856,9 @@ class RootBar(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
 
         self.root_label = QLabel("—", self)
         self.root_label.setObjectName("rootPath")
@@ -1714,15 +1870,14 @@ class RootBar(QWidget):
 
         change = QPushButton("Changer de racine")
         settings = QPushButton("Destinations…")
-        mode = QPushButton("Mode")
+        self.mode_button = QPushButton("Mode")
+        mode = self.mode_button
         tree = QPushButton("Arborescence")
-        self.mute = QPushButton("Son coupé")
+        self.mute = QPushButton("🔇")
+        self.mute.setFixedWidth(42)
         self.back = QPushButton("◂ Précédent", self)
         self.back.setToolTip("Revenir à l'endroit précédent   (Alt+←)")
         self.back.setEnabled(False)
-        self.density = QComboBox(self)
-        self.density.setToolTip("Nombre de cartes par rangée")
-        self.density.hide()
         self.board = QPushButton("Planche", self)
         self.board.setToolTip("Voir les éléments en cartes   (Ctrl+P)")
         self.random = QPushButton("Au hasard", self)
@@ -1739,8 +1894,7 @@ class RootBar(QWidget):
         self.up.setToolTip("Revenir au dossier parent   (Ctrl+↑ ou Échap)")
         self.up.hide()
         for button in (change, settings, mode, tree, self.mute, self.enter,
-                       self.up, self.trash, self.board, self.random, self.back,
-                       self.density):
+                       self.up, self.trash, self.board, self.random, self.back):
             button.setFocusPolicy(Qt.NoFocus)
         change.clicked.connect(self.changeRoot)
         settings.clicked.connect(self.openSettings)
@@ -1753,49 +1907,41 @@ class RootBar(QWidget):
         self.board.clicked.connect(self.toggleBoard)
         self.random.clicked.connect(self.pickRandom)
         self.back.clicked.connect(self.goBack)
-        self.density.currentIndexChanged.connect(
-            lambda _i: self.columnsChanged.emit(int(self.density.currentData()))
-        )
 
         self.root_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        layout.addWidget(self.root_label, 1)
-        layout.addWidget(self.pending)
-        layout.addWidget(self.counter)
-        layout.addWidget(self.trash)
-        layout.addWidget(self.density)
-        layout.addWidget(self.random)
-        layout.addWidget(self.back)
-        layout.addWidget(self.board)
-        layout.addWidget(self.up)
-        layout.addWidget(self.enter)
-        layout.addWidget(self.mute)
-        layout.addWidget(tree)
-        layout.addWidget(mode)
-        layout.addWidget(settings)
-        layout.addWidget(change)
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(10)
+        top.addWidget(self.root_label, 1)
+        top.addWidget(self.pending)
+        top.addWidget(self.counter)
+        outer.addLayout(top)
+
+        self.buttons = FlowLayout(spacing=8)
+        for widget in (self.board, self.mode_button, self.enter, self.up, self.back,
+                       self.random, self.mute, self.trash, tree, settings, change):
+            self.buttons.addWidget(widget)
+        outer.addLayout(self.buttons)
 
     def set_muted(self, muted: bool) -> None:
-        self.mute.setText("Son coupé" if muted else "Son actif")
-        self.mute.setToolTip("Ctrl+M")
-
-    def set_columns_choices(self, choices, current: int) -> None:
-        self.density.blockSignals(True)
-        self.density.clear()
-        for count in choices:
-            self.density.addItem(f"{count} par rangée", count)
-        index = self.density.findData(current)
-        self.density.setCurrentIndex(index if index >= 0 else 0)
-        self.density.blockSignals(False)
+        # Un pictogramme se lit plus vite qu'une etiquette, et prend moins de place.
+        self.mute.setText("🔇" if muted else "🔊")
+        self.mute.setToolTip(
+            "Son coupé — cliquer pour l'activer   (Ctrl+M)" if muted
+            else "Son actif — cliquer pour le couper   (Ctrl+M)"
+        )
 
     def set_can_go_back(self, can: bool) -> None:
         self.back.setEnabled(can)
 
     def set_board(self, active: bool) -> None:
-        self.density.setVisible(active)
-        self.board.setText("Fiche" if active else "Planche")
+        # Le bouton annonce la vue courante et non celle qu'il ferait apparaitre :
+        # « Planche / Fiche » sans contexte ne disait pas ou l'on se trouvait.
+        self.board.setText("Vue : planche" if active else "Vue : fiche")
         self.board.setToolTip(
-            "Revenir à l'élément unique   (Ctrl+P)" if active
-            else "Voir les éléments en cartes   (Ctrl+P)"
+            "Vous êtes en planche — cliquer pour revenir à l'élément unique   (Ctrl+P)"
+            if active else
+            "Vous êtes sur un élément — cliquer pour voir la planche   (Ctrl+P)"
         )
 
     def set_trash(self, count: int) -> None:
