@@ -48,8 +48,11 @@ DEFAULTS = {
     "skip_hidden": True,
     "use_scan_cache": True,      # reutiliser l analyse precedente
     "sort_mode": "name",         # name | duration_desc | ... | random
-    "content": "folders",        # « Je regarde » : folders | videos
-    "view": "edit",              # « Je » : browse | edit
+    "content": "folders",        # conserve pour compatibilite
+    "view": "edit",              # conserve pour compatibilite
+    "tab": "edit",               # onglet : folders | videos | edit
+    "tag_family": "mine",        # mots-cles affiches : mine | top
+    "tree_action": "send",       # clic dans l arborescence : send | go
     "tags": [],                  # mots-cles, un par ligne
     "board_columns": 5,          # cartes par rangee en vue planche
     "expand_parents": True,      # traverser les dossiers prefixes « + »

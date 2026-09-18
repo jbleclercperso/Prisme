@@ -12,7 +12,37 @@ from __future__ import annotations
 import unicodedata
 from pathlib import Path
 
+import re
+from collections import Counter
+
 from .scan import MODE_FOLDERS, Item
+
+# Mots trop courants ou trop courts pour distinguer quoi que ce soit.
+STOP_WORDS = {
+    "mp4", "mkv", "avi", "mov", "wmv", "webm", "video", "videos", "full",
+    "hd", "sd", "new", "the", "and", "les", "des", "une", "avec", "pour",
+    "part", "partie", "final", "copy", "copie", "sans", "titre",
+}
+MIN_WORD = 3
+
+
+def top_words(videos: list, limit: int = 100, minimum: int = 2) -> list:
+    """Les mots qui reviennent le plus dans les noms de fichiers.
+
+    Sert a proposer des categories sans rien saisir : un mot present dans
+    des centaines de noms designe presque toujours quelque chose.
+    """
+    counts = Counter()
+    for video in videos:
+        stem = Path(video).stem
+        for word in re.split(r"[^0-9a-zA-Z\u00c0-\u024f]+", stem):
+            folded = fold(word)
+            if len(folded) < MIN_WORD or folded in STOP_WORDS:
+                continue
+            if folded.isdigit():
+                continue
+            counts[folded] += 1
+    return [word for word, n in counts.most_common(limit) if n >= minimum]
 
 
 def fold(text: str) -> str:
@@ -45,6 +75,19 @@ def build_tag_items(tags: list, videos: list) -> list:
             if needle and needle in name:
                 buckets[term].append(Path(video))
 
+    # Une meme video appartient souvent a plusieurs mots : sans ce cache,
+    # cent mots-cles relisaient cent fois la taille de chaque fichier, ce
+    # qui se paie tres cher sur un disque reseau.
+    sizes: dict = {}
+
+    def size_of(video) -> int:
+        if video not in sizes:
+            try:
+                sizes[video] = video.stat().st_size
+            except OSError:
+                sizes[video] = 0
+        return sizes[video]
+
     items = []
     for term, _needle in folded:
         found = buckets[term]
@@ -53,10 +96,6 @@ def build_tag_items(tags: list, videos: list) -> list:
         item = Item(path=Path(term), kind=MODE_FOLDERS, videos=found,
                     video_count=len(found), file_count=len(found))
         item.is_tag = True
-        for video in found:
-            try:
-                item.size += video.stat().st_size
-            except OSError:
-                pass
+        item.size = sum(size_of(video) for video in found)
         items.append(item)
     return items

@@ -34,6 +34,7 @@ class TreePanel(QWidget):
 
     folderChosen = Signal(str)
     rootChanged = Signal(str)
+    actionChanged = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -48,8 +49,13 @@ class TreePanel(QWidget):
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        title = QLabel("Envoyer vers", self)
-        title.setObjectName("treeTitle")
+        self.action = "send"
+        title = QPushButton("Envoyer vers ⇄", self)
+        title.setObjectName("treeRootButton")
+        title.setToolTip("Basculer entre envoyer l element et s y rendre")
+        title.setFocusPolicy(Qt.NoFocus)
+        title.clicked.connect(self.toggle_action)
+        self.action_button = title
         change = QPushButton("changer…", self)
         change.setObjectName("treeRootButton")
         change.setFocusPolicy(Qt.NoFocus)
@@ -83,6 +89,18 @@ class TreePanel(QWidget):
         layout.addWidget(self.view, 1)
 
         self.root = ""
+
+    def toggle_action(self) -> None:
+        """Un clic dans l arbre envoie l element, ou nous y emmene."""
+        self.action = "go" if self.action == "send" else "send"
+        self.set_action(self.action)
+        self.actionChanged.emit(self.action)
+
+    def set_action(self, action: str) -> None:
+        self.action = action
+        self.action_button.setText(
+            "Envoyer vers ⇄" if action == "send" else "Aller dans ⇄"
+        )
 
     def set_root(self, root: str) -> None:
         if not root or not Path(root).is_dir():

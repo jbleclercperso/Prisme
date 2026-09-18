@@ -75,6 +75,11 @@ class Item:
         return self.processed or self.pending
 
     @property
+    def categorized(self) -> bool:
+        """Vrai si l element vit deja dans un dossier de tete, donc range."""
+        return self.path.parent.name.startswith(PARENT_PREFIX)
+
+    @property
     def movable(self) -> bool:
         """Un mot-cle et une entree « en vrac » sont des vues, non des rangements."""
         return not (self.is_tag or self.loose_only)

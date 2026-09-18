@@ -41,7 +41,8 @@ from videosorter.config import Config  # noqa: E402
 from videosorter.media import Tools  # noqa: E402
 from videosorter.scan import MODE_FILES, MODE_FLAT, MODE_FOLDERS  # noqa: E402
 from videosorter.header import (  # noqa: E402
-    CONTENT_FOLDERS, CONTENT_VIDEOS, VIEW_BROWSE, VIEW_EDIT,
+    CONTENT_FOLDERS, CONTENT_VIDEOS, TAB_EDIT, TAB_FOLDERS, TAB_VIDEOS,
+    VIEW_BROWSE, VIEW_EDIT,
 )
 from videosorter.window import MainWindow  # noqa: E402
 
@@ -1142,31 +1143,77 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(all("plage" in i.name.lower() for i in window.items),
           f"et rien d'autre ({[i.name for i in window.items]})")
 
-    print("\n[49] Les deux sélecteurs disent où l'on est")
+    print("\n[49] Un onglet à trois entrées dit où l'on est")
+    window.set_tab(TAB_FOLDERS)
     window.start_root(tagged, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning, 60)
-    check(window.content == CONTENT_FOLDERS, "contenu : dossiers")
-    check(window.content_selector.buttons[CONTENT_FOLDERS].property("chosen") == "true",
-          "et le sélecteur l'annonce")
-    window.set_content(CONTENT_VIDEOS)
-    wait_for(app, lambda: not window.scanning, 60)
-    check(window.mode == MODE_FLAT, "choisir « Vidéos » met la liste à plat")
-    check(window.content_selector.buttons[CONTENT_VIDEOS].property("chosen") == "true",
-          "le sélecteur suit")
-    check(all(i.kind == MODE_FILES for i in window.items), "ce sont des fichiers")
+    check(window.tab == TAB_FOLDERS, "on arrive sur les dossiers")
+    check(window.tabs.buttons[TAB_FOLDERS].property("chosen") == "true",
+          "et l'onglet l'annonce")
+    check(window.browsing, "les dossiers se parcourent en planche")
 
-    window.set_view(VIEW_BROWSE)
-    pump(app, 0.4)
-    check(window.browsing, "passer en parcours")
-    check(window.view_selector.buttons[VIEW_BROWSE].property("chosen") == "true",
-          "annoncé par le second sélecteur")
+    window.set_tab(TAB_VIDEOS)
+    wait_for(app, lambda: not window.scanning, 60)
+    check(window.mode == MODE_FLAT, "l'onglet « Vidéos » met la liste à plat")
+    check(window.tabs.buttons[TAB_VIDEOS].property("chosen") == "true",
+          "l'onglet suit")
+    check(all(i.kind == MODE_FILES for i in window.items), "ce sont des fichiers")
+    check(window.sort_mode == "random", "et elles arrivent au hasard")
     check(window.viewer.currentWidget() is window.board, "la planche est affichée")
-    window.set_view(VIEW_EDIT)
+
+    window.set_tab(TAB_EDIT)
     pump(app, 0.4)
-    check(not window.browsing, "et l'on revient à l'édition")
+    check(not window.browsing, "l'onglet « Édition » montre un élément à la fois")
+    check(window.tabs.buttons[TAB_EDIT].property("chosen") == "true",
+          "annoncé lui aussi")
+    check(window.viewer.currentWidget() is not window.board,
+          "et la planche cède la place à la fiche")
+    check(window.content == CONTENT_VIDEOS,
+          "éditer ne change pas la collection regardée, seulement sa présentation")
+
+    # Un clic sur une carte ouvre cette carte-la, et pas une autre.
+    window.set_tab(TAB_VIDEOS)
+    pump(app, 0.4)
+    target_id = window.items[2].item_id
+    window.on_board_open(2)
+    pump(app, 0.4)
+    check(not window.browsing, "cliquer une vidéo bascule en fiche")
+    check(window.current.item_id == target_id,
+          "et c'est bien celle qu'on a cliquée")
+
+    # L'edition commence par ce qui n'est pas encore range.
+    window.set_tab(TAB_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 60)
+    window.set_tab(TAB_EDIT)
+    pump(app, 0.4)
+    item = window.current
+    check(item is not None and not item.categorized,
+          "l'édition commence par un élément pas encore classé")
+
+    # Les deux familles de mots-cles.
+    window.set_tag_family("top")
+    pump(app, 0.4)
+    tops = [i for i in window.all_items if i.is_tag]
+    check(bool(tops), f"les mots fréquents forment des dossiers ({len(tops)})")
+    check(any(i.path.name == "plage" for i in tops),
+          f"« plage » en fait partie ({[i.path.name for i in tops][:5]})")
+    check(window.tag_chips.buttons["top"].property("chosen") == "true",
+          "et la pastille le montre")
+    window.set_tag_family("mine")
+    pump(app, 0.4)
+    check([i.path.name for i in window.all_items if i.is_tag] == ["plage", "montagne"],
+          "revenir à mes mots-clés restitue les miens")
+
+    # L'arborescence envoie, ou nous emmene.
+    check(window.tree.action == "send", "l'arborescence envoie par défaut")
+    window.tree.toggle_action()
+    check(window.tree.action == "go", "un clic sur son titre la change en navigation")
+    check("Aller" in window.tree.action_button.text(), "ce que le titre dit")
+    window.tree.toggle_action()
+    check(window.tree.action == "send", "et l'on revient à l'envoi")
 
     # Le fil d'Ariane doit montrer la descente et savoir y ramener.
-    window.set_content(CONTENT_FOLDERS)
+    window.set_tab(TAB_FOLDERS)
     wait_for(app, lambda: not window.scanning, 60)
     top = str(window.root)
     position = next(i for i, item in enumerate(window.items)

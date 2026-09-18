@@ -17,8 +17,17 @@ from PySide6.QtWidgets import (
 
 from .widgets import FlowLayout
 
-CONTENT_FOLDERS = "folders"
-CONTENT_VIDEOS = "videos"
+# Trois facons de regarder la meme collection. Ce ne sont pas trois
+# applications : ouvrir une video depuis n'importe quel onglet mene toujours
+# a la meme fiche, avec ses destinations et sa note.
+TAB_FOLDERS = "folders"
+TAB_VIDEOS = "videos"
+TAB_EDIT = "edit"
+TABS = (TAB_FOLDERS, TAB_VIDEOS, TAB_EDIT)
+
+# Conserves pour les appels existants : un onglet dit a la fois quoi et comment.
+CONTENT_FOLDERS = TAB_FOLDERS
+CONTENT_VIDEOS = TAB_VIDEOS
 VIEW_BROWSE = "browse"
 VIEW_EDIT = "edit"
 
@@ -26,8 +35,12 @@ HEADER_STYLE = """
 QFrame#segment { background: #14181e; border: 1px solid #2b323d;
                  border-radius: 8px; }
 QPushButton#segmentChoice { background: transparent; border: 0;
-                            border-radius: 6px; padding: 6px 16px;
-                            color: #93a0b0; font-weight: 600; }
+                            border-radius: 6px; padding: 7px 20px;
+                            color: #93a0b0; font-weight: 600; font-size: 14px; }
+QPushButton#chip { background: #1a1f27; border: 1px solid #2b323d;
+                   border-radius: 13px; padding: 4px 14px; color: #93a0b0; }
+QPushButton#chip[chosen="true"] { background: #2f6fed; border-color: #2f6fed;
+                                  color: #ffffff; font-weight: 600; }
 QPushButton#segmentChoice:hover { color: #dfe6ee; }
 QPushButton#segmentChoice[chosen="true"] { background: #2f6fed; color: #ffffff; }
 QLabel#segmentLabel { color: #6f7885; font-size: 12px; }
@@ -71,6 +84,36 @@ class Segmented(QWidget):
             inner.addWidget(button)
             self.buttons[key] = button
         layout.addWidget(frame)
+
+    def set_value(self, key: str) -> None:
+        for name, button in self.buttons.items():
+            button.setProperty("chosen", "true" if name == key else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+
+class Chips(QWidget):
+    """Petits boutons ronds, un seul actif : deux familles de mots-cles."""
+
+    chosen = Signal(str)
+
+    def __init__(self, choices: list, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self.buttons: dict = {}
+        for key, text, tip in choices:
+            button = QPushButton(text, self)
+            button.setObjectName("chip")
+            button.setToolTip(tip)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setProperty("chosen", "false")
+            button.clicked.connect(lambda _c=False, k=key: self.chosen.emit(k))
+            layout.addWidget(button)
+            self.buttons[key] = button
+        layout.addStretch(1)
 
     def set_value(self, key: str) -> None:
         for name, button in self.buttons.items():

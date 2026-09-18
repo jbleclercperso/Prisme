@@ -96,7 +96,9 @@ class BoardCard(QFrame):
         self._pixmap = None
         self.image.setPixmap(QPixmap())
         self.image.setText("…")
-        self.name.setText(elide(item.name, 30))
+        # Une icone dit d un coup d oeil si c est un dossier ou une video.
+        mark = "📁" if item.kind == MODE_FOLDERS else "🎬"
+        self.name.setText(f"{mark}  {elide(item.name, 28)}")
         self.name.setToolTip(str(item.path))
         if item.kind == MODE_FOLDERS:
             pieces = [f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}"]
@@ -240,6 +242,18 @@ class BoardView(QWidget):
         self._segment_start = 0
         self.unplayable: set = set()
 
+        # Les vignettes ne sont fabriquees que pour les cartes reellement a
+        # l ecran : en demander soixante d un coup saturait le reseau avant que
+        # la premiere rangee ne s affiche.
+        self._pending_previews: set = set()
+        self.visible_timer = QTimer(self)
+        self.visible_timer.setSingleShot(True)
+        self.visible_timer.setInterval(90)
+        self.visible_timer.timeout.connect(self.request_visible)
+        self.scroll.verticalScrollBar().valueChanged.connect(
+            lambda _v: self.visible_timer.start()
+        )
+
         self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(80)
         self.hover_timer.timeout.connect(self._poll_hover)
@@ -315,8 +329,27 @@ class BoardView(QWidget):
             self.grid.addWidget(card, slot // self.columns, slot % self.columns)
             card.show()
         self.pageChanged.emit(first + 1 if self.items else 0, last, len(self.items))
-        for position in needed:
+        self._pending_previews = set(needed)
+        self.request_visible()
+
+    def request_visible(self) -> None:
+        """Reclame les apercus des seules cartes visibles dans la fenetre."""
+        if not self._pending_previews:
+            return
+        area = self.scroll.viewport().rect()
+        first, _last = self._page_bounds()
+        done = set()
+        for position in sorted(self._pending_previews):
+            card = self._card_for(position)
+            if card is None:
+                done.add(position)
+                continue
+            top_left = card.mapTo(self.scroll.viewport(), QPoint(0, 0))
+            if top_left.y() > area.height() + 400 or top_left.y() + card.height() < -400:
+                continue
             self.previewNeeded.emit(position)
+            done.add(position)
+        self._pending_previews -= done
 
     def total_pages(self) -> int:
         return max(1, -(-len(self.items) // PAGE_SIZE))
@@ -350,7 +383,8 @@ class BoardView(QWidget):
         self.empty.hide()
         self.scroll.show()
         self.pageChanged.emit(first + 1, position + 1, len(self.items))
-        self.previewNeeded.emit(position)
+        self._pending_previews.add(position)
+        self.visible_timer.start()
 
     def _card_for(self, position: int):
         """Carte montrant cet element, ou None s'il n'est pas sur la page vue."""

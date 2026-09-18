@@ -16,12 +16,14 @@ from .board import COLUMN_CHOICES, BoardView
 from .actions import ActionError, HistoryEntry
 from .config import Config
 from .header import (
-    CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, VIEW_BROWSE, VIEW_EDIT,
-    Breadcrumb, ControlBar, Segmented, build_overflow,
+    CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, TAB_EDIT, TAB_FOLDERS,
+    TAB_VIDEOS, TABS, VIEW_BROWSE, VIEW_EDIT, Breadcrumb, Chips, ControlBar,
+    Segmented,
+    build_overflow,
 )
 from .media import PreviewManager, Tools, page_count, probe
 from .ratings import Ratings
-from .tagging import build_tag_items
+from .tagging import build_tag_items, top_words
 from .scan import (
     MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, ScanThread,
     detect_mode, human_duration, human_resolution, human_size, known_media,
@@ -117,9 +119,9 @@ class MainWindow(QMainWindow):
         self.all_items: list = []      # tout ce que l'analyse a trouve
         self.items: list = []          # ce que le filtre laisse passer
         self.index = 0                 # index dans self.items
-        # Deux axes, la ou il y avait cinq boutons : ce qu'on regarde, et comment.
-        self.content = cfg["content"]
-        self.view = cfg["view"]
+        # Un seul onglet dit ou l'on est : dossiers, videos, ou edition.
+        self.tab = cfg["tab"] if cfg["tab"] in TABS else TAB_FOLDERS
+        self.tag_family = cfg["tag_family"]
         self.tags: list = list(cfg["tags"])
         self.mode = MODE_FOLDERS
         self.root: Path | None = None
@@ -220,18 +222,21 @@ class MainWindow(QMainWindow):
         selectors = QHBoxLayout()
         selectors.setContentsMargins(0, 0, 0, 0)
         selectors.setSpacing(20)
-        self.content_selector = Segmented("Je regarde", [
-            (CONTENT_FOLDERS, "Dossiers", "Les dossiers, comme des catégories"),
-            (CONTENT_VIDEOS, "Vidéos", "Toutes les vidéos d'ici, sans leurs dossiers"),
+        self.tabs = Segmented("", [
+            (TAB_FOLDERS, "📁  Dossiers", "Chaque dossier comme une carte"),
+            (TAB_VIDEOS, "🎬  Vidéos", "Toutes les vidéos en vrac, au hasard"),
+            (TAB_EDIT, "✎  Édition", "Un élément à la fois, à ranger ou écarter"),
         ], sort_page)
-        self.content_selector.chosen.connect(self.set_content)
-        self.view_selector = Segmented("Je", [
-            (VIEW_BROWSE, "Parcours", "Plusieurs éléments en cartes"),
-            (VIEW_EDIT, "Édite", "Un élément à la fois, avec les destinations"),
+        self.tabs.chosen.connect(self.set_tab)
+        selectors.addWidget(self.tabs)
+
+        self.tag_chips = Chips([
+            ("mine", "Mes mots-clés", "Ceux que vous avez saisis"),
+            ("top", "Mots fréquents", "Les mots qui reviennent le plus dans vos noms"),
         ], sort_page)
-        self.view_selector.chosen.connect(self.set_view)
-        selectors.addWidget(self.content_selector)
-        selectors.addWidget(self.view_selector)
+        self.tag_chips.chosen.connect(self.set_tag_family)
+        self.tag_chips.hide()
+        selectors.addWidget(self.tag_chips)
 
         self.enter_button = QPushButton("Entrer ▸", sort_page)
         self.enter_button.setToolTip("Trier le contenu de ce dossier   (Ctrl+↓)")
@@ -253,8 +258,8 @@ class MainWindow(QMainWindow):
         self.controls.set_sort(self.cfg["sort_mode"] or "name")
         self.controls.set_columns(self.cfg["board_columns"])
         layout.addWidget(self.controls)
-        self.content_selector.set_value(self.content)
-        self.view_selector.set_value(self.view)
+        self.tabs.set_value(self.tab)
+        self.tag_chips.set_value(self.tag_family)
         self.controls.set_browsing(self.browsing)
 
         self.progress = QProgressBar(sort_page)
@@ -291,6 +296,8 @@ class MainWindow(QMainWindow):
         self.tree = TreePanel(sort_page)
         self.tree.folderChosen.connect(self.on_tree_folder)
         self.tree.rootChanged.connect(self.on_tree_root_changed)
+        self.tree.actionChanged.connect(self.on_tree_action)
+        self.tree.set_action(self.cfg["tree_action"])
         self.tree.hide()
         middle.addWidget(self.tree)
 
@@ -388,6 +395,9 @@ class MainWindow(QMainWindow):
         if mode:
             self.content = (CONTENT_FOLDERS if mode == MODE_FOLDERS
                             else CONTENT_VIDEOS)
+            if self.browsing:
+                self.tab = (TAB_FOLDERS if self.content == CONTENT_FOLDERS
+                            else TAB_VIDEOS)
         self.mode = mode or self.mode_for_content()
         if self.mode == MODE_FOLDERS and not list_entries(
                 self.root, MODE_FOLDERS, self.cfg["skip_hidden"],
@@ -414,7 +424,14 @@ class MainWindow(QMainWindow):
         self.crumbs.set_path(top, self.root)
         self._apply_selectors()
         self.commands.rebuild(self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer"))
-        self.viewer.setCurrentWidget(self.grid if self.mode == MODE_FOLDERS else self.single)
+        # En planche, la vue reste la planche : basculer sur la fiche le temps
+        # de l'analyse faisait clignoter l'affichage a chaque changement d'onglet.
+        self.viewer.setCurrentWidget(
+            self.board if self.browsing
+            else (self.grid if self.mode == MODE_FOLDERS else self.single)
+        )
+        if self.browsing:
+            self.board.set_items([], self.ratings.get)
         self.item_title.setText("Analyse en cours…")
         self.item_subtitle.setText("")
         self.progress.setRange(0, 0)
@@ -636,11 +653,21 @@ class MainWindow(QMainWindow):
         Ils se calculent sur les videos deja trouvees : inutile de relire le
         disque, l'analyse vient de le faire.
         """
-        if not self.tags or self.mode != MODE_FOLDERS:
+        if self.mode != MODE_FOLDERS:
+            self.tag_chips.setVisible(False)
             return
         videos = [video for item in self.all_items if not item.is_tag
                   for video in item.videos]
-        found = build_tag_items(self.tags, videos)
+        self.tag_chips.setVisible(bool(videos))
+        # Deux familles : les mots qu'on a saisis, et ceux que les noms de
+        # fichiers repetent d'eux-memes. Les seconds ne demandent aucune saisie
+        # et decrivent souvent mieux la collection que ce qu'on aurait pense.
+        words = self.tags if self.tag_family == "mine" else top_words(videos)
+        if not words:
+            self.all_items = [i for i in self.all_items if not i.is_tag]
+            self.items = [i for i in self.all_items if self._matches(i)]
+            return
+        found = build_tag_items(words, videos)
         if not found:
             return
         self.all_items = found + [i for i in self.all_items if not i.is_tag]
@@ -728,7 +755,9 @@ class MainWindow(QMainWindow):
         )
 
         if item.kind == MODE_FOLDERS:
-            self.item_title.setText(item.name)
+            # Une icône devant le titre : on sait sans lire si l'on décide du
+            # sort d'un dossier entier ou d'un seul fichier.
+            self.item_title.setText(f"📁  {item.name}")
             parts = [
                 human_size(item.size),
                 f"{item.file_count} fichier{'s' if item.file_count > 1 else ''}",
@@ -743,7 +772,8 @@ class MainWindow(QMainWindow):
             # d'une vidéo, et la ligne d'informations est déjà chargée.
             duration = human_duration(info["duration"]) if info.get("duration") else ""
             self.item_title.setText(
-                f"{item.name}   —   {duration}" if duration else item.name
+                f"🎬  {item.name}   —   {duration}" if duration
+                else f"🎬  {item.name}"
             )
             parts = []
             if info.get("height"):
@@ -1006,42 +1036,100 @@ class MainWindow(QMainWindow):
     @property
     def browsing(self) -> bool:
         """Vrai quand on parcourt plusieurs éléments, faux quand on en édite un."""
-        return self.view == VIEW_BROWSE
+        return self.tab != TAB_EDIT
 
     @browsing.setter
     def browsing(self, value: bool) -> None:
-        self.view = VIEW_BROWSE if value else VIEW_EDIT
+        if not value:
+            self.tab = TAB_EDIT
+        else:
+            self.tab = (TAB_VIDEOS if self.content == CONTENT_VIDEOS
+                        else TAB_FOLDERS)
 
-    def set_view(self, view: str) -> None:
-        if view == self.view:
+    @property
+    def view(self) -> str:
+        """Conservé pour l'enregistrement : l'onglet dit déjà tout."""
+        return VIEW_BROWSE if self.browsing else VIEW_EDIT
+
+    def set_tab(self, tab: str, reposition: bool = True) -> None:
+        """Change de point de vue sans changer de collection.
+
+        Les trois onglets ne sont pas trois applications : ouvrir une vidéo,
+        d'où qu'elle vienne, mène toujours à la même fiche, avec ses
+        destinations et sa note. Seule la façon de présenter l'ensemble change.
+        """
+        if tab not in TABS or tab == self.tab:
             return
-        self.view = view
-        self.cfg["view"] = view
+        before = self.mode_for_content()
+        self.tab = tab
+        if tab == TAB_FOLDERS:
+            self.content = CONTENT_FOLDERS
+        elif tab == TAB_VIDEOS:
+            self.content = CONTENT_VIDEOS
+            # Des milliers de vidéos par ordre alphabétique, c'est toujours le
+            # même début : le hasard fait voir la collection entière.
+            if not self.sort_mode:
+                self.set_sort("random")
+                self.controls.set_sort("random")
+        self.cfg["tab"] = tab
+        self.cfg["content"] = self.content
+        self.cfg["view"] = self.view
         self.cfg.save()
-        self._apply_selectors()
         self._release_media()
+        self._apply_selectors()
+        if self.root is not None and self.mode_for_content() != before:
+            self.start_root(self.root, self.mode_for_content(), reset_levels=False)
+            return
         if self.browsing:
             self.refresh_board()
         elif self.items:
-            self.show_item(self.index)
+            self.show_item(self._first_to_sort()
+                           if tab == TAB_EDIT and reposition else self.index)
         self.setFocus()
+
+    def set_tag_family(self, family: str) -> None:
+        """Mes propres mots-clés, ou ceux que les noms de fichiers répètent."""
+        if family == self.tag_family:
+            return
+        self.tag_family = family
+        self.cfg["tag_family"] = family
+        self.cfg.save()
+        self.tag_chips.set_value(family)
+        if not self.scanning:
+            self._add_tag_items()
+
+    def _first_to_sort(self) -> int:
+        """Le premier élément qui n'est pas déjà rangé sous un dossier de tête.
+
+        L'édition sert à trancher : commencer par ce qui est déjà classé ferait
+        perdre le temps qu'elle est censée gagner.
+        """
+        for position, item in enumerate(self.items):
+            if not item.is_tag and not item.categorized:
+                return position
+        return min(self.index, len(self.items) - 1)
+
+    def set_view(self, view: str, reposition: bool = True) -> None:
+        """Conservé pour les raccourcis : parcourir, ou éditer."""
+        if view == self.view:
+            return
+        self.set_tab(TAB_EDIT if view == VIEW_EDIT else
+                     (TAB_VIDEOS if self.content == CONTENT_VIDEOS
+                      else TAB_FOLDERS), reposition)
 
     def set_content(self, content: str) -> None:
         """Regarder les dossiers, ou les vidéos qu'ils contiennent."""
         if content == self.content or self.root is None:
             return
-        self.content = content
-        self.cfg["content"] = content
-        self.cfg.save()
-        self.start_root(self.root, self.mode_for_content(), reset_levels=False)
+        self.set_tab(TAB_VIDEOS if content == CONTENT_VIDEOS else TAB_FOLDERS)
 
     def mode_for_content(self) -> str:
         return MODE_FOLDERS if self.content == CONTENT_FOLDERS else MODE_FLAT
 
     def _apply_selectors(self) -> None:
         """Aligne l'entête sur l'état réel, pour qu'il dise où l'on se trouve."""
-        self.content_selector.set_value(self.content)
-        self.view_selector.set_value(self.view)
+        self.tabs.set_value(self.tab)
+        self.tag_chips.set_value(self.tag_family)
         self.controls.set_browsing(self.browsing)
         item = self.current
         self.enter_button.setVisible(
@@ -1061,9 +1149,10 @@ class MainWindow(QMainWindow):
             self.levels.pop()
         self.start_root(target, self.mode_for_content(), reset_levels=False)
 
-    def toggle_board(self, visible: bool | None = None) -> None:
+    def toggle_board(self, visible: bool | None = None,
+                     reposition: bool = True) -> None:
         target = (not self.browsing) if visible is None else visible
-        self.set_view(VIEW_BROWSE if target else VIEW_EDIT)
+        self.set_view(VIEW_BROWSE if target else VIEW_EDIT, reposition)
 
     def refresh_board(self) -> None:
         if not self.browsing:
@@ -1116,7 +1205,7 @@ class MainWindow(QMainWindow):
         if item.kind == MODE_FOLDERS:
             self.enter_current()
         else:
-            self.toggle_board(False)
+            self.toggle_board(False, reposition=False)
             self.show_item(position)
 
     def on_board_rate(self, position: int, stars: int) -> None:
@@ -1199,7 +1288,7 @@ class MainWindow(QMainWindow):
         C'est la seule différence d'intention entre les deux vues : parcourir
         d'un côté, décider de l'autre.
         """
-        if self.browsing:
+        if self.tree.action == "go" or self.browsing:
             self.levels.append({
                 "root": self.root, "mode": self.mode,
                 "item_id": self.current.item_id if self.current else "",
@@ -1207,6 +1296,11 @@ class MainWindow(QMainWindow):
             self.start_root(Path(path), reset_levels=False)
             return
         self.act_move({"path": path, "label": Path(path).name})
+
+    def on_tree_action(self, action: str) -> None:
+        self.cfg["tree_action"] = action
+        self.cfg.save()
+        self.setFocus()
 
     def on_tree_root_changed(self, path: str) -> None:
         self.cfg["tree_root"] = path
