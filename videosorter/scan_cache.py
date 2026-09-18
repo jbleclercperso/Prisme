@@ -31,12 +31,17 @@ CACHE_VERSION = 2
 MAX_ENTRIES = 30000
 
 
-def signature(folder: Path) -> str:
+def signature(folder: Path, stamp: int | None = None) -> str:
     """Empreinte du dossier : sa date de modification, ou "" s'il est illisible.
 
     Lue en nanosecondes : arrondies à la seconde, deux modifications rapprochées
     donneraient la même empreinte et la seconde passerait inaperçue.
+
+    `stamp` est la date déjà relevée en énumérant le dossier parent. Quand on
+    l'a, on s'en sert : la redemander coûte un aller-retour réseau par dossier.
     """
+    if stamp:
+        return str(stamp)
     try:
         return str(folder.stat().st_mtime_ns)
     except OSError:
@@ -49,6 +54,10 @@ class ScanCache:
     def __init__(self, path: Path = SCAN_CACHE_PATH):
         self.path = path
         self.data: dict = {}
+        # Composition des dossiers de tete : {dossier: {sig, children, loose}}.
+        # Les traverser demandait une enumeration chacun, soit une vingtaine de
+        # secondes avant le moindre affichage.
+        self.expansions: dict = {}
         self.dirty = False
         self.load()
 
@@ -61,6 +70,9 @@ class ScanCache:
             entries = raw.get("entries")
             if isinstance(entries, dict):
                 self.data = entries
+            expansions = raw.get("expansions")
+            if isinstance(expansions, dict):
+                self.expansions = expansions
 
     def get(self, folder: Path, sig: str) -> Item | None:
         if not sig:
@@ -105,8 +117,36 @@ class ScanCache:
         }
         self.dirty = True
 
+    def get_expansion(self, folder: Path, stamp: int) -> dict | None:
+        """Composition connue de ce dossier de tete, si rien n'y a bouge."""
+        if not stamp:
+            return None
+        record = self.expansions.get(str(folder))
+        if not record or record.get("sig") != str(stamp):
+            return None
+        return {"children": [tuple(pair) for pair in record.get("children", [])],
+                "loose": bool(record.get("loose"))}
+
+    def put_expansion(self, folder: Path, stamp: int, children: list,
+                      loose: bool) -> None:
+        self.expansions[str(folder)] = {
+            "sig": str(stamp),
+            "children": [[name, value] for name, value in children],
+            "loose": bool(loose),
+        }
+        self.dirty = True
+
     def forget(self, folder: Path) -> None:
-        if self.data.pop(str(folder), None) is not None:
+        """Oublie ce dossier : l'application vient d'y toucher.
+
+        Les dates relevees en enumerant un repertoire peuvent retarder sur la
+        realite. Pour les changements que l'application fait elle-meme, on ne
+        s'en remet pas a elles.
+        """
+        folder = str(folder)
+        gone = self.data.pop(folder, None) is not None
+        gone = self.expansions.pop(folder, None) is not None or gone
+        if gone:
             self.dirty = True
 
     def flush(self) -> None:
@@ -118,7 +158,8 @@ class ScanCache:
             self.data = dict(ordered[-MAX_ENTRIES:])
         try:
             APP_DIR.mkdir(parents=True, exist_ok=True)
-            payload = {"version": CACHE_VERSION, "entries": self.data}
+            payload = {"version": CACHE_VERSION, "entries": self.data,
+                       "expansions": self.expansions}
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
             tmp.replace(self.path)
@@ -127,6 +168,7 @@ class ScanCache:
             pass
 
     def clear(self) -> None:
+        self.expansions = {}
         self.data = {}
         self.dirty = True
         self.flush()

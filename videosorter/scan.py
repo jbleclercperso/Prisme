@@ -144,6 +144,33 @@ def human_resolution(height: int) -> str:
     return f"{closest}p"
 
 
+def _stamp(entry) -> int:
+    """Date de modification rapportee par l enumeration, ou 0.
+
+    `DirEntry.stat()` ne redemande rien au disque : l enumeration d un
+    repertoire a deja rapporte les dates de toutes ses entrees. Sur un partage
+    reseau, c est la difference entre une lecture et plusieurs centaines — 79 ms
+    chacune sur le NAS de mesure, soit trois quarts de minute pour six cents
+    dossiers.
+
+    Mais sous NTFS, la date qu un repertoire rapporte de ses sous-repertoires
+    retarde sur la realite : un fichier ajoute a l instant peut n y apparaitre
+    que plus tard. On ne s en sert donc qu ou elle est a la fois fiable et
+    rentable — sur un volume reseau, dont le serveur tient ses dates a jour et
+    ou chaque lecture supplementaire se paie cher. En local, on redemande.
+    """
+    try:
+        return entry.stat(follow_symlinks=False).st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _stamps_are_trustworthy(root) -> bool:
+    """Vrai la ou relever les dates au passage vaut mieux que les redemander."""
+    from .media import is_network_path
+    return is_network_path(root)
+
+
 def is_video(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXTS
 
@@ -321,7 +348,8 @@ def loose_videos(folder: Path, skip_hidden: bool = True) -> list:
     return found
 
 
-def expand_parents(entries: list, skip_hidden: bool = True) -> list:
+def expand_parents(entries: list, skip_hidden: bool = True,
+                   stamps: dict | None = None, cache=None) -> list:
     """Remplace chaque rayonnage par son contenu, en gardant l'ordre.
 
     Les dossiers qu'il contient prennent sa place dans la liste ; les vidéos
@@ -333,11 +361,28 @@ def expand_parents(entries: list, skip_hidden: bool = True) -> list:
         if not is_parent_folder(path):
             expanded.append(path)
             continue
-        # Une seule enumeration : les videos en vrac et les sous-dossiers se
-        # lisent du meme passage. En demander deux doublait le temps d'ouverture
-        # sur un partage reseau, ou chaque lecture est un aller-retour.
+
+        own = (stamps or {}).get(str(path), 0)
+        known = cache.get_expansion(path, own) if cache is not None else None
+        if known is not None:
+            # Le rayonnage n'a pas bouge : sa composition est connue, inutile de
+            # redemander au reseau ce qu'on a deja note.
+            if known["loose"]:
+                expanded.append(path)
+            for name, stamp in known["children"]:
+                child = path / name
+                expanded.append(child)
+                if stamps is not None:
+                    stamps[str(child)] = stamp
+            continue
+
+        # Une seule enumeration : les videos en vrac, les sous-dossiers et leurs
+        # dates se lisent du meme passage. En demander plusieurs multipliait le
+        # temps d'ouverture sur un partage reseau, ou chaque lecture est un
+        # aller-retour de plusieurs dizaines de millisecondes.
         children = []
         has_loose = False
+        readable = True
         try:
             for entry in os.scandir(path):
                 try:
@@ -347,23 +392,36 @@ def expand_parents(entries: list, skip_hidden: bool = True) -> list:
                 if skip_hidden and _is_hidden(entry):
                     continue
                 if is_dir:
-                    children.append(Path(entry.path))
+                    children.append((entry.name, _stamp(entry)))
                 elif not has_loose:
                     dot = entry.name.rfind(".")
                     if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
                         has_loose = True
         except OSError:
             children = []
+            readable = False
+        children.sort(key=lambda pair: pair[0].lower())
+        if cache is not None and readable and own:
+            cache.put_expansion(path, own, children, has_loose)
         if has_loose:
             expanded.append(path)
-        children.sort(key=lambda child: child.name.lower())
-        expanded.extend(children)
+        for name, stamp in children:
+            child = path / name
+            expanded.append(child)
+            if stamps is not None:
+                stamps[str(child)] = stamp
     return expanded
 
 
 def list_entries(root: Path, mode: str, skip_hidden: bool = True,
-                 expand_parent_folders: bool = False) -> list:
-    """Liste, sans les analyser, les chemins de premier niveau à traiter."""
+                 expand_parent_folders: bool = False,
+                 stamps: dict | None = None, cache=None) -> list:
+    """Liste, sans les analyser, les chemins de premier niveau à traiter.
+
+    `stamps`, s'il est fourni, se remplit des dates de modification relevées au
+    passage. Elles ne coûtent rien ici et évitent plus tard une lecture réseau
+    par dossier pour savoir s'il a bougé.
+    """
     if mode == MODE_FLAT:
         return list_all_videos(root, skip_hidden)
     entries = []
@@ -373,6 +431,8 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
                 continue
             if mode == MODE_FOLDERS and entry.is_dir(follow_symlinks=False):
                 entries.append(Path(entry.path))
+                if stamps is not None:
+                    stamps[entry.path] = _stamp(entry)
             elif mode == MODE_FILES and entry.is_file():
                 dot = entry.name.rfind(".")
                 if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
@@ -380,7 +440,7 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
     except OSError:
         pass
     if mode == MODE_FOLDERS and expand_parent_folders:
-        entries = expand_parents(entries, skip_hidden)
+        entries = expand_parents(entries, skip_hidden, stamps, cache)
     return entries
 
 
@@ -419,8 +479,12 @@ class ScanThread(QThread):
         import time as _time
 
         mode = self.mode or detect_mode(self.root, self.skip_hidden)
+        # Les dates relevees pendant l'enumeration evitent, plus bas, une lecture
+        # reseau par dossier : sur le NAS de mesure, 79 ms chacune.
+        stamps: dict = {} if _stamps_are_trustworthy(self.root) else None
         paths = list_entries(self.root, mode, self.skip_hidden,
-                             self.expand_parents)
+                             self.expand_parents, stamps,
+                             CACHE if self.use_cache else None)
         total = len(paths)
         batch: list = []
         last_flush = _time.monotonic()
@@ -441,11 +505,12 @@ class ScanThread(QThread):
             elif self.expand_parents and is_parent_folder(path):
                 item = scan_loose(path, self.skip_hidden)
             else:
-                sig = signature(path) if self.use_cache else ""
+                stamp = stamps.get(str(path)) if stamps else None
+                sig = signature(path, stamp) if self.use_cache else ""
                 item = CACHE.get(path, sig) if sig else None
                 if item is None:
                     item = scan_folder(path)
-                    CACHE.put(item, sig or signature(path))
+                    CACHE.put(item, sig or signature(path, stamp))
                     self.rescanned += 1
                 else:
                     self.reused += 1

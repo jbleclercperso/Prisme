@@ -26,7 +26,7 @@ from videosorter.window import MainWindow  # noqa: E402
 def open_root(app, window, root: Path) -> tuple:
     start = time.perf_counter()
     window.start_root(root)
-    deadline = time.time() + 600
+    deadline = time.time() + int(os.environ.get("VS_BENCH_DEADLINE", "600"))
     while time.time() < deadline:
         app.processEvents()
         if not window.scanning:

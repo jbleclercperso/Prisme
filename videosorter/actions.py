@@ -65,6 +65,14 @@ def retry(func, *args, attempts: int = 4, delay: float = 0.12):
     raise last
 
 
+def _forget(src: Path, target: Path) -> None:
+    """Retire du cache les dossiers que ce deplacement va changer."""
+    # Import tardif : le cache d'analyse depend de modules qui dependent d'ici.
+    from .scan_cache import CACHE
+    for path in (Path(src).parent, Path(target).parent, Path(src)):
+        CACHE.forget(path)
+
+
 def _relocate(src: Path, target: Path) -> None:
     """Déplace src vers target.
 
@@ -72,6 +80,7 @@ def _relocate(src: Path, target: Path) -> None:
     verrou transitoire échoue proprement au lieu de laisser une copie partielle.
     Le repli copie-puis-efface de shutil n'est utilisé que d'un disque à l'autre.
     """
+    _forget(src, target)
     try:
         os.rename(src, target)
         return
