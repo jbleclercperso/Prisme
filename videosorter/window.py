@@ -26,7 +26,8 @@ from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
     STYLESHEET, CommandBar, DestinationsDialog, FilterBar, PageBar, PreviewGrid,
-    AdvancedFilterBar, RootBar, SinglePlayer, StarStrip, TrashDialog,
+    AdvancedFilterBar, FocusPlayer, RootBar, SinglePlayer, StarStrip,
+    TrashDialog,
 )
 
 PAGE_WELCOME, PAGE_SORT, PAGE_DONE = 0, 1, 2
@@ -247,6 +248,7 @@ class MainWindow(QMainWindow):
             self.cfg["scroll_seconds"], self.viewer,
         )
         self.grid.openRequested.connect(self.open_external)
+        self.grid.playRequested.connect(self.play_in_app)
         self.single = SinglePlayer(
             self.cfg["thumb_count"], self.cfg["scroll_seconds"], self.viewer
         )
@@ -256,6 +258,7 @@ class MainWindow(QMainWindow):
         self.board.openRequested.connect(self.on_board_open)
         self.board.rateRequested.connect(self.on_board_rate)
         self.board.previewNeeded.connect(self.on_board_preview)
+        self.board.playRequested.connect(self.play_in_app)
         self.viewer.addWidget(self.grid)
         self.viewer.addWidget(self.single)
         self.viewer.addWidget(self.board)
@@ -294,6 +297,10 @@ class MainWindow(QMainWindow):
         self.done_page.rescan.clicked.connect(self.refresh_root)
         self.done_page.change.clicked.connect(self.choose_root)
         self.stack.addWidget(self.done_page)
+
+        self.focus = FocusPlayer(self.cfg["scroll_seconds"], sort_page)
+        self.focus.closed.connect(self.close_focus)
+        self.focus.hide()
 
         self.banner_timer = QTimer(self)
         self.banner_timer.setSingleShot(True)
@@ -1275,6 +1282,46 @@ class MainWindow(QMainWindow):
         self.done_page.summary.setText(summary)
         self.stack.setCurrentIndex(PAGE_DONE)
 
+    def play_focused(self) -> None:
+        """Ouvre en grand ce qui est sous la souris, ou la vidéo courante."""
+        slot = self.grid.hovered_slot
+        if self.viewer.currentWidget() is self.grid and slot >= 0:
+            tile = self.grid.tiles[slot]
+            if tile.video:
+                return self.play_in_app(tile.video, tile.ts)
+        if self.board_view and self.board.hovered >= 0:
+            card = self.board.cards[self.board.hovered]
+            if card.video:
+                return self.play_in_app(card.video, card.ts)
+        item = self.current
+        if item is not None and item.kind == MODE_FILES:
+            return self.play_in_app(str(item.path))
+        self.show_banner("Survolez une vidéo, ou double-cliquez dessus", "#2a2f38")
+
+    def play_in_app(self, path: str, start_s: float = 0.0) -> None:
+        """Ouvre la vidéo en grand dans l'application, sans passer la main au système."""
+        if not path or not Path(path).exists():
+            self.show_banner("Vidéo introuvable", "#3a2226")
+            return
+        self.grid.stop()
+        self.board.stop()
+        self.single.player.pause()
+        page = self.stack.widget(PAGE_SORT)
+        self.focus.setGeometry(page.rect())
+        self.focus.play(path, start_s, self.cfg["muted"])
+        self.focus.setFocus()
+
+    def close_focus(self) -> None:
+        # Differe : on ne demonte pas un lecteur depuis son propre gestionnaire
+        # d'evenement, sous peine de bloquer le moteur multimedia.
+        QTimer.singleShot(0, self._finish_close_focus)
+
+    def _finish_close_focus(self) -> None:
+        self.focus.stop()
+        self.setFocus()
+        if not self.board_view and self.viewer.currentWidget() is self.single:
+            self.single.player.play()
+
     def open_external(self, path: str = "") -> None:
         target = Path(path) if path else (self.current.path if self.current else None)
         if target:
@@ -1363,6 +1410,8 @@ class MainWindow(QMainWindow):
             if self.viewer.currentWidget() is self.single:
                 self.single.toggle_pause()
             return
+        if key == Qt.Key_F:
+            return self.play_focused()
 
         text = event.text().lower().strip()
         if text in ("0", "1", "2", "3", "4", "5"):
@@ -1397,7 +1446,13 @@ class MainWindow(QMainWindow):
         self.root_bar.set_muted(muted)
         self.show_banner("Son coupé" if muted else "Son activé", "#2a2f38")
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self.focus.isHidden():
+            self.focus.setGeometry(self.stack.widget(PAGE_SORT).rect())
+
     def closeEvent(self, event):
+        self.focus.stop()
         self.stop_scan()
         self._release_media()
         # Un transfert interrompu laisserait un dossier à moitié copié : on

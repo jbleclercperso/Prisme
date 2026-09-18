@@ -66,7 +66,9 @@ déjà vu est instantané.
 | `6`…`9`, `a`…`z` | Déplace vers la destination configurée, puis passe au suivant |
 | `←` / `→` | Revenir en arrière / avancer sans décider |
 | **molette** | Avance ou recule dans la vidéo survolée |
-| **Ctrl+molette** | Zoome sur l'image, centré là où pointe la souris (×1 à ×6) |
+| **clic gauche maintenu + molette** | Zoome sur l'image, centré là où pointe la souris (×1 à ×6) — `Ctrl+molette` fait de même |
+| **clic droit** | Ramène l'image à sa taille normale |
+| `F` ou double-clic | Ouvre la vidéo en grand, dans l'application |
 | `Ctrl+Z` | Annuler la dernière action |
 | `Ctrl+F` | Aller au champ de filtre |
 | `Ctrl+P` | Basculer entre la fiche unique et la planche |
@@ -139,6 +141,20 @@ sans explication, et l'estimation se précise à mesure que vous parcourez.
 **◂ Précédent** (`Alt+←`) revient à l'endroit visité juste avant, y compris
 après un déplacement latéral — à distinguer de **Remonter**, qui monte d'un
 niveau dans l'arborescence.
+
+## Lire en grand
+
+Un double-clic sur un aperçu ou une carte, ou la touche `F`, ouvre la vidéo dans
+un **lecteur intégré** qui recouvre la page : image en grand, temps restant,
+avancement, zoom. `Échap` ou un nouveau double-clic referme.
+
+Rien n'est confié au lecteur du système : on reste dans le tri, et le fichier
+est relâché à la fermeture — sans quoi Windows le garderait verrouillé et vous
+ne pourriez pas le ranger juste après l'avoir regardé.
+
+Partout où une vidéo se lit — aperçu survolé, carte survolée, lecteur plein
+cadre, lecteur intégré — le **temps restant** s'affiche en haut à droite de
+l'image, et un trait bleu marque l'avancement.
 
 ## Notation
 
@@ -257,7 +273,7 @@ descente dans les sous-dossiers, le cache d'analyse, la gestion des destinations
 la corbeille de session, la vue planche, la notation, le zoom et les transferts
 la densité de la planche, les filtres chiffrés, l'historique de navigation et
 les transferts en tâche de fond — interface comprise, en mode sans affichage.
-228 vérifications.
+245 vérifications.
 
 La suite porte un garde-fou : passé un délai, elle imprime la pile plutôt que
 d'attendre indéfiniment. Une interface graphique arrêtée sur une boîte de

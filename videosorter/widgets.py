@@ -47,6 +47,8 @@ QLabel#boardName { font-size: 14px; font-weight: 600; color: #e6e8ea; }
 QLabel#boardMeta { font-size: 12px; color: #8b95a3; }
 QScrollArea#boardScroll { background: transparent; border: 0; }
 QWidget#videoArea { background: #000000; }
+QWidget#focusPlayer { background: #07080a; }
+QLabel#focusTitle { font-size: 18px; font-weight: 600; color: #ffffff; }
 QFrame#tile { background: #0e1013; border: 1px solid #262c35; border-radius: 8px; }
 QFrame#tile[hovered="true"] { border: 1px solid #4c8dff; }
 QLabel#tileBadge { background: rgba(0,0,0,0.65); color: #dfe4ea; border-radius: 4px;
@@ -246,6 +248,7 @@ class PreviewGrid(QWidget):
     """Dix aperçus. Le survol d'une case y lance la lecture de l'extrait."""
 
     openRequested = Signal(str)
+    playRequested = Signal(str, float)
 
     def __init__(self, count: int = 10, preview_seconds: int = 10,
                  scroll_seconds: int = 5, parent=None):
@@ -272,6 +275,12 @@ class PreviewGrid(QWidget):
         self.progress.setObjectName("playProgress")
         self.progress.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.progress.hide()
+
+        # Temps restant de l'extrait survole, en haut a droite de la case.
+        self.remaining = QLabel("", self)
+        self.remaining.setObjectName("remaining")
+        self.remaining.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.remaining.hide()
 
         # Le lecteur flotte au-dessus de la case survolée.
         self.video = QVideoWidget(self)
@@ -428,12 +437,22 @@ class PreviewGrid(QWidget):
     def _draw_progress(self, fraction: float) -> None:
         if self.hovered_slot == -1:
             self.progress.hide()
+            self.remaining.hide()
             return
         rect = self.tiles[self.hovered_slot].geometry()
         width = max(1, int(rect.width() * fraction))
         self.progress.setGeometry(rect.x(), rect.bottom() - 24, width, 5)
         self.progress.raise_()
         self.progress.show()
+
+        duration = self.player.duration()
+        if duration > 0:
+            left = max(0, duration - self.player.position()) / 1000.0
+            self.remaining.setText(f"−{human_duration(left)}")
+            self.remaining.adjustSize()
+            self.remaining.move(rect.right() - self.remaining.width() - 8, rect.y() + 8)
+            self.remaining.raise_()
+            self.remaining.show()
 
     def _on_error(self, *_args) -> None:
         if 0 <= self.hovered_slot < len(self.tiles):
@@ -463,13 +482,14 @@ class PreviewGrid(QWidget):
         self.player.stop()
         self.video.hide()
         self.progress.hide()
+        self.remaining.hide()
         for tile in self.tiles:
             tile.set_hovered(False)
 
     def mouseDoubleClickEvent(self, event):
         slot = self._slot_at(event.position().toPoint())
         if slot >= 0 and self.tiles[slot].video:
-            self.openRequested.emit(self.tiles[slot].video)
+            self.playRequested.emit(self.tiles[slot].video, self.tiles[slot].ts)
 
 
 class SinglePlayer(QWidget):
@@ -607,10 +627,8 @@ class SinglePlayer(QWidget):
             left = max(0, duration - position) / 1000.0
             self.remaining.setText(f"−{human_duration(left)}")
             self.remaining.adjustSize()
-            self.remaining.move(
-                area.right() - self.remaining.width() - 12,
-                top - self.remaining.height() - 8,
-            )
+            self.remaining.move(area.right() - self.remaining.width() - 12,
+                                area.top() + 12)
             self.remaining.raise_()
             self.remaining.show()
         else:
@@ -641,8 +659,11 @@ class SinglePlayer(QWidget):
             self.player.play()
 
     def wheelEvent(self, event):
-        """Molette : parcourir la vidéo. Avec Ctrl : zoomer là où pointe la souris."""
-        if event.modifiers() & Qt.ControlModifier:
+        """Molette : parcourir la vidéo.
+
+        Bouton gauche maintenu, ou Ctrl : zoomer là où pointe la souris.
+        """
+        if event.buttons() & Qt.LeftButton or event.modifiers() & Qt.ControlModifier:
             return self._zoom_at(event)
         if not self.player.source().isValid():
             return super().wheelEvent(event)
@@ -706,6 +727,21 @@ class SinglePlayer(QWidget):
         self.position_label.raise_()
         self.position_label.show()
         self.position_timer.start(1800)
+
+    def mousePressEvent(self, event):
+        # Le clic droit remet l'image à sa taille : geste unique, sans menu.
+        if event.button() == Qt.RightButton and self.zoom > 1.0:
+            self.reset_zoom()
+            self.position_label.setText("×1")
+            self.position_label.adjustSize()
+            self.position_label.move(self.video_area.geometry().right()
+                                     - self.position_label.width() - 10,
+                                     self.video_area.geometry().top() + 46)
+            self.position_label.raise_()
+            self.position_label.show()
+            self.position_timer.start(1200)
+            return
+        super().mousePressEvent(event)
 
     def toggle_pause(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -875,6 +911,172 @@ class TrashDialog(QDialog):
 
     def restore_all(self) -> None:
         self._restore(list(self.trash.entries))
+
+
+class FocusPlayer(QWidget):
+    """Lecteur plein écran, à l'intérieur de l'application.
+
+    Un double-clic sur une vidéo ouvre celle-ci ici plutôt que de la confier au
+    lecteur du système : on reste dans le tri, avec le zoom, l'avancement et le
+    temps restant sous la main, et la touche Échap rend la main.
+    """
+
+    closed = Signal()
+
+    def __init__(self, scroll_seconds: int = 5, parent=None):
+        super().__init__(parent)
+        self.setObjectName("focusPlayer")
+        self.scroll_seconds = scroll_seconds
+        self.zoom = 1.0
+        self.zoom_focus = QPointF(0.5, 0.5)
+
+        self.video_area = QWidget(self)
+        self.video_area.setObjectName("videoArea")
+        self.video_area.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.video = QVideoWidget(self.video_area)
+        self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        self.title = QLabel("", self)
+        self.title.setObjectName("focusTitle")
+        self.remaining = QLabel("", self)
+        self.remaining.setObjectName("remaining")
+        self.hint = QLabel(
+            "Clic gauche + molette : zoomer  ·  clic droit : taille normale  ·  "
+            "molette : parcourir  ·  Échap ou double-clic : fermer", self,
+        )
+        self.hint.setObjectName("hint")
+        self.progress_rail = QFrame(self)
+        self.progress_rail.setObjectName("playRail")
+        self.progress = QFrame(self)
+        self.progress.setObjectName("playProgress")
+        for child in (self.title, self.remaining, self.hint,
+                      self.progress_rail, self.progress):
+            child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        self.audio = QAudioOutput(self)
+        self.player = QMediaPlayer(self)
+        self.player.setVideoOutput(self.video)
+        self.player.setAudioOutput(self.audio)
+        self.player.positionChanged.connect(self._on_position)
+        self.player.durationChanged.connect(
+            lambda _d: self._on_position(self.player.position())
+        )
+        self.player.mediaStatusChanged.connect(self._on_status)
+        self._pending_seek = 0
+
+    # -- lecture ---------------------------------------------------------
+    def play(self, path: str, start_s: float = 0.0, muted: bool = False) -> None:
+        self.zoom = 1.0
+        self.zoom_focus = QPointF(0.5, 0.5)
+        self.title.setText(Path(path).name)
+        self.audio.setMuted(muted)
+        self._pending_seek = int(start_s * 1000)
+        self.player.setSource(QUrl.fromLocalFile(path))
+        self.player.play()
+        self.show()
+        self.raise_()
+        self._layout_children()
+
+    def stop(self) -> None:
+        """Referme le lecteur et relâche le fichier.
+
+        On masque avant d'arrêter : démonter la sortie vidéo pendant que le
+        widget est encore affiché peut bloquer le moteur multimédia.
+        """
+        self.hide()
+        self.player.stop()
+        self.player.setSource(QUrl())
+
+    def _on_status(self, status) -> None:
+        loaded = (QMediaPlayer.MediaStatus.LoadedMedia,
+                  QMediaPlayer.MediaStatus.BufferedMedia)
+        if status in loaded and self._pending_seek:
+            self.player.setPosition(self._pending_seek)
+            self._pending_seek = 0
+        elif status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self.player.setPosition(0)
+            self.player.play()
+
+    def _on_position(self, position: int) -> None:
+        duration = self.player.duration()
+        fraction = (position / duration) if duration > 0 else 0.0
+        rect = self.rect()
+        top = rect.bottom() - 40
+        self.progress_rail.setGeometry(24, top, max(0, rect.width() - 48), 8)
+        self.progress.setGeometry(
+            24, top, max(0, int((rect.width() - 48) * min(1.0, fraction))), 8
+        )
+        if duration > 0:
+            left = max(0, duration - position) / 1000.0
+            self.remaining.setText(f"−{human_duration(left)}")
+        else:
+            self.remaining.setText("")
+        self.remaining.adjustSize()
+        self.remaining.move(rect.right() - self.remaining.width() - 24, 24)
+        self.remaining.raise_()
+
+    # -- disposition et zoom ---------------------------------------------
+    def _layout_children(self) -> None:
+        rect = self.rect()
+        self.video_area.setGeometry(0, 60, rect.width(), max(0, rect.height() - 110))
+        self._apply_zoom()
+        self.title.adjustSize()
+        self.title.move(24, 22)
+        self.hint.adjustSize()
+        self.hint.move(24, rect.bottom() - 24)
+        self._on_position(self.player.position())
+
+    def _apply_zoom(self) -> None:
+        area = self.video_area.rect()
+        width = int(area.width() * self.zoom)
+        height = int(area.height() * self.zoom)
+        left = int(self.zoom_focus.x() * (area.width() - width))
+        top = int(self.zoom_focus.y() * (area.height() - height))
+        self.video.setGeometry(left, top, width, height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_children()
+
+    def wheelEvent(self, event):
+        notches = event.angleDelta().y() / 120.0
+        if not notches:
+            return
+        if event.buttons() & Qt.LeftButton or event.modifiers() & Qt.ControlModifier:
+            area = self.video_area.geometry()
+            local = event.position().toPoint() - area.topLeft()
+            if area.width() > 0 and area.height() > 0:
+                self.zoom_focus = QPointF(
+                    max(0.0, min(1.0, local.x() / area.width())),
+                    max(0.0, min(1.0, local.y() / area.height())),
+                )
+            self.zoom = max(1.0, min(6.0, self.zoom * (1.25 ** notches)))
+            self._apply_zoom()
+        else:
+            self.player.setPosition(
+                max(0, self.player.position() + seek_step(event, self.scroll_seconds))
+            )
+        event.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            self.zoom = 1.0
+            self.zoom_focus = QPointF(0.5, 0.5)
+            self._apply_zoom()
+
+    def mouseDoubleClickEvent(self, event):
+        self.closed.emit()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Escape, Qt.Key_F):
+            self.closed.emit()
+        elif event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
+            if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self.player.pause()
+            else:
+                self.player.play()
+        else:
+            super().keyPressEvent(event)
 
 
 class StarStrip(QWidget):

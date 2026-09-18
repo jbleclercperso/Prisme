@@ -33,6 +33,7 @@ class BoardCard(QFrame):
 
     opened = Signal(int)
     rated = Signal(int, int)
+    played = Signal(int)
 
     def __init__(self, index: int, parent=None):
         super().__init__(parent)
@@ -154,6 +155,10 @@ class BoardCard(QFrame):
         ):
             self.opened.emit(self.index)
 
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and self.video:
+            self.played.emit(self.index)
+
 
 class BoardView(QWidget):
     """Grille défilante de cartes, avec lecture au survol."""
@@ -161,6 +166,7 @@ class BoardView(QWidget):
     openRequested = Signal(int)
     rateRequested = Signal(int, int)
     previewNeeded = Signal(int)
+    playRequested = Signal(str, float)
 
     def __init__(self, preview_seconds: int = 10, columns: int = DEFAULT_COLUMNS,
                  parent=None):
@@ -195,6 +201,12 @@ class BoardView(QWidget):
         self.video = QVideoWidget(self.canvas)
         self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.video.hide()
+
+        # Temps restant de l'extrait survole, comme dans la grille d'apercus.
+        self.remaining = QLabel("", self.canvas)
+        self.remaining.setObjectName("remaining")
+        self.remaining.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.remaining.hide()
         self.audio = QAudioOutput(self)
         self.player = QMediaPlayer(self)
         self.player.setVideoOutput(self.video)
@@ -234,6 +246,7 @@ class BoardView(QWidget):
             card = BoardCard(len(self.cards), self.canvas)
             card.opened.connect(self.openRequested)
             card.rated.connect(self.rateRequested)
+            card.played.connect(self._play_full)
             self.cards.append(card)
 
         width = self._card_width()
@@ -266,6 +279,11 @@ class BoardView(QWidget):
     def set_thumb(self, position: int, path: str) -> None:
         if 0 <= position < len(self.cards):
             self.cards[position].set_thumb(path)
+
+    def _play_full(self, position: int) -> None:
+        if 0 <= position < len(self.cards) and self.cards[position].video:
+            card = self.cards[position]
+            self.playRequested.emit(card.video, card.ts)
 
     def random_index(self) -> int:
         candidates = [i for i, item in enumerate(self.items) if not item.status]
@@ -349,9 +367,23 @@ class BoardView(QWidget):
 
     def _on_position(self, position: int) -> None:
         if self.hovered == -1:
+            self.remaining.hide()
             return
         if position > self._segment_start + self.preview_seconds * 1000:
             self.player.setPosition(self._segment_start)
+        duration = self.player.duration()
+        if duration > 0 and self.hovered < len(self.cards):
+            card = self.cards[self.hovered]
+            left = max(0, duration - position) / 1000.0
+            self.remaining.setText(f"−{human_duration(left)}")
+            self.remaining.adjustSize()
+            origin = card.image.mapTo(self.canvas, QPoint(0, 0))
+            self.remaining.move(
+                origin.x() + card.image.width() - self.remaining.width() - 8,
+                origin.y() + 8,
+            )
+            self.remaining.raise_()
+            self.remaining.show()
 
     def _on_error(self, *_args) -> None:
         if 0 <= self.hovered < len(self.cards) and self.cards[self.hovered].video:
@@ -362,6 +394,7 @@ class BoardView(QWidget):
     def stop(self) -> None:
         self.player.stop()
         self.video.hide()
+        self.remaining.hide()
         for card in self.cards:
             card.set_hovered(False)
         self.hovered = -1

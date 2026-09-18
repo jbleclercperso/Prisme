@@ -820,6 +820,59 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
               f"le temps restant s'affiche (obtenu {player.remaining.text()!r})")
         check(not player.remaining.isHidden(), "et il est visible")
 
+    print("\n[36] Lecteur intégré au double-clic")
+    window.start_root(flat)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 1, 60)
+    video = str(window.current.path)
+    check(window.focus.isHidden(), "le lecteur intégré reste caché tant qu'on ne l'ouvre pas")
+    window.play_in_app(video, 1.0)
+    pump(app, 0.6)
+    check(not window.focus.isHidden(), "il s'ouvre sur demande")
+    check(window.focus.title.text() == Path(video).name, "et annonce le fichier lu")
+    check(window.focus.player.source().toLocalFile().endswith(Path(video).name),
+          "c'est bien la vidéo demandée, lue dans l'application")
+    ok = wait_for(app, lambda: window.focus.player.duration() > 0, 30)
+    check(ok, "la lecture démarre")
+    pump(app, 0.4)
+    check(window.focus.remaining.text().startswith("−"),
+          f"le temps restant s'affiche (obtenu {window.focus.remaining.text()!r})")
+    check(window.focus.remaining.y() < 100, "en haut de l'image")
+    check(window.focus.remaining.x() > window.focus.width() // 2, "et à droite")
+
+    print("\n[37] Zoom au clic et retour à la taille normale")
+    focus = window.focus
+    focus.resize(1200, 800)
+    pump(app, 0.2)
+    check(focus.zoom == 1.0, "on part sans zoom")
+    # Molette seule : on parcourt, on ne zoome pas.
+    wheel(focus, 2)
+    pump(app, 0.2)
+    check(focus.zoom == 1.0, "la molette seule ne zoome pas")
+    # Bouton gauche maintenu : on zoome.
+    center = focus.rect().center()
+    event = QWheelEvent(
+        QPointF(center), QPointF(focus.mapToGlobal(center)),
+        QPoint(0, 0), QPoint(0, 240),
+        Qt.LeftButton, Qt.NoModifier, Qt.NoScrollPhase, False,
+    )
+    QApplication.sendEvent(focus, event)
+    pump(app, 0.2)
+    check(focus.zoom > 1.0, f"clic gauche + molette agrandit (×{focus.zoom:.2f})")
+    QTest.mouseClick(focus, Qt.RightButton)
+    pump(app, 0.2)
+    check(focus.zoom == 1.0, "un clic droit ramène à la taille normale")
+
+    QTest.keyClick(focus, Qt.Key_Escape)
+    pump(app, 0.4)
+    check(window.focus.isHidden(), "Échap referme le lecteur")
+    check(not window.focus.player.source().isValid(),
+          "et relâche le fichier, sans quoi il resterait verrouillé")
+
+    print("\n[38] Temps restant dans les aperçus")
+    check(window.grid.remaining is not None, "la grille d'aperçus en a un")
+    check(window.board.remaining is not None, "la planche aussi")
+    check(window.grid.remaining.isHidden(), "masqué tant que rien ne se lit")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,
