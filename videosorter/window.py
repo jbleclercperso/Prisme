@@ -404,9 +404,12 @@ class MainWindow(QMainWindow):
                 self.tab = (TAB_FOLDERS if self.content == CONTENT_FOLDERS
                             else TAB_VIDEOS)
         self.mode = mode or self.mode_for_content()
+        # Sans traverser les dossiers de tete : la question posee est « y a-t-il
+        # quelque chose ici », et la traversee, qui lit tout le reseau, ne la
+        # change pas. Elle bloquait l'ouverture une demi-minute avant que le
+        # moindre element ne s'affiche.
         if self.mode == MODE_FOLDERS and not list_entries(
-                self.root, MODE_FOLDERS, self.cfg["skip_hidden"],
-                self.cfg["expand_parents"]):
+                self.root, MODE_FOLDERS, self.cfg["skip_hidden"], False):
             # Rien a parcourir en dossiers : on bascule sur les videos plutot
             # que de presenter une liste vide sans explication.
             self.mode = MODE_FLAT

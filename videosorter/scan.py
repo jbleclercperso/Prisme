@@ -333,17 +333,30 @@ def expand_parents(entries: list, skip_hidden: bool = True) -> list:
         if not is_parent_folder(path):
             expanded.append(path)
             continue
-        if loose_videos(path, skip_hidden):
-            expanded.append(path)
+        # Une seule enumeration : les videos en vrac et les sous-dossiers se
+        # lisent du meme passage. En demander deux doublait le temps d'ouverture
+        # sur un partage reseau, ou chaque lecture est un aller-retour.
+        children = []
+        has_loose = False
         try:
-            children = sorted(
-                (Path(e.path) for e in os.scandir(path)
-                 if e.is_dir(follow_symlinks=False)
-                 and not (skip_hidden and _is_hidden(e))),
-                key=lambda child: child.name.lower(),
-            )
+            for entry in os.scandir(path):
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if skip_hidden and _is_hidden(entry):
+                    continue
+                if is_dir:
+                    children.append(Path(entry.path))
+                elif not has_loose:
+                    dot = entry.name.rfind(".")
+                    if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
+                        has_loose = True
         except OSError:
             children = []
+        if has_loose:
+            expanded.append(path)
+        children.sort(key=lambda child: child.name.lower())
         expanded.extend(children)
     return expanded
 

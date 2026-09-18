@@ -4,16 +4,20 @@ Réanalyser une collection entière à chaque démarrage est du gaspillage : d'u
 lancement à l'autre, presque rien n'a bougé. On garde donc le résultat de chaque
 dossier, avec une empreinte bon marché qui dit s'il faut le refaire.
 
-L'empreinte est la date de modification du dossier et celles de ses sous-dossiers
-immédiats. Windows met à jour la date d'un dossier dès qu'une entrée y est
-ajoutée, retirée ou renommée : cela couvre donc tout changement survenu au
-premier ou au deuxième niveau. Plus profond, la modification passe inaperçue
-jusqu'à une actualisation forcée (Ctrl+R) — c'est le prix d'une vérification qui
-ne relit pas l'arborescence entière, et c'est justement ce qu'on veut éviter.
+L'empreinte est la seule date de modification du dossier : une lecture, et rien
+d'autre. Elle couvre ce qui compte ici — un fichier ajouté, retiré ou renommé
+dans le dossier, ce que fait l'application elle-même en rangeant. Un changement
+survenu plus profond passe inaperçu jusqu'à une actualisation forcée (Ctrl+R).
+
+C'est un choix mesuré, pas une approximation commode. L'empreinte lisait aussi la
+date de chaque sous-dossier, en interrogeant le disque une fois par sous-dossier
+pour contourner la paresse de NTFS. Sur un disque local, c'est gratuit. Sur un
+partage réseau, chaque lecture est un aller-retour : vérifier le cache coûtait
+183 ms par dossier quand l'analyse complète en coûtait 71. Le cache rendait
+l'ouverture presque trois fois plus lente que de ne pas en avoir.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
@@ -22,39 +26,21 @@ from pathlib import Path
 from .config import APP_DIR, SCAN_CACHE_PATH
 from .scan import MODE_FOLDERS, Item
 
-CACHE_VERSION = 1
+# Version 2 : l'empreinte a change de definition, les anciennes ne valent plus.
+CACHE_VERSION = 2
 MAX_ENTRIES = 30000
 
 
 def signature(folder: Path) -> str:
-    """Empreinte du dossier et de ses sous-dossiers directs, ou "" si illisible.
+    """Empreinte du dossier : sa date de modification, ou "" s'il est illisible.
 
-    Les dates sont lues en nanosecondes : arrondies à la seconde, deux
-    modifications rapprochées donneraient la même empreinte et la seconde
-    passerait inaperçue.
+    Lue en nanosecondes : arrondies à la seconde, deux modifications rapprochées
+    donneraient la même empreinte et la seconde passerait inaperçue.
     """
     try:
-        parts = [str(folder.stat().st_mtime_ns)]
+        return str(folder.stat().st_mtime_ns)
     except OSError:
         return ""
-    subdirs = []
-    try:
-        for entry in os.scandir(folder):
-            try:
-                if not entry.is_dir(follow_symlinks=False):
-                    continue
-                # os.stat sur le chemin, et non entry.stat() : l'enumeration d'un
-                # repertoire NTFS rapporte une date de sous-dossier qui peut
-                # retarder de plusieurs secondes sur la realite, ce qui ferait
-                # manquer une modification recente.
-                subdirs.append(f"{entry.name}:{os.stat(entry.path).st_mtime_ns}")
-            except OSError:
-                continue
-    except OSError:
-        return ""
-    parts.extend(sorted(subdirs))
-    digest = hashlib.sha1("|".join(parts).encode("utf-8", "replace"))
-    return digest.hexdigest()[:16]
 
 
 class ScanCache:

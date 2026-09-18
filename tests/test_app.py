@@ -505,13 +505,25 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(refreshed.file_count == reference["Anniversaire"][1] + 1,
           "et ses chiffres sont à jour")
 
-    # Une modification au deuxième niveau doit compter aussi.
+    # Une modification au deuxième niveau passe volontairement inaperçue :
+    # l'empreinte ne lit plus que la date du dossier lui-même. Interroger chaque
+    # sous-dossier coûtait, sur un partage réseau, deux fois et demie le prix de
+    # l'analyse que le cache était censé éviter.
     nested = next(i for i in window.all_items if i.name == "Sous-dossiers")
     (nested.path / "interne" / "ajout2.mp4").write_bytes(b"x" * 512)
     window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
-    check(window.scan_thread.rescanned == 1,
-          "une modification dans un sous-dossier invalide le dossier parent")
+    check(window.scan_thread.rescanned == 0,
+          "une modification plus profonde attend une actualisation forcée")
+
+    # C'est Ctrl+R qui rattrape le coup, et il doit vraiment tout relire.
+    window.refresh_root()
+    wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
+    check(window.scan_thread.reused == 0,
+          f"Ctrl+R ne reprend rien du cache (obtenu {window.scan_thread.reused})")
+    seen = next(i for i in window.all_items if i.name == "Sous-dossiers")
+    check(seen.file_count == reference["Sous-dossiers"][1] + 1,
+          "et retrouve le fichier ajouté en profondeur")
 
     # Ctrl+R ignore le cache et relit tout.
     window.refresh_root()

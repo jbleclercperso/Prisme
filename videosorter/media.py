@@ -200,7 +200,9 @@ def extract_thumb(video: Path, ts: float, width: int) -> Path | None:
 
     out.parent.mkdir(parents=True, exist_ok=True)
     base = [Tools.ffmpeg, "-hide_banner", "-loglevel", "error"]
-    tail = ["-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "4", "-y", str(out)]
+    # -an : pas de piste son a demultiplexer pour fabriquer une image fixe.
+    tail = ["-an", "-frames:v", "1", "-vf", f"scale={width}:-2",
+            "-q:v", "4", "-y", str(out)]
 
     attempts = [base + ["-ss", f"{max(0.0, ts):.2f}", "-i", str(video)] + tail]
     if ts > 0:
