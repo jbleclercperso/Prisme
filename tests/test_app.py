@@ -265,7 +265,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         begin = time.time()
         QTest.keyClick(window, Qt.Key_6)
         elapsed = time.time() - begin
-        check(elapsed < 0.5, f"la main est rendue tout de suite ({elapsed:.2f} s)")
+        check(elapsed < 1.0,
+              f"la main est rendue sans subir la copie de 1,2 s ({elapsed:.2f} s)")
         check(window.index == index_before + 1, "on est déjà sur l'élément suivant")
         check(window.transfers.busy, "le transfert se poursuit derrière")
         check(not window.root_bar.pending.isHidden(),
@@ -341,16 +342,17 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check("Melange" not in kept, f"« exclure » retire la correspondance ({kept})")
     check(len(kept) == total - 1, "et ne retire rien d'autre")
 
-    # Le cas décrit : des dossiers préfixés que l'on veut écarter.
-    plus_dir = root / "+a_ignorer"
-    plus_dir.mkdir(exist_ok=True)
+    # Un prefixe quelconque que l'on veut ecarter. « + » ne sert plus d'exemple :
+    # il est devenu structurel, ces dossiers etant traverses et non listes.
+    marked = root / "zz-a-ignorer"
+    marked.mkdir(exist_ok=True)
     window.start_root(root)
     wait_for(app, lambda: not window.scanning and len(window.all_items) >= 4, 60)
-    window.apply_filter("", "+")
+    window.apply_filter("", "zz-")
     pump(app, 0.3)
-    check(all(not i.name.startswith("+") for i in window.items),
-          "les dossiers commençant par « + » sont écartés")
-    check(any(i.name.startswith("+") for i in window.all_items),
+    check(all(not i.name.startswith("zz-") for i in window.items),
+          "les dossiers commençant par « zz- » sont écartés")
+    check(any(i.name.startswith("zz-") for i in window.all_items),
           "mais ils restent dans la liste complète")
 
     window.apply_filter("", "")
@@ -662,17 +664,22 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(ok, "les images des cartes arrivent")
 
     # Noter depuis une carte.
+    window.ratings.set(window.items[0].path, 0)
     window.on_board_rate(0, 3)
     check(window.ratings.get(window.items[0].path) == 3, "on note depuis une carte")
     check(window.board.cards[0].stars.value == 3, "l'étoile de la carte suit")
 
     # Un clic sur une carte de dossier ouvre, il ne déplace rien.
     before = str(window.root)
-    position = [i.name for i in window.items].index("Anniversaire")
+    position = next(i for i, item in enumerate(window.items)
+                    if item.kind == MODE_FOLDERS and Path(item.path).is_dir()
+                    and not item.loose_only)
+    opened_name = window.items[position].name
     window.on_board_open(position)
-    ok = wait_for(app, lambda: not window.scanning and window.root.name == "Anniversaire", 60)
-    check(ok, "un clic sur une carte ouvre le dossier")
-    check((Path(before) / "Anniversaire").exists(), "sans le déplacer")
+    ok = wait_for(app, lambda: not window.scanning
+                  and window.root.name == opened_name, 60)
+    check(ok, f"un clic sur une carte ouvre le dossier ({opened_name})")
+    check((Path(before) / opened_name).exists(), "sans le déplacer")
 
     print("\n[30] L'arborescence navigue en planche, envoie en fiche")
     window.cfg["tree_root"] = str(tri)
@@ -714,14 +721,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.start_root(root)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     seen = set()
-    for _ in range(20):
+    for _ in range(12):
         window.pick_random()
-        pump(app, 0.12)
-        source = window.focus.player.source().toLocalFile()
-        if source:
-            seen.add(Path(source))
-        window.focus.stop()
-        pump(app, 0.05)
+        wait_for(app, lambda: not window.scanning, 30)
+        pump(app, 0.15)
+        if window.current is not None and window.current.kind == MODE_FILES:
+            seen.add(Path(window.current.path))
     check(len(seen) > 1, f"le tirage visite plusieurs vidéos ({len(seen)})")
     pump(app, 0.3)
 
@@ -827,56 +832,6 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
               f"le temps restant s'affiche (obtenu {player.remaining.text()!r})")
         check(not player.remaining.isHidden(), "et il est visible")
 
-    print("\n[36] Lecteur intégré au double-clic")
-    window.start_root(flat)
-    wait_for(app, lambda: not window.scanning and len(window.items) >= 1, 60)
-    video = str(window.current.path)
-    window.focus.stop()
-    pump(app, 0.2)
-    check(window.focus.isHidden(), "le lecteur intégré part fermé")
-    window.play_in_app(video, 1.0)
-    pump(app, 0.6)
-    check(not window.focus.isHidden(), "il s'ouvre sur demande")
-    check(window.focus.title.text() == Path(video).name, "et annonce le fichier lu")
-    check(window.focus.player.source().toLocalFile().endswith(Path(video).name),
-          "c'est bien la vidéo demandée, lue dans l'application")
-    ok = wait_for(app, lambda: window.focus.player.duration() > 0, 30)
-    check(ok, "la lecture démarre")
-    pump(app, 0.4)
-    check(window.focus.remaining.text().startswith("−"),
-          f"le temps restant s'affiche (obtenu {window.focus.remaining.text()!r})")
-    check(window.focus.remaining.y() < 100, "en haut de l'image")
-    check(window.focus.remaining.x() > window.focus.width() // 2, "et à droite")
-
-    print("\n[37] Zoom au clic et retour à la taille normale")
-    focus = window.focus
-    focus.resize(1200, 800)
-    pump(app, 0.2)
-    check(focus.zoom == 1.0, "on part sans zoom")
-    # Molette seule : on parcourt, on ne zoome pas.
-    wheel(focus, 2)
-    pump(app, 0.2)
-    check(focus.zoom == 1.0, "la molette seule ne zoome pas")
-    # Bouton gauche maintenu : on zoome.
-    center = focus.rect().center()
-    event = QWheelEvent(
-        QPointF(center), QPointF(focus.mapToGlobal(center)),
-        QPoint(0, 0), QPoint(0, 240),
-        Qt.LeftButton, Qt.NoModifier, Qt.NoScrollPhase, False,
-    )
-    QApplication.sendEvent(focus, event)
-    pump(app, 0.2)
-    check(focus.zoom > 1.0, f"clic gauche + molette agrandit (×{focus.zoom:.2f})")
-    QTest.mouseClick(focus, Qt.RightButton)
-    pump(app, 0.2)
-    check(focus.zoom == 1.0, "un clic droit ramène à la taille normale")
-
-    QTest.keyClick(focus, Qt.Key_Escape)
-    pump(app, 0.4)
-    check(window.focus.isHidden(), "Échap referme le lecteur")
-    check(not window.focus.player.source().isValid(),
-          "et relâche le fichier, sans quoi il resterait verrouillé")
-
     print("\n[38] Temps restant dans les aperçus")
     check(window.grid.remaining is not None, "la grille d'aperçus en a un")
     check(window.board.remaining is not None, "la planche aussi")
@@ -911,22 +866,29 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.4)
 
     print("\n[40] Tirage au hasard sur tout le stock")
-    window.start_root(root, MODE_FOLDERS)
-    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    # Vivier dedie : les etapes precedentes ont deplace presque toutes les
+    # videos de la racine, et tirer parmi trois ne prouverait rien.
+    draw_root = base / "tirage"
+    shutil.rmtree(draw_root, ignore_errors=True)
+    sources = sorted(tri.rglob("*.mp4"))
+    for position in range(12):
+        folder = draw_root / f"lot_{position % 3}"
+        folder.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sources[position % len(sources)], folder / f"clip_{position}.mp4")
+    window.start_root(draw_root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     pool = {Path(v) for item in window.all_items for v in item.videos}
     check(len(pool) > len(window.items),
           f"le vivier depasse la liste affichee ({len(pool)} videos)")
     tirages = set()
-    for _ in range(30):
+    for _ in range(20):
         window.pick_random()
+        wait_for(app, lambda: not window.scanning, 30)
         pump(app, 0.12)
-        source = window.focus.player.source().toLocalFile()
-        if source:
-            tirages.add(Path(source))
-        window.focus.stop()
-        pump(app, 0.05)
-    check(len(tirages) > 3,
-          f"le tirage varie vraiment ({len(tirages)} videos differentes)")
+        if window.current is not None and window.current.kind == MODE_FILES:
+            tirages.add(Path(window.current.path))
+    check(len(tirages) >= 4,
+          f"le tirage varie vraiment ({len(tirages)} sur {len(pool)} possibles)")
     check(tirages <= pool,
           f"et reste dans le stock analyse ({len(tirages - pool)} intrus)")
 
@@ -1021,6 +983,92 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(sum(batches) >= 1, f"des paquets ont bien été reçus ({batches})")
     check(len(window.all_items) >= 3,
           f"et tous les éléments sont arrivés ({len(window.all_items)})")
+
+    print("\n[45] Les dossiers de tete se traversent")
+    from videosorter.scan import (
+        LOOSE_LABEL, expand_parents, is_parent_folder, list_entries, loose_videos,
+    )
+
+    shelf = base / "rayonnage"
+    shutil.rmtree(shelf, ignore_errors=True)
+    source = sorted(tri.rglob("*.mp4"))[0]
+    for parent_name in ("+beach", "+montagne"):
+        for child in ("serie_a", "serie_b"):
+            target = shelf / parent_name / child
+            target.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target / "clip.mp4")
+        # Des videos posees directement dans le rayonnage, sans sous-dossier.
+        for loose in range(2):
+            shutil.copy2(source, shelf / parent_name / f"vrac_{loose}.mp4")
+    (shelf / "dossier_normal").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, shelf / "dossier_normal" / "clip.mp4")
+
+    check(is_parent_folder(shelf / "+beach"), "un nom préfixé est reconnu")
+    check(not is_parent_folder(shelf / "dossier_normal"), "un nom ordinaire non")
+    check(len(loose_videos(shelf / "+beach")) == 2,
+          "les vidéos en vrac d'un rayonnage sont repérées")
+
+    plain = list_entries(shelf, MODE_FOLDERS, True, False)
+    check(sorted(x.name for x in plain) == ["+beach", "+montagne", "dossier_normal"],
+          f"sans traversée, les rayonnages figurent tels quels ({[x.name for x in plain]})")
+
+    opened = expand_parents(list_entries(shelf, MODE_FOLDERS, True, False))
+    names = [x.name for x in opened]
+    check("serie_a" in names and "serie_b" in names,
+          f"traversés, ce sont leurs sous-dossiers qui apparaissent ({names})")
+    check("dossier_normal" in names, "les dossiers ordinaires restent")
+    check(names.count("+beach") == 1,
+          "le rayonnage ne figure qu'une fois, pour ses vidéos en vrac")
+
+    window.cfg["expand_parents"] = True
+    window.start_root(shelf, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.all_items) >= 5, 60)
+    listed = [i.name for i in window.all_items]
+    check(not any(n == "+beach" or n == "+montagne" for n in listed),
+          f"aucun rayonnage brut dans la liste à trier ({listed})")
+    loose_items = [i for i in window.all_items if i.loose_only]
+    check(len(loose_items) == 2, f"deux entrées « en vrac » ({len(loose_items)})")
+    check(LOOSE_LABEL in loose_items[0].name,
+          f"nommées clairement (obtenu {loose_items[0].name!r})")
+    check(loose_items[0].video_count == 2,
+          f"portant les seules vidéos en vrac ({loose_items[0].video_count})")
+
+    # Un rayonnage ne se deplace ni ne se supprime.
+    position = [i.name for i in window.items].index(loose_items[0].name)
+    window.show_item(position)
+    before = window.stats["moved"]
+    window.act_move({"path": str(tri / "2019"), "label": "2019"})
+    settle(app, window, 10)
+    check(window.stats["moved"] == before,
+          "une entrée « en vrac » refuse d'être déplacée telle quelle")
+    check((shelf / "+beach").is_dir(), "et le rayonnage reste en place")
+
+    print("\n[46] Double-clic : la fiche, pas un lecteur à part")
+    check(not hasattr(window, "focus"), "plus de lecteur séparé")
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    target_video = next(v for item in window.all_items for v in item.videos)
+    window.play_in_app(str(target_video))
+    ok = wait_for(app, lambda: not window.scanning
+                  and window.root == Path(target_video).parent, 60)
+    check(ok, "on arrive dans le dossier de la vidéo")
+    check(window.mode == MODE_FILES, "en mode fichier")
+    ok = wait_for(app, lambda: window.current is not None
+                  and window.current.path == Path(target_video), 30)
+    check(ok, f"et sur sa fiche ({window.current.name if window.current else None})")
+
+    print("\n[47] Pas de fantôme au changement d'aperçu")
+    grid = window.grid
+    check(grid.video.isHidden() or grid.hovered_slot == -1,
+          "au repos, aucune image de lecture n'est affichée")
+    grid.hovered_slot = 0
+    grid.tiles[0].video = str(target_video)
+    grid.tiles[0].ts = 1.0
+    grid._play_slot(0)
+    check(grid.video.isHidden(),
+          "sur un nouveau fichier, l'image reste masquée jusqu'à ce qu'elle soit prête")
+    grid.stop()
+    check(grid.video.isHidden(), "et à l'arrêt également")
 
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]

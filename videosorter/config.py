@@ -50,6 +50,7 @@ DEFAULTS = {
     "sort_mode": "",             # "" | "desc" | "asc" : classement des apercus
     "board_view": False,         # vue planche plutot que fiche unique
     "board_columns": 5,          # cartes par rangee en vue planche
+    "expand_parents": True,      # traverser les dossiers prefixes « + »
 }
 
 

@@ -392,6 +392,11 @@ class PreviewGrid(QWidget):
         if self.hovered_slot != -1:
             self.tiles[self.hovered_slot].set_hovered(False)
             self.tiles[self.hovered_slot].show_duration()
+        # Masquer avant tout : sinon l'image de la case quittee reste affichee
+        # par-dessus la nouvelle, le temps que celle-ci se charge.
+        self.video.hide()
+        self.progress.hide()
+        self.remaining.hide()
         self.hovered_slot = slot
         if slot == -1:
             self._leave()
@@ -414,24 +419,32 @@ class PreviewGrid(QWidget):
 
         self.video.setGeometry(tile.geometry().adjusted(1, 1, -1, -19))
         self.video.raise_()
-        self.video.show()
 
         self._segment_start = int(tile.ts * 1000)
         self._pending_seek = self._segment_start
         url = QUrl.fromLocalFile(tile.video)
         if self.player.source() == url:
+            # Meme fichier : rien a charger, l'image est deja bonne.
             self.player.setPosition(self._segment_start)
             self.player.play()
+            self.video.show()
         else:
+            # Fichier different : le widget garde la derniere image du precedent
+            # tant que le nouveau n'a pas rendu la sienne. On le masque jusque-la,
+            # la vignette prenant le relais.
+            self.video.hide()
             self.player.setSource(url)
             self.player.play()
 
     def _on_status(self, status) -> None:
         loaded = (QMediaPlayer.MediaStatus.LoadedMedia,
                   QMediaPlayer.MediaStatus.BufferedMedia)
-        if status in loaded and self._pending_seek:
-            self.player.setPosition(self._pending_seek)
-            self._pending_seek = 0
+        if status in loaded:
+            if self._pending_seek:
+                self.player.setPosition(self._pending_seek)
+                self._pending_seek = 0
+            if self.hovered_slot != -1:
+                self.video.show()
         elif status == QMediaPlayer.MediaStatus.EndOfMedia:
             self.player.setPosition(self._segment_start)
             self.player.play()
@@ -1244,6 +1257,7 @@ class PageBar(QWidget):
     previousPage = Signal()
     nextPage = Signal()
     toggleSort = Signal()
+    randomHere = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1251,6 +1265,10 @@ class PageBar(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
+        self.random_here = QPushButton("Au hasard ici", self)
+        self.random_here.setToolTip(
+            "Regarder une vidéo au hasard parmi celles de cet élément"
+        )
         self.sort = QPushButton("Durée ▼", self)
         self.sort.setToolTip("Classer les vidéos par durée, décroissante ou croissante")
         self.previous = QPushButton("◂", self)
@@ -1259,12 +1277,14 @@ class PageBar(QWidget):
         self.label.setObjectName("hint")
         self.next = QPushButton("▸", self)
         self.next.setToolTip("Aperçus suivants   (Ctrl+→)")
-        for button in (self.sort, self.previous, self.next):
+        for button in (self.sort, self.previous, self.next, self.random_here):
             button.setFocusPolicy(Qt.NoFocus)
+        self.random_here.clicked.connect(self.randomHere)
         self.previous.clicked.connect(self.previousPage)
         self.next.clicked.connect(self.nextPage)
         self.sort.clicked.connect(self.toggleSort)
 
+        layout.addWidget(self.random_here)
         layout.addWidget(self.sort)
         layout.addStretch(1)
         layout.addWidget(self.previous)

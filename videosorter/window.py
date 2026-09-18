@@ -18,16 +18,16 @@ from .config import Config
 from .media import PreviewManager, Tools, page_count, probe
 from .ratings import Ratings
 from .scan import (
-    MODE_FILES, MODE_FLAT, MODE_FOLDERS, ScanThread, detect_mode, human_duration,
-    human_resolution, human_size, known_media, list_entries,
+    MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, ScanThread,
+    detect_mode, human_duration, human_resolution, human_size, known_media,
+    list_entries,
 )
 from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
     STYLESHEET, CommandBar, DestinationsDialog, FilterBar, PageBar, PreviewGrid,
-    AdvancedFilterBar, FocusPlayer, RootBar, SinglePlayer, StarStrip,
-    TrashDialog,
+    AdvancedFilterBar, RootBar, SinglePlayer, StarStrip, TrashDialog,
 )
 
 PAGE_WELCOME, PAGE_SORT, PAGE_DONE = 0, 1, 2
@@ -229,6 +229,7 @@ class MainWindow(QMainWindow):
         self.page_bar.previousPage.connect(lambda: self.change_page(-1))
         self.page_bar.nextPage.connect(lambda: self.change_page(1))
         self.page_bar.toggleSort.connect(self.cycle_sort)
+        self.page_bar.randomHere.connect(self.pick_random_here)
         self.sort_mode = self.cfg["sort_mode"]
         self.page_bar.set_sort(self.sort_mode)
         self.page_bar.hide()
@@ -303,10 +304,6 @@ class MainWindow(QMainWindow):
         self.done_page.change.clicked.connect(self.choose_root)
         self.stack.addWidget(self.done_page)
 
-        self.focus = FocusPlayer(self.cfg["scroll_seconds"], sort_page)
-        self.focus.closed.connect(self.close_focus)
-        self.focus.hide()
-
         self.banner_timer = QTimer(self)
         self.banner_timer.setSingleShot(True)
         self.banner_timer.timeout.connect(self.banner.hide)
@@ -376,7 +373,8 @@ class MainWindow(QMainWindow):
         self.scanning = True
         self.scan_thread = ScanThread(
             self.root, self.mode, self.cfg["skip_hidden"],
-            use_cache and self.cfg["use_scan_cache"], self,
+            use_cache and self.cfg["use_scan_cache"],
+            self.cfg["expand_parents"], self,
         )
         self.scan_thread.progress.connect(self.on_scan_progress)
         self.scan_thread.items_ready.connect(self.on_items_ready)
@@ -479,8 +477,12 @@ class MainWindow(QMainWindow):
             self.show_banner(f"Introuvable : {item.name}", "#3a2226")
             return
 
-        direct = list_entries(target, MODE_FILES, self.cfg["skip_hidden"])
-        mode = MODE_FILES if direct else ""
+        if item.loose_only:
+            # L'entree ne porte que les videos en vrac : on va droit a elles.
+            mode = MODE_FILES
+        else:
+            direct = list_entries(target, MODE_FILES, self.cfg["skip_hidden"])
+            mode = MODE_FILES if direct else ""
         self.levels.append({
             "root": self.root,
             "mode": self.mode,
@@ -979,6 +981,20 @@ class MainWindow(QMainWindow):
             else f"« {item.name} » : note effacée", "#2a2f38",
         )
 
+    def pick_random_here(self) -> None:
+        """Tire au hasard parmi les vidéos du seul élément affiché."""
+        import random
+        item = self.current
+        pool = [str(video) for video in (item.videos if item else [])]
+        if not pool:
+            self.show_banner("Aucune vidéo ici", "#2a2f38")
+            return
+        video = random.choice(pool)
+        self.show_banner(
+            f"Au hasard dans « {item.name} » : {Path(video).name}", "#22303f"
+        )
+        self.play_in_app(video)
+
     def pick_random(self) -> None:
         """Lance une vidéo au hasard, piochée dans tout ce que l'analyse connaît.
 
@@ -1149,6 +1165,11 @@ class MainWindow(QMainWindow):
         item = self.current
         if item is None or item.locked:
             return self.advance()
+        if item.loose_only or Path(item.path).name.startswith(PARENT_PREFIX):
+            self.show_banner(
+                "Un dossier de tête ne se supprime pas depuis ici", "#3a2226"
+            )
+            return
         if not Path(item.path).exists():
             self.show_banner(f"Introuvable : {item.name}", "#3a2226")
             return self.advance()
@@ -1184,6 +1205,11 @@ class MainWindow(QMainWindow):
 
     def _move_objection(self, item, dest_dir: Path) -> str:
         """Verifie d'avance ce qui condamnerait le transfert, pour ne pas avancer."""
+        if item.loose_only:
+            return ("Cette entrée regroupe des vidéos en vrac : entrez dedans "
+                    "(Ctrl+↓) pour les traiter une par une.")
+        if Path(item.path).name.startswith(PARENT_PREFIX):
+            return f"« {item.name} » est un dossier de tête : il ne se déplace pas."
         if not Path(item.path).exists():
             return f"Introuvable : {item.name}"
         try:
@@ -1337,7 +1363,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(PAGE_DONE)
 
     def play_focused(self) -> None:
-        """Ouvre en grand ce qui est sous la souris, ou la vidéo courante."""
+        """Va à la fiche de ce qui est sous la souris, ou de la vidéo courante."""
         slot = self.grid.hovered_slot
         if self.viewer.currentWidget() is self.grid and slot >= 0:
             tile = self.grid.tiles[slot]
@@ -1353,28 +1379,37 @@ class MainWindow(QMainWindow):
         self.show_banner("Survolez une vidéo, ou double-cliquez dessus", "#2a2f38")
 
     def play_in_app(self, path: str, start_s: float = 0.0) -> None:
-        """Ouvre la vidéo en grand dans l'application, sans passer la main au système."""
-        if not path or not Path(path).exists():
+        """Ouvre la fiche de cette vidéo : son dossier, en mode fichier, sur elle.
+
+        Un lecteur séparé demandait ses propres commandes et sa propre fenêtre
+        pour refaire ce que la fiche fait déjà. Aller à la fiche garde un seul
+        endroit où l'on regarde, avec le tri et les destinations sous la main.
+        """
+        video = Path(path)
+        if not path or not video.exists():
             self.show_banner("Vidéo introuvable", "#3a2226")
             return
         self.grid.stop()
         self.board.stop()
-        self.single.player.pause()
-        page = self.stack.widget(PAGE_SORT)
-        self.focus.setGeometry(page.rect())
-        self.focus.play(path, start_s, self.cfg["muted"])
-        self.focus.setFocus()
 
-    def close_focus(self) -> None:
-        # Differe : on ne demonte pas un lecteur depuis son propre gestionnaire
-        # d'evenement, sous peine de bloquer le moteur multimedia.
-        QTimer.singleShot(0, self._finish_close_focus)
-
-    def _finish_close_focus(self) -> None:
-        self.focus.stop()
-        self.setFocus()
-        if not self.board_view and self.viewer.currentWidget() is self.single:
-            self.single.player.play()
+        parent = video.parent
+        already_there = (self.root == parent and self.mode == MODE_FILES
+                         and not self.board_view)
+        if not already_there:
+            if self.board_view:
+                self.toggle_board(False)
+            if self.root is not None and self.root != parent:
+                self.levels.append({
+                    "root": self.root, "mode": self.mode,
+                    "item_id": self.current.item_id if self.current else "",
+                })
+            self.start_root(parent, MODE_FILES, reset_levels=False,
+                            restore_id=str(video))
+            return
+        for position, item in enumerate(self.items):
+            if item.path == video:
+                self.show_item(position)
+                return
 
     def open_external(self, path: str = "") -> None:
         target = Path(path) if path else (self.current.path if self.current else None)
@@ -1500,13 +1535,7 @@ class MainWindow(QMainWindow):
         self.root_bar.set_muted(muted)
         self.show_banner("Son coupé" if muted else "Son activé", "#2a2f38")
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if not self.focus.isHidden():
-            self.focus.setGeometry(self.stack.widget(PAGE_SORT).rect())
-
     def closeEvent(self, event):
-        self.focus.stop()
         self.stop_scan()
         self._release_media()
         # Un transfert interrompu laisserait un dossier à moitié copié : on

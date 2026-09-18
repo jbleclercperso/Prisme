@@ -433,6 +433,8 @@ class BoardView(QWidget):
             return
         if self.hovered != -1 and self.hovered < len(self.cards):
             self.cards[self.hovered].set_hovered(False)
+        self.video.hide()
+        self.remaining.hide()
         self.hovered = found
         if found == -1:
             self.stop()
@@ -455,6 +457,7 @@ class BoardView(QWidget):
         url = QUrl.fromLocalFile(card.video)
         if self.player.source() == url:
             self.player.setPosition(self._segment_start)
+            self.video.show()
         else:
             self.player.setSource(url)
         self.player.play()

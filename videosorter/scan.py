@@ -13,6 +13,10 @@ MODE_FOLDERS = "folders"   # les sous-dossiers, un par un
 MODE_FILES = "files"       # les videos posees directement dans la racine
 MODE_FLAT = "flat"         # toutes les videos de l'arborescence, sans leurs dossiers
 
+# Un dossier ainsi prefixe est un rayonnage : on le traverse au lieu de le trier.
+PARENT_PREFIX = "+"
+LOOSE_LABEL = "(sans dossier)"
+
 # Au-delà, on arrête de collecter les chemins de vidéos d'un même dossier :
 # dix aperçus n'en demandent pas plus et cela borne la mémoire sur les gros lots.
 MAX_VIDEOS_PER_ITEM = 400
@@ -35,14 +39,19 @@ class Item:
     # transfert en tache de fond se termine.
     status: str = ""
     status_detail: str = ""
+    # Vrai pour l'entree qui ne porte que les videos en vrac d'un rayonnage :
+    # elle se trie, mais ne represente pas le dossier lui-meme.
+    loose_only: bool = False
 
     @property
     def name(self) -> str:
+        if self.loose_only:
+            return f"{self.path.name} {LOOSE_LABEL}"
         return self.path.name
 
     @property
     def item_id(self) -> str:
-        return str(self.path)
+        return f"{self.path}|vrac" if self.loose_only else str(self.path)
 
     @property
     def processed(self) -> bool:
@@ -204,6 +213,24 @@ def scan_file(path: Path) -> Item:
     return item
 
 
+def scan_loose(folder: Path, skip_hidden: bool = True) -> Item:
+    """Entrée représentant les seules vidéos en vrac d'un rayonnage."""
+    videos = loose_videos(folder, skip_hidden)
+    item = Item(path=folder, kind=MODE_FOLDERS, videos=videos,
+                video_count=len(videos), file_count=len(videos))
+    item.loose_only = True
+    for video in videos:
+        try:
+            item.size += video.stat().st_size
+        except OSError:
+            pass
+    try:
+        item.mtime = folder.stat().st_mtime
+    except OSError:
+        pass
+    return item
+
+
 def detect_mode(root: Path, skip_hidden: bool = True) -> str:
     """Dossiers à l'intérieur -> mode dossier, sinon mode fichier."""
     try:
@@ -250,7 +277,62 @@ def list_all_videos(root: Path, skip_hidden: bool = True, limit: int = 50000) ->
     return [Path(path) for path in found]
 
 
-def list_entries(root: Path, mode: str, skip_hidden: bool = True) -> list:
+def is_parent_folder(path) -> bool:
+    """Vrai pour un dossier de tete, que l'on traverse au lieu de le trier."""
+    name = path.name if hasattr(path, "name") else Path(path).name
+    return name.startswith(PARENT_PREFIX)
+
+
+def loose_videos(folder: Path, skip_hidden: bool = True) -> list:
+    """Vidéos posées directement dans ce dossier, sans sous-dossier."""
+    found = []
+    try:
+        for entry in os.scandir(folder):
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            if skip_hidden and _is_hidden(entry):
+                continue
+            dot = entry.name.rfind(".")
+            if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
+                found.append(Path(entry.path))
+    except OSError:
+        pass
+    found.sort(key=lambda path: str(path).lower())
+    return found
+
+
+def expand_parents(entries: list, skip_hidden: bool = True) -> list:
+    """Remplace chaque rayonnage par son contenu, en gardant l'ordre.
+
+    Les dossiers qu'il contient prennent sa place dans la liste ; les vidéos
+    posées directement dedans sont signalées par le dossier lui-même, qui reste
+    en tête sous un libellé explicite au lieu de disparaître avec elles.
+    """
+    expanded = []
+    for path in entries:
+        if not is_parent_folder(path):
+            expanded.append(path)
+            continue
+        if loose_videos(path, skip_hidden):
+            expanded.append(path)
+        try:
+            children = sorted(
+                (Path(e.path) for e in os.scandir(path)
+                 if e.is_dir(follow_symlinks=False)
+                 and not (skip_hidden and _is_hidden(e))),
+                key=lambda child: child.name.lower(),
+            )
+        except OSError:
+            children = []
+        expanded.extend(children)
+    return expanded
+
+
+def list_entries(root: Path, mode: str, skip_hidden: bool = True,
+                 expand_parent_folders: bool = False) -> list:
     """Liste, sans les analyser, les chemins de premier niveau à traiter."""
     if mode == MODE_FLAT:
         return list_all_videos(root, skip_hidden)
@@ -267,6 +349,8 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True) -> list:
                     entries.append(Path(entry.path))
     except OSError:
         pass
+    if mode == MODE_FOLDERS and expand_parent_folders:
+        entries = expand_parents(entries, skip_hidden)
     return entries
 
 
@@ -283,12 +367,13 @@ class ScanThread(QThread):
     BATCH_DELAY = 0.12                 # secondes
 
     def __init__(self, root: Path, mode: str = "", skip_hidden: bool = True,
-                 use_cache: bool = True, parent=None):
+                 use_cache: bool = True, expand_parents: bool = False, parent=None):
         super().__init__(parent)
         self.root = Path(root)
         self.mode = mode
         self.skip_hidden = skip_hidden
         self.use_cache = use_cache
+        self.expand_parents = expand_parents
         self.reused = 0        # dossiers relus depuis le cache
         self.rescanned = 0     # dossiers qu il a fallu reparcourir
         self._stop = False
@@ -304,7 +389,8 @@ class ScanThread(QThread):
         import time as _time
 
         mode = self.mode or detect_mode(self.root, self.skip_hidden)
-        paths = list_entries(self.root, mode, self.skip_hidden)
+        paths = list_entries(self.root, mode, self.skip_hidden,
+                             self.expand_parents)
         total = len(paths)
         batch: list = []
         last_flush = _time.monotonic()
@@ -322,6 +408,8 @@ class ScanThread(QThread):
 
             if mode != MODE_FOLDERS:
                 item = scan_file(path)
+            elif self.expand_parents and is_parent_folder(path):
+                item = scan_loose(path, self.skip_hidden)
             else:
                 sig = signature(path) if self.use_cache else ""
                 item = CACHE.get(path, sig) if sig else None
