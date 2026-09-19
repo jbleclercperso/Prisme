@@ -1417,6 +1417,38 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.3)
     check(window.aside.isHidden(), "et il se referme")
 
+    print("\n[52] Changer d'onglet ne relit pas le disque")
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    pump(app, 0.4)
+    folders_seen = len(window.items)
+
+    scans = {"n": 0}
+    real_start = window.start_root
+
+    def counted(*args, **kwargs):
+        scans["n"] += 1
+        return real_start(*args, **kwargs)
+
+    window.start_root = counted
+    try:
+        window.set_tab(TAB_VIDEOS)
+        pump(app, 0.6)
+        check(scans["n"] == 0,
+              f"passer aux vidéos se sert de ce qu'on a déjà ({scans['n']} analyse(s))")
+        check(window.mode == MODE_FLAT, "et la liste est bien à plat")
+
+        window.set_tab(TAB_FOLDERS)
+        pump(app, 0.6)
+        check(scans["n"] == 0,
+              f"et revenir aux dossiers non plus ({scans['n']} analyse(s))")
+        check(window.mode == MODE_FOLDERS, "on retrouve le mode dossiers")
+        check(len(window.items) == folders_seen,
+              f"avec la même liste qu'avant ({len(window.items)} sur {folders_seen})")
+    finally:
+        window.start_root = real_start
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

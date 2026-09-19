@@ -1775,6 +1775,11 @@ class MainWindow(QMainWindow):
                 found.append(video)
         return found
 
+    def remember_folders(self) -> None:
+        """Garde la liste des dossiers analysee, pour pouvoir la reposer."""
+        self._plain_items = [i for i in self.all_items if not i.is_tag]
+        self._plain_root = self.root
+
     def restore_folders(self) -> bool:
         """Remet la liste des dossiers déjà analysée, sans rien relire.
 
@@ -1879,6 +1884,17 @@ class MainWindow(QMainWindow):
             return
         if top != self.root or self.mode != mode or tab == TAB_TAGS:
             self.levels = []
+            # Quitter les videos pour revenir aux dossiers changeait de mode, et
+            # tout changement de mode relisait le disque : plusieurs minutes de
+            # reseau pour retrouver exactement la liste qu'on venait de quitter.
+            # Elle est gardee telle quelle, on la repose.
+            if self.root == top and self.restore_folders():
+                self.crumbs.set_path(top, top)
+                if tab == TAB_TAGS:
+                    self._add_tag_items()
+                self.refresh_board()
+                self.setFocus()
+                return
             self.start_root(top, mode, reset_levels=True)
             return
 
