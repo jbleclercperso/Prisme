@@ -255,6 +255,14 @@ class BoardView(QWidget):
             lambda _v: self.visible_timer.start()
         )
 
+        # Les cartes gardaient la largeur calculee au premier affichage :
+        # agrandir la fenetre laissait une bande vide a droite, la retrecir les
+        # faisait deborder.
+        self.width_timer = QTimer(self)
+        self.width_timer.setSingleShot(True)
+        self.width_timer.setInterval(60)
+        self.width_timer.timeout.connect(self._apply_widths)
+
         self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(80)
         self.hover_timer.timeout.connect(self._poll_hover)
@@ -332,6 +340,17 @@ class BoardView(QWidget):
         self.pageChanged.emit(first + 1 if self.items else 0, last, len(self.items))
         self._pending_previews = set(needed)
         self.request_visible()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.width_timer.start()
+
+    def _apply_widths(self) -> None:
+        width = self._card_width()
+        for card in self.cards:
+            if not card.isHidden() and card.width() != width:
+                card.set_card_width(width)
+        self.visible_timer.start()
 
     def request_visible(self) -> None:
         """Reclame les apercus des seules cartes visibles dans la fenetre."""

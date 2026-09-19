@@ -36,7 +36,7 @@ HEADER_STYLE = """
 QFrame#segment { background: #14181e; border: 1px solid #262c35;
                  border-radius: 7px; }
 QPushButton#segmentChoice { background: transparent; border: 0;
-                            border-radius: 5px; padding: 5px 16px;
+                            border-radius: 5px; padding: 5px 11px;
                             color: #8b94a1; font-size: 13px; }
 QPushButton#chip { background: transparent; border: 1px solid #262c35;
                    border-radius: 5px; padding: 4px 12px; color: #8b94a1;
@@ -45,7 +45,7 @@ QPushButton#chip:hover { color: #dfe6ee; }
 QPushButton#chip[chosen="true"] { background: #262c35; border-color: #39414d;
                                   color: #ffffff; }
 QPushButton#sortChip { background: transparent; border: 1px solid #262c35;
-                       border-radius: 5px; padding: 4px 11px; color: #8b94a1;
+                       border-radius: 5px; padding: 4px 9px; color: #8b94a1;
                        font-size: 13px; }
 QPushButton#sortChip:hover { color: #dfe6ee; }
 QPushButton#sortChip[chosen="true"] { background: #262c35; border-color: #39414d;
@@ -269,11 +269,16 @@ class ControlBar(QWidget):
 
     def __init__(self, columns_choices, parent=None):
         super().__init__(parent)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
+        # Une disposition qui se replie, et non une rangee rigide : un
+        # QHBoxLayout impose sa largeur a la fenetre entiere, qui ne peut alors
+        # plus retrecir et laisse tout deborder de l'ecran.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        row = FlowLayout(spacing=8)
+        outer.addLayout(row)
 
-        self.include = _Field("chercher…", 180)
+        self.include = _Field("chercher…", 150)
         # Conserve sans etre montre : le filtre d'exclusion garde sa place dans
         # les criteres et dans la configuration, il n'occupe plus l'ecran.
         self.exclude = _Field("", 0)
@@ -284,11 +289,10 @@ class ControlBar(QWidget):
         self.sorts.chosen.connect(self.sortChanged)
         row.addWidget(self.sorts)
 
-        self.random_here = _button("Au hasard", self.randomHere.emit)
+        self.random_here = _button("⚄", self.randomHere.emit)
+        self.random_here.setFixedWidth(32)
         self.random_here.setToolTip("Une vidéo au hasard parmi celles d'ici")
         row.addWidget(self.random_here)
-
-        row.addStretch(1)
 
         self.columns_caption = _caption("par rangée")
         self.columns = _combo([(n, str(n)) for n in columns_choices])

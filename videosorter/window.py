@@ -8,7 +8,7 @@ from PySide6.QtCore import QTimer, QUrl, Qt
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
     QMainWindow, QMessageBox, QProgressBar, QProgressDialog, QPushButton,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import actions
@@ -198,7 +198,7 @@ class MainWindow(QMainWindow):
         self.pending_label.hide()
         header_row.addWidget(self.pending_label)
 
-        self.random_button = QPushButton("⚄ Au hasard", sort_page)
+        self.random_button = QPushButton("⚄ Partout", sort_page)
         self.random_button.setToolTip("Une vidéo au hasard, partout   (Ctrl+H)")
         self.random_button.setFocusPolicy(Qt.NoFocus)
         self.random_button.clicked.connect(self.pick_random)
@@ -230,7 +230,7 @@ class MainWindow(QMainWindow):
 
         selectors = QHBoxLayout()
         selectors.setContentsMargins(0, 0, 0, 0)
-        selectors.setSpacing(20)
+        selectors.setSpacing(12)
         self.tabs = Segmented("", [
             (TAB_FOLDERS, "Dossiers", "Chaque dossier comme une carte"),
             (TAB_VIDEOS, "Vidéos", "Toutes les vidéos en vrac, au hasard"),
@@ -253,8 +253,6 @@ class MainWindow(QMainWindow):
         self.enter_button.setFocusPolicy(Qt.NoFocus)
         self.enter_button.clicked.connect(self.enter_current)
         selectors.addWidget(self.enter_button)
-        selectors.addStretch(1)
-        layout.addLayout(selectors)
 
         self.controls = ControlBar(COLUMN_CHOICES, sort_page)
         self.controls.changed.connect(self.on_controls_changed)
@@ -267,7 +265,10 @@ class MainWindow(QMainWindow):
         self.controls.set_terms(self.cfg["filter_include"], self.cfg["filter_exclude"])
         self.controls.set_sort(self.cfg["sort_mode"] or "random")
         self.controls.set_columns(self.cfg["board_columns"])
-        layout.addWidget(self.controls)
+        # Onglets et reglages sur la meme rangee : deux lignes distinctes
+        # coutaient une rangee de vignettes pour rien.
+        selectors.addWidget(self.controls, 1)
+        layout.addLayout(selectors)
         self.tabs.set_value(self.tab)
         self.tag_chips.set_value(self.tag_family)
         self.controls.set_browsing(self.browsing)
@@ -279,18 +280,22 @@ class MainWindow(QMainWindow):
 
         header = QFrame(sort_page)
         header.setObjectName("card")
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(16, 12, 16, 12)
-        header_layout.setSpacing(4)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(14, 7, 14, 7)
+        header_layout.setSpacing(14)
         self.item_title = QLabel("—", header)
         self.item_title.setObjectName("title")
         self.item_parent = QLabel("", header)
         self.item_parent.setObjectName("parentPath")
         self.item_subtitle = QLabel("", header)
         self.item_subtitle.setObjectName("subtitle")
-        header_layout.addWidget(self.item_title)
-        header_layout.addWidget(self.item_parent)
-        header_layout.addWidget(self.item_subtitle)
+        # Le chemin est deja dans le fil d'Ariane : le repeter sur sa propre
+        # ligne prenait de la hauteur pour rien. Il reste en infobulle.
+        self.item_parent.hide()
+        for label in (self.item_title, self.item_subtitle):
+            label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        header_layout.addWidget(self.item_title, 0)
+        header_layout.addWidget(self.item_subtitle, 1)
         # En planche, ce bloc repetait le fil d'Ariane et une phrase d'aide, sur
         # trois lignes, au detriment d'une rangee entiere de vignettes.
         self.item_card = header
@@ -298,6 +303,7 @@ class MainWindow(QMainWindow):
 
         self.banner = QLabel("", sort_page)
         self.banner.setObjectName("statusBanner")
+        self.banner.setWordWrap(True)
         self.banner.hide()
         layout.addWidget(self.banner)
 
@@ -353,17 +359,18 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self.stars, 0, Qt.AlignBottom)
         layout.addLayout(bottom)
 
-        hint = QLabel(
-            "←/→ naviguer   ·   molette avancer/reculer   ·   Ctrl+Z annuler   "
-            "·   Ctrl+F filtrer   ·   Ctrl+T arborescence   ·   Ctrl+M son   "
-            "·   Ctrl+O ouvrir   ·   Ctrl+D destinations   ·   Entrée pause   "
-            "·   Ctrl+←/→ page d'aperçus   ·   Ctrl+↓ entrer dans le dossier   "
-            "·   Ctrl+P planche   ·   Ctrl+H au hasard   ·   0…5 noter   "
-            "·   Ctrl+molette zoomer   ·   Ctrl+B corbeille   ·   Échap remonter",
-            sort_page,
+        # Ce pense-bete etait une seule etiquette de cinq mille pixels de large.
+        # Qt en faisait la largeur minimale de la fenetre entiere : elle ne
+        # pouvait plus retrecir, et tout le reste debordait de l'ecran. Il se
+        # consulte desormais sous le bouton « ⋯ », ou il ne coute rien.
+        self.more_button.setToolTip(
+            "←/→ naviguer   ·   molette avancer/reculer   ·   Ctrl+Z annuler\n"
+            "Ctrl+F filtrer   ·   Ctrl+T arborescence   ·   Ctrl+M son\n"
+            "Ctrl+O ouvrir   ·   Ctrl+D destinations   ·   Entrée pause\n"
+            "Ctrl+←/→ page d'aperçus   ·   Ctrl+↓ entrer dans le dossier\n"
+            "Ctrl+P planche   ·   Ctrl+H au hasard   ·   0…5 noter\n"
+            "Ctrl+molette zoomer   ·   Ctrl+B corbeille   ·   Échap remonter"
         )
-        hint.setObjectName("hint")
-        layout.addWidget(hint)
 
         self.stack.addWidget(sort_page)
 
@@ -1267,6 +1274,7 @@ class MainWindow(QMainWindow):
             f"{len(self.items)} élément(s)" if self.items else "Rien à afficher"
         )
         self.item_parent.setText(str(self.root) if self.root else "")
+        self.item_title.setToolTip(str(self.root) if self.root else "")
         self.item_subtitle.setText(
             "Survolez une carte pour la lire, cliquez pour l'ouvrir, "
             "notez d'un clic sur les étoiles."

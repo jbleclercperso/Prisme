@@ -784,6 +784,24 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
                      QPoint(card.width() // 2, 30))
     check(opened == [0], "un clic sur l'image ouvre bien la carte")
 
+    print("\n[33b] La fenêtre doit pouvoir rétrécir")
+    # Une seule étiquette trop large imposait sa largeur à la fenêtre entière :
+    # elle ne pouvait plus rétrécir, et tout débordait de l'écran à droite.
+    minimum = window.minimumSizeHint().width()
+    check(minimum <= 1280,
+          f"la fenêtre tient dans un écran ordinaire ({minimum} px exigés)")
+    window.resize(1280, 800)
+    pump(app, 0.4)
+    check(window.width() == 1280,
+          f"et elle obéit quand on la redimensionne ({window.width()} px)")
+    for name in ("crumbs", "tabs", "controls", "commands"):
+        widget = getattr(window, name)
+        check(widget.minimumSizeHint().width() <= 1280,
+              f"« {name} » n'élargit pas la fenêtre "
+              f"({widget.minimumSizeHint().width()} px)")
+    window.resize(1400, 900)
+    pump(app, 0.4)
+
     print("\n[34] Pastilles de tri")
     filters = window.controls
     check(not filters.isHidden(), "la barre de réglages est visible")
