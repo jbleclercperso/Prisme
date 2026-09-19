@@ -28,7 +28,7 @@ from .tagging import build_tag_items, top_words
 from .scan import (
     MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, Item, RefreshThread,
     cached_items, detect_mode, human_duration, human_resolution, human_size,
-    known_media, list_entries, scan_file,
+    known_media, list_entries,
 )
 from .index import INDEX
 from .transfer import Transfer, TransferQueue
@@ -715,7 +715,11 @@ class MainWindow(QMainWindow):
             "root": self.root, "mode": self.mode,
             "item_id": item.item_id,
         })
-        self.all_items = [scan_file(video) for video in item.videos]
+        # Sans `stat()` : sur un partage, ouvrir un mot-cle de cinq cents videos
+        # coutait cinq cents allers-retours pour une taille que rien n'affiche.
+        self.all_items = [Item(path=Path(video), kind=MODE_FILES, videos=[video],
+                               video_count=1, file_count=1)
+                          for video in item.videos]
         self.items = [entry for entry in self.all_items if self._matches(entry)]
         self.apply_sort()
         self.mode = MODE_FLAT
@@ -1596,7 +1600,13 @@ class MainWindow(QMainWindow):
         return -1
 
     def on_board_open(self, position: int) -> None:
-        """Un clic sur une carte ouvre l'élément, sans rien déplacer."""
+        """Un clic descend d'un étage : dans le dossier, ou dans la vidéo.
+
+        Le même geste partout, quel que soit l'onglet — un dossier s'ouvre sur
+        ses vidéos, un mot-clé sur les siennes, une vidéo sur elle-même. Elle
+        renvoyait auparavant à la fiche d'édition, ce qui changeait de vue au
+        lieu de descendre.
+        """
         if not (0 <= position < len(self.items)):
             return
         self.index = position
@@ -1604,8 +1614,7 @@ class MainWindow(QMainWindow):
         if item.kind == MODE_FOLDERS:
             self.enter_current()
         else:
-            self.toggle_board(False, reposition=False)
-            self.show_item(position)
+            self.play_in_app(str(item.path))
 
     def on_board_rate(self, position: int, stars: int) -> None:
         if 0 <= position < len(self.items):

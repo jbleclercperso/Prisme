@@ -526,10 +526,23 @@ class PreviewGrid(QWidget):
         for tile in self.tiles:
             tile.set_hovered(False)
 
-    def mouseDoubleClickEvent(self, event):
+    def mouseReleaseEvent(self, event):
+        """Un clic sur une case ouvre cette vidéo, comme partout ailleurs.
+
+        Il fallait un double-clic, alors qu'une carte de la planche s'ouvre d'un
+        seul : le même geste donnait deux résultats selon l'endroit.
+        """
+        if event.button() != Qt.LeftButton:
+            return super().mouseReleaseEvent(event)
         slot = self._slot_at(event.position().toPoint())
         if slot >= 0 and self.tiles[slot].video:
             self.playRequested.emit(self.tiles[slot].video, self.tiles[slot].ts)
+        else:
+            super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        # Le premier clic a deja ouvert : ne pas rouvrir par-dessus.
+        event.accept()
 
 
 class SinglePlayer(QWidget):

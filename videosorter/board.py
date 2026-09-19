@@ -8,14 +8,13 @@ l'intention, puisqu'un clic ouvre au lieu d'envoyer.
 from __future__ import annotations
 
 import random
-from pathlib import Path
 
 from PySide6.QtCore import QPoint, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QCursor, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from .scan import MODE_FOLDERS, human_duration, human_resolution, human_size
@@ -79,16 +78,25 @@ class BoardCard(QFrame):
             child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
     def _line(self, lead: str = "") -> str:
-        """« 1080p · nom » pour une video, « 12 vidéos · nom » pour un dossier."""
+        """« 1080p · nom » pour une video ; pour un dossier, son seul nom.
+
+        Le compte de ses videos est passe dans la pastille, ou se trouvait une
+        duree qui ne voulait rien dire : celle de l'unique video dont l'image
+        sert de vignette, et non du dossier.
+        """
         item = self.item
         if item is None:
             return ""
-        if item.kind == MODE_FOLDERS:
-            head = f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}"
-        else:
-            head = lead or self._resolution
+        head = "" if item.kind == MODE_FOLDERS else (lead or self._resolution)
         name = elide(item.name, 40)
         return f"{head}   ·   {name}" if head else name
+
+    def _show_chip(self, text: str) -> None:
+        self.duration_chip.setText(text)
+        self.duration_chip.adjustSize()
+        self.duration_chip.move(self.width() - self.duration_chip.width() - 14, 14)
+        self.duration_chip.raise_()
+        self.duration_chip.show()
 
     def set_item(self, item, stars: int) -> None:
         self.item = item
@@ -99,7 +107,12 @@ class BoardCard(QFrame):
         self.image.setText("…")
         self.meta.setText(self._line())
         self.meta.setToolTip(f"{item.path}\n{human_size(item.size)}")
-        self.duration_chip.hide()
+        if item.kind == MODE_FOLDERS:
+            # Connu d'avance : la pastille n'attend pas le sondage d'une video.
+            self._show_chip(f"{item.video_count} vidéo"
+                            f"{'s' if item.video_count > 1 else ''}")
+        else:
+            self.duration_chip.hide()
         self.set_state(item.status)
 
     def set_stars(self, stars: int) -> None:
@@ -119,14 +132,11 @@ class BoardCard(QFrame):
         if resolution and resolution != self._resolution:
             self._resolution = resolution
             self.meta.setText(self._line(resolution))
+        item = self.item
+        if item is not None and item.kind == MODE_FOLDERS:
+            return          # la pastille compte deja ses videos
         if duration:
-            self.duration_chip.setText(human_duration(duration))
-            self.duration_chip.adjustSize()
-            self.duration_chip.move(
-                self.width() - self.duration_chip.width() - 14, 14
-            )
-            self.duration_chip.raise_()
-            self.duration_chip.show()
+            self._show_chip(human_duration(duration))
 
     def set_thumb(self, path: str) -> None:
         pixmap = QPixmap(path)

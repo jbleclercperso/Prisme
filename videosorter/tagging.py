@@ -17,30 +17,81 @@ from collections import Counter
 
 from .scan import MODE_FOLDERS, Item
 
-# Mots trop courants ou trop courts pour distinguer quoi que ce soit.
+# Mots de grammaire, et jetons techniques que porte tout nom de fichier : ils
+# reviennent partout, donc ne distinguent rien. Anglais et francais melanges,
+# les collections l'etant aussi.
 STOP_WORDS = {
-    "mp4", "mkv", "avi", "mov", "wmv", "webm", "video", "videos", "full",
-    "hd", "sd", "new", "the", "and", "les", "des", "une", "avec", "pour",
-    "part", "partie", "final", "copy", "copie", "sans", "titre",
+    # extensions et jargon de fichier
+    "mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "mpg", "mpeg", "m4v",
+    "video", "videos", "vid", "clip", "clips", "movie", "movies", "film",
+    "full", "hd", "sd", "uhd", "fhd", "hq", "lq", "1080p", "720p", "480p",
+    "2160p", "4k", "8k", "x264", "x265", "h264", "h265", "hevc", "avc", "aac",
+    "xxx", "part", "partie", "pt", "vol", "volume", "final", "copy", "copie",
+    "sans", "titre", "untitled", "new", "old", "final", "edit", "cut", "scene",
+    "scenes", "www", "com", "net", "org", "mp3", "wav", "web", "dvd", "rip",
+    # grammaire anglaise
+    "the", "this", "that", "these", "those", "and", "but", "for", "nor", "yet",
+    "with", "without", "from", "into", "onto", "upon", "over", "under", "off",
+    "out", "her", "his", "its", "their", "our", "your", "you", "she", "him",
+    "them", "they", "who", "whom", "what", "when", "where", "why", "how",
+    "all", "any", "some", "more", "most", "very", "just", "not", "than",
+    "then", "there", "here", "have", "has", "had", "was", "were", "are", "been",
+    "being", "get", "got", "let", "make", "made", "one", "two", "too", "also",
+    "can", "will", "would", "should", "could", "about", "after", "before",
+    # grammaire francaise
+    "les", "des", "une", "aux", "avec", "pour", "dans", "sur", "sous", "par",
+    "que", "qui", "quoi", "dont", "elle", "ils", "elles", "lui", "leur",
+    "mon", "ton", "son", "mes", "tes", "ses", "nos", "vos", "leurs", "cette",
+    "ces", "cet", "celui", "celle", "ceux", "est", "sont", "etait", "etaient",
+    "ete", "avoir", "etre", "fait", "faire", "plus", "moins", "tres", "tout",
+    "tous", "toute", "toutes", "mais", "donc", "alors", "comme", "chez",
 }
+
+# Un mot-cle est **un mot**. En deca il ne distingue rien ; au-dela, ce n'est
+# plus un mot mais un titre colle — les noms de fichiers en sont pleins, et
+# c'est ce qui donnait des categories de trois ou quatre mots a la suite.
 MIN_WORD = 3
+MAX_WORD = 12
+
+# Un nom de fichier separe ses mots de trois facons, souvent dans le meme nom :
+# par une ponctuation, par une majuscule (« BeachSunset »), ou par un chiffre
+# (« s01e02 », « 4kbeach »). Ne couper qu'a la ponctuation laissait les deux
+# autres formes entieres.
+_BREAK = re.compile(r"[^0-9A-Za-z\u00c0-\u024f]+")
+_CAMEL = re.compile(r"(?<=[a-z\u00df-\u00ff])(?=[A-Z\u00c0-\u00de])")
+_DIGIT = re.compile(r"(?<=\d)(?=[A-Za-z])|(?<=[A-Za-z])(?=\d)")
+
+
+def words_of(name: str):
+    """Les mots d'un nom de fichier, un par un."""
+    for chunk in _BREAK.split(Path(name).stem):
+        for piece in _CAMEL.split(chunk):
+            for word in _DIGIT.split(piece):
+                if word:
+                    yield word
 
 
 def top_words(videos: list, limit: int = 100, minimum: int = 2) -> list:
     """Les mots qui reviennent le plus dans les noms de fichiers.
 
-    Sert a proposer des categories sans rien saisir : un mot present dans
-    des centaines de noms designe presque toujours quelque chose.
+    Sert a proposer des categories sans rien saisir : un mot present dans des
+    centaines de noms designe presque toujours quelque chose. Un seul mot a la
+    fois — pour chercher une expression de deux ou trois mots, on la saisit
+    dans ses propres mots-cles, ou la recherche se fait par sous-chaine.
     """
     counts = Counter()
     for video in videos:
-        stem = Path(video).stem
-        for word in re.split(r"[^0-9a-zA-Z\u00c0-\u024f]+", stem):
+        seen = set()
+        for word in words_of(Path(video).name):
             folded = fold(word)
-            if len(folded) < MIN_WORD or folded in STOP_WORDS:
+            if not MIN_WORD <= len(folded) <= MAX_WORD:
                 continue
-            if folded.isdigit():
+            if folded in STOP_WORDS or folded.isdigit():
                 continue
+            # Un mot repete dans un meme nom ne vaut pas deux fichiers.
+            if folded in seen:
+                continue
+            seen.add(folded)
             counts[folded] += 1
     return [word for word, n in counts.most_common(limit) if n >= minimum]
 

@@ -137,7 +137,6 @@ check(len(seen) == len(set(seen)),
       f"chaque video n apparait que dans une seule ({len(seen)} pour "
       f"{len(set(seen))} distinctes)")
 
-print("\n[5] Arborescence : les destinations seulement")
 window.set_tab(TAB_EDIT)
 settle()
 check("Analyser" in window.scan_button.text(),
@@ -152,6 +151,41 @@ check(not window.scanning and "Analyser" in window.scan_button.text(),
 check("termin" in window.banner.text(),
       "en disant que c est fini (" + window.banner.text()[:55] + ")")
 
+print()
+print("[6] Un clic descend d un etage, et la pastille dit ce qu elle sait")
+from videosorter.tagging import top_words, words_of          # noqa: E402
+
+check(list(words_of("BigTitsAsianGirl 1080p.mp4"))[:4]
+      == ["Big", "Tits", "Asian", "Girl"],
+      "les mots colles sont separes ("
+      + " ".join(list(words_of("BigTitsAsianGirl.mp4"))) + ")")
+check("the" not in top_words(["the beach a.mp4", "the beach b.mp4"]),
+      "les mots de grammaire sont ecartes ("
+      + str(top_words(["the beach a.mp4", "the beach b.mp4"])) + ")")
+check(all(" " not in w for w in top_words(["beach sun a.mp4", "beach sun b.mp4"])),
+      "un mot-cle frequent est un seul mot")
+
+window.set_tab(TAB_FOLDERS)
+settle()
+card = window.board.cards[0]
+check(card.duration_chip.isVisible() and "vidéo" in card.duration_chip.text(),
+      "la pastille d un dossier compte ses videos ("
+      + card.duration_chip.text() + ")")
+
+opened = []
+window.play_in_app = lambda path, start_s=0.0: opened.append(path)
+window.on_board_open(0)
+settle()
+check(window.root != root, "un clic sur un dossier entre dedans ("
+      + window.root.name + ")")
+window.on_board_open(0)
+check(bool(opened), "et un clic sur une video l ouvre (" + str(opened[:1]) + ")")
+
+window.set_tab(TAB_FOLDERS)
+settle()
+
+print()
+print("[7] Arborescence : les destinations seulement")
 window.tree.set_root(str(root))
 pump(0.5)
 model = window.tree.model
