@@ -23,7 +23,8 @@ from .widgets import FlowLayout
 TAB_FOLDERS = "folders"
 TAB_VIDEOS = "videos"
 TAB_EDIT = "edit"
-TABS = (TAB_FOLDERS, TAB_VIDEOS, TAB_EDIT)
+TAB_TAGS = "tags"
+TABS = (TAB_FOLDERS, TAB_VIDEOS, TAB_EDIT, TAB_TAGS)
 
 # Conserves pour les appels existants : un onglet dit a la fois quoi et comment.
 CONTENT_FOLDERS = TAB_FOLDERS
@@ -32,17 +33,25 @@ VIEW_BROWSE = "browse"
 VIEW_EDIT = "edit"
 
 HEADER_STYLE = """
-QFrame#segment { background: #14181e; border: 1px solid #2b323d;
-                 border-radius: 8px; }
+QFrame#segment { background: #14181e; border: 1px solid #262c35;
+                 border-radius: 7px; }
 QPushButton#segmentChoice { background: transparent; border: 0;
-                            border-radius: 6px; padding: 7px 20px;
-                            color: #93a0b0; font-weight: 600; font-size: 14px; }
-QPushButton#chip { background: #1a1f27; border: 1px solid #2b323d;
-                   border-radius: 13px; padding: 4px 14px; color: #93a0b0; }
-QPushButton#chip[chosen="true"] { background: #2f6fed; border-color: #2f6fed;
-                                  color: #ffffff; font-weight: 600; }
+                            border-radius: 5px; padding: 5px 16px;
+                            color: #8b94a1; font-size: 13px; }
+QPushButton#chip { background: transparent; border: 1px solid #262c35;
+                   border-radius: 5px; padding: 4px 12px; color: #8b94a1;
+                   font-size: 13px; }
+QPushButton#chip:hover { color: #dfe6ee; }
+QPushButton#chip[chosen="true"] { background: #262c35; border-color: #39414d;
+                                  color: #ffffff; }
+QPushButton#sortChip { background: transparent; border: 1px solid #262c35;
+                       border-radius: 5px; padding: 4px 11px; color: #8b94a1;
+                       font-size: 13px; }
+QPushButton#sortChip:hover { color: #dfe6ee; }
+QPushButton#sortChip[chosen="true"] { background: #262c35; border-color: #39414d;
+                                      color: #ffffff; }
 QPushButton#segmentChoice:hover { color: #dfe6ee; }
-QPushButton#segmentChoice[chosen="true"] { background: #2f6fed; color: #ffffff; }
+QPushButton#segmentChoice[chosen="true"] { background: #262c35; color: #ffffff; }
 QLabel#segmentLabel { color: #6f7885; font-size: 12px; }
 QPushButton#crumb { background: transparent; border: 0; padding: 3px 6px;
                     color: #9fb0c4; font-size: 14px; }
@@ -122,6 +131,67 @@ class Chips(QWidget):
             button.style().polish(button)
 
 
+class SortChips(QWidget):
+    """Un critere par pastille : un clic decroissant, deux croissant, trois rien.
+
+    Une liste deroulante obligeait a l'ouvrir pour savoir ce qui etait en cours,
+    et a la reouvrir pour l'annuler. Ici l'etat se lit sans rien ouvrir, et
+    l'ordre s'inverse du meme geste qui l'a pose.
+    """
+
+    chosen = Signal(str)
+
+    CRITERIA = (("duration", "Durée"), ("size", "Taille"),
+                ("stars", "Note"), ("resolution", "Résolution"))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self.key = ""
+        self.order = ""
+        self.buttons: dict = {}
+        for key, text in self.CRITERIA:
+            button = QPushButton(text, self)
+            button.setObjectName("sortChip")
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setProperty("chosen", "false")
+            button.setToolTip("Clic : du plus grand au plus petit — "
+                              "reclic : l'inverse — troisième clic : au hasard")
+            button.clicked.connect(lambda _c=False, k=key: self._cycle(k))
+            layout.addWidget(button)
+            self.buttons[key] = button
+        self._repaint()
+
+    def _cycle(self, key: str) -> None:
+        if key != self.key:
+            self.key, self.order = key, "desc"
+        elif self.order == "desc":
+            self.order = "asc"
+        else:
+            self.key, self.order = "", ""
+        self._repaint()
+        self.chosen.emit(f"{self.key}_{self.order}" if self.key else "random")
+
+    def set_value(self, mode: str) -> None:
+        key, _, order = (mode or "").rpartition("_")
+        self.key = key if order in ("desc", "asc") else ""
+        self.order = order if self.key else ""
+        self._repaint()
+
+    def _repaint(self) -> None:
+        for key, text in self.CRITERIA:
+            button = self.buttons[key]
+            active = key == self.key
+            arrow = " ▼" if self.order == "desc" else " ▲"
+            button.setText(f"{text}{arrow}" if active else text)
+            button.setProperty("chosen", "true" if active else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+
 class Breadcrumb(QWidget):
     """Chemin cliquable depuis la racine ouverte jusqu'au dossier courant."""
 
@@ -171,11 +241,13 @@ class Breadcrumb(QWidget):
 
 
 class ControlBar(QWidget):
-    """Tout ce qui règle la liste : chercher, filtrer, classer, paginer.
+    """Chercher, classer, paginer — sur une seule rangée.
 
-    Les trois barres d'avant disaient chacune un morceau de la même chose. Une
-    seule rangée, identique quel que soit le mode, évite d'avoir à retrouver
-    lequel des trois endroits porte le réglage cherché.
+    Elle en occupait trois, repliees, et mangeait la moitie haute de la fenetre
+    pour des reglages qui servent rarement : deux champs de texte, quatre listes
+    deroulantes, un bouton de remise a zero. L'ecran appartient aux vignettes.
+    Ce qui reste est ce qu'on touche vraiment : chercher un nom, classer, et
+    regler la densite de la planche.
     """
 
     changed = Signal()
@@ -197,92 +269,63 @@ class ControlBar(QWidget):
 
     def __init__(self, columns_choices, parent=None):
         super().__init__(parent)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(6)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
 
-        self.flow = FlowLayout(spacing=8)
-        outer.addLayout(self.flow)
+        self.include = _Field("chercher…", 180)
+        # Conserve sans etre montre : le filtre d'exclusion garde sa place dans
+        # les criteres et dans la configuration, il n'occupe plus l'ecran.
+        self.exclude = _Field("", 0)
+        self.exclude.hide()
+        row.addWidget(self.include)
 
-        self.include = _Field("contient…", 210)
-        self.exclude = _Field("exclure…", 160)
-        self.exclude.setObjectName("excludeEdit")
-        self.flow.addWidget(_caption("Nom"))
-        self.flow.addWidget(self.include)
-        self.flow.addWidget(self.exclude)
+        self.sorts = SortChips(self)
+        self.sorts.chosen.connect(self.sortChanged)
+        row.addWidget(self.sorts)
 
-        self.duration_op = _combo([("", "toutes"), ("gt", "plus longue que"),
-                                   ("lt", "plus courte que")])
-        self.duration_value = _Field("min", 64)
-        self.flow.addWidget(_caption("Durée"))
-        self.flow.addWidget(self.duration_op)
-        self.flow.addWidget(self.duration_value)
-
-        self.resolution_op = _combo([("gte", "au moins"), ("lte", "au plus")])
-        self.resolution = _combo([(height, text) for text, height in self.RESOLUTIONS])
-        self.flow.addWidget(_caption("Résolution"))
-        self.flow.addWidget(self.resolution_op)
-        self.flow.addWidget(self.resolution)
-
-        self.stars = _combo([(-1, "toutes")] + [(n, "★" * n or "aucune")
-                                                for n in range(6)])
-        self.flow.addWidget(_caption("Note"))
-        self.flow.addWidget(self.stars)
-
-        self.sort = _combo(list(self.SORTS))
-        self.flow.addWidget(_caption("Tri"))
-        self.flow.addWidget(self.sort)
-
-        self.columns = _combo([(n, str(n)) for n in columns_choices])
-        self.flow.addWidget(_caption("Par rangée"))
-        self.flow.addWidget(self.columns)
-
-        self.reset_button = _button("Tout afficher", self.reset)
-        self.flow.addWidget(self.reset_button)
-
-        self.random_here = _button("Au hasard ici", self.randomHere.emit)
+        self.random_here = _button("Au hasard", self.randomHere.emit)
         self.random_here.setToolTip("Une vidéo au hasard parmi celles d'ici")
-        self.flow.addWidget(self.random_here)
+        row.addWidget(self.random_here)
+
+        row.addStretch(1)
+
+        self.columns_caption = _caption("par rangée")
+        self.columns = _combo([(n, str(n)) for n in columns_choices])
+        self.columns.setFixedWidth(52)
+        row.addWidget(self.columns)
+        row.addWidget(self.columns_caption)
 
         self.count = QLabel("", self)
         self.count.setObjectName("counter")
         self.previous = _button("◂", self.previousPage.emit)
         self.next = _button("▸", self.nextPage.emit)
-        self.flow.addWidget(self.previous)
-        self.flow.addWidget(self.count)
-        self.flow.addWidget(self.next)
+        self.previous.setFixedWidth(30)
+        self.next.setFixedWidth(30)
+        row.addWidget(self.previous)
+        row.addWidget(self.count)
+        row.addWidget(self.next)
 
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.setInterval(220)
         self.timer.timeout.connect(self.changed)
-        for widget in (self.duration_op, self.resolution_op, self.resolution,
-                       self.stars):
-            widget.currentIndexChanged.connect(lambda _i: self.timer.start())
-        for field in (self.include, self.exclude, self.duration_value):
-            field.textChanged.connect(lambda _t: self.timer.start())
-            field.released.connect(self.released)
-        self.sort.currentIndexChanged.connect(
-            lambda _i: self.sortChanged.emit(self.sort.currentData())
-        )
+        self.include.textChanged.connect(lambda _t: self.timer.start())
+        self.include.released.connect(self.released)
         self.columns.currentIndexChanged.connect(
             lambda _i: self.columnsChanged.emit(int(self.columns.currentData()))
         )
 
     # -- lecture ---------------------------------------------------------
     def criteria(self) -> dict:
-        try:
-            minutes = float(self.duration_value.text().replace(",", "."))
-        except ValueError:
-            minutes = 0.0
         return {
             "include": self.include.text(),
             "exclude": self.exclude.text(),
-            "duration_op": self.duration_op.currentData() if minutes > 0 else "",
-            "duration_s": minutes * 60,
-            "resolution_op": self.resolution_op.currentData(),
-            "resolution": self.resolution.currentData(),
-            "stars": self.stars.currentData(),
+            "duration_op": "",
+            "duration_s": 0.0,
+            "resolution_op": "gte",
+            "resolution": 0,
+            "stars": -1,
         }
 
     def set_terms(self, include: str, exclude: str) -> None:
@@ -292,11 +335,7 @@ class ControlBar(QWidget):
             field.blockSignals(False)
 
     def set_sort(self, mode: str) -> None:
-        index = self.sort.findData(mode)
-        if index >= 0:
-            self.sort.blockSignals(True)
-            self.sort.setCurrentIndex(index)
-            self.sort.blockSignals(False)
+        self.sorts.set_value(mode)
 
     def set_columns(self, columns: int) -> None:
         index = self.columns.findData(columns)
@@ -312,16 +351,12 @@ class ControlBar(QWidget):
 
     def set_browsing(self, browsing: bool) -> None:
         """Le nombre par rangée et la pagination ne valent qu'en parcours."""
-        for widget in (self.columns, self.previous, self.next):
+        for widget in (self.columns, self.columns_caption, self.previous,
+                       self.next):
             widget.setVisible(browsing)
 
     def reset(self) -> None:
-        for combo in (self.duration_op, self.resolution_op, self.resolution,
-                      self.stars):
-            combo.blockSignals(True)
-            combo.setCurrentIndex(0)
-            combo.blockSignals(False)
-        for field in (self.include, self.exclude, self.duration_value):
+        for field in (self.include, self.exclude):
             field.blockSignals(True)
             field.clear()
             field.blockSignals(False)

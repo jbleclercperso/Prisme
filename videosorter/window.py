@@ -17,15 +17,15 @@ from .actions import ActionError, HistoryEntry
 from .config import Config
 from .header import (
     CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, TAB_EDIT, TAB_FOLDERS,
-    TAB_VIDEOS, TABS, VIEW_BROWSE, VIEW_EDIT, Breadcrumb, Chips, ControlBar,
-    Segmented,
+    TAB_TAGS, TAB_VIDEOS, TABS, VIEW_BROWSE, VIEW_EDIT, Breadcrumb, Chips,
+    ControlBar, Segmented,
     build_overflow,
 )
 from .media import PreviewManager, Tools, page_count, probe
 from .ratings import Ratings
 from .tagging import build_tag_items, top_words
 from .scan import (
-    MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, ScanThread,
+    MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, Item, ScanThread,
     detect_mode, human_duration, human_resolution, human_size, known_media,
     list_entries, scan_file,
 )
@@ -127,6 +127,10 @@ class MainWindow(QMainWindow):
                         CONTENT_FOLDERS if self.tab == TAB_FOLDERS else
                         cfg["content"])
         self.tag_family = cfg["tag_family"]
+        # Derniere liste de dossiers analysee, gardee telle quelle : changer
+        # d'onglet ne doit jamais relire le disque pour la retrouver.
+        self._plain_items: list = []
+        self._plain_root = None
         self.tags: list = list(cfg["tags"])
         self.mode = MODE_FOLDERS
         self.root: Path | None = None
@@ -228,9 +232,10 @@ class MainWindow(QMainWindow):
         selectors.setContentsMargins(0, 0, 0, 0)
         selectors.setSpacing(20)
         self.tabs = Segmented("", [
-            (TAB_FOLDERS, "📁  Dossiers", "Chaque dossier comme une carte"),
-            (TAB_VIDEOS, "🎬  Vidéos", "Toutes les vidéos en vrac, au hasard"),
-            (TAB_EDIT, "✎  Édition", "Un élément à la fois, à ranger ou écarter"),
+            (TAB_FOLDERS, "Dossiers", "Chaque dossier comme une carte"),
+            (TAB_VIDEOS, "Vidéos", "Toutes les vidéos en vrac, au hasard"),
+            (TAB_EDIT, "Édition", "Un élément à la fois, à ranger ou écarter"),
+            (TAB_TAGS, "Mots-clés", "Les vidéos réunies par les mots de leurs noms"),
         ], sort_page)
         self.tabs.chosen.connect(self.set_tab)
         selectors.addWidget(self.tabs)
@@ -260,7 +265,7 @@ class MainWindow(QMainWindow):
         self.controls.nextPage.connect(lambda: self.change_page(1))
         self.controls.randomHere.connect(self.pick_random_here)
         self.controls.set_terms(self.cfg["filter_include"], self.cfg["filter_exclude"])
-        self.controls.set_sort(self.cfg["sort_mode"] or "name")
+        self.controls.set_sort(self.cfg["sort_mode"] or "random")
         self.controls.set_columns(self.cfg["board_columns"])
         layout.addWidget(self.controls)
         self.tabs.set_value(self.tab)
@@ -286,6 +291,9 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.item_title)
         header_layout.addWidget(self.item_parent)
         header_layout.addWidget(self.item_subtitle)
+        # En planche, ce bloc repetait le fil d'Ariane et une phrase d'aide, sur
+        # trois lignes, au detriment d'une rangee entiere de vignettes.
+        self.item_card = header
         layout.addWidget(header)
 
         self.banner = QLabel("", sort_page)
@@ -662,11 +670,26 @@ class MainWindow(QMainWindow):
         disque, l'analyse vient de le faire.
         """
         if self.mode != MODE_FOLDERS:
-            self.tag_chips.setVisible(False)
             return
-        videos = [video for item in self.all_items if not item.is_tag
-                  for video in item.videos]
-        self.tag_chips.setVisible(bool(videos))
+        # Les dossiers virtuels ne debordent plus sur la liste des dossiers
+        # reels : ils ont leur onglet, c'est la qu'on les cherche.
+        if self.tab != TAB_TAGS:
+            if any(i.is_tag for i in self.all_items):
+                self.all_items = [i for i in self.all_items if not i.is_tag]
+                if not self.all_items:
+                    self.all_items = list(getattr(self, "_plain_items", []))
+                self.items = [i for i in self.all_items if self._matches(i)]
+                self.apply_sort()
+            return
+        plain = [i for i in self.all_items if not i.is_tag]
+        if plain:
+            # L'onglet des mots-cles remplace la liste par les dossiers
+            # virtuels : on garde de cote celle des dossiers reels, qui reste
+            # la seule source des videos a regrouper.
+            self._plain_items = plain
+        else:
+            plain = getattr(self, "_plain_items", [])
+        videos = [video for item in plain for video in item.videos]
         # Deux familles : les mots qu'on a saisis, et ceux que les noms de
         # fichiers repetent d'eux-memes. Les seconds ne demandent aucune saisie
         # et decrivent souvent mieux la collection que ce qu'on aurait pense.
@@ -678,7 +701,9 @@ class MainWindow(QMainWindow):
         found = build_tag_items(words, videos)
         if not found:
             return
-        self.all_items = found + [i for i in self.all_items if not i.is_tag]
+        # Dans son onglet, un mot-cle n'est pas un en-tete pose sur la liste des
+        # dossiers : c'est toute la liste.
+        self.all_items = found if self.tab == TAB_TAGS else found + plain
         self.items = [item for item in self.all_items if self._matches(item)]
         self.apply_sort()
         if self.browsing:
@@ -688,6 +713,9 @@ class MainWindow(QMainWindow):
 
     def on_scan_finished(self, mode: str, total: int) -> None:
         self.scanning = False
+        if mode == MODE_FOLDERS:
+            self._plain_items = [i for i in self.all_items if not i.is_tag]
+            self._plain_root = self.root
         self._add_tag_items()
         self._show_counts()
         thread = self.scan_thread
@@ -970,8 +998,15 @@ class MainWindow(QMainWindow):
             self.items.sort(key=duration_of)
         elif self.sort_mode == "stars_desc":
             self.items.sort(key=lambda i: self.ratings.get(i.path), reverse=True)
+        elif self.sort_mode == "stars_asc":
+            self.items.sort(key=lambda i: self.ratings.get(i.path))
         elif self.sort_mode == "size_desc":
             self.items.sort(key=lambda i: i.size, reverse=True)
+        elif self.sort_mode == "size_asc":
+            self.items.sort(key=lambda i: i.size)
+        elif self.sort_mode in ("resolution_desc", "resolution_asc"):
+            self.items.sort(key=lambda i: known_media(i)[1],
+                            reverse=self.sort_mode.endswith("desc"))
         else:
             self.items.sort(key=lambda i: i.name.lower())
 
@@ -1059,6 +1094,57 @@ class MainWindow(QMainWindow):
         """Conservé pour l'enregistrement : l'onglet dit déjà tout."""
         return VIEW_BROWSE if self.browsing else VIEW_EDIT
 
+    def _videos_from_items(self) -> list:
+        """Toutes les vidéos déjà repérées, sans rien redemander au disque.
+
+        Passer aux vidéos relançait une analyse complète de la racine, alors que
+        l'analyse des dossiers vient d'en relever le contenu. Sur un partage
+        réseau, c'était plusieurs minutes pour une information déjà connue.
+        """
+        seen = set()
+        found = []
+        for item in self.all_items:
+            if item.is_tag:
+                continue
+            for video in item.videos:
+                key = str(video)
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append(video)
+        return found
+
+    def restore_folders(self) -> bool:
+        """Remet la liste des dossiers déjà analysée, sans rien relire.
+
+        Sans cela, chaque aller-retour entre les onglets relançait l'analyse
+        complète de la racine — plusieurs minutes sur un partage réseau, pour
+        retrouver exactement ce qu'on venait de quitter.
+        """
+        if not self._plain_items or self._plain_root != self.root:
+            return False
+        self.all_items = list(self._plain_items)
+        self.items = [i for i in self.all_items if self._matches(i)]
+        self.mode = MODE_FOLDERS
+        self.apply_sort()
+        self.index = 0
+        self._show_counts()
+        return True
+
+    def show_videos_tab(self) -> None:
+        """Bascule sur les vidéos à partir de ce qui est déjà en mémoire."""
+        videos = self._videos_from_items()
+        if not videos:
+            self.start_root(self.root, MODE_FLAT, reset_levels=False)
+            return
+        self.all_items = [Item(path=Path(video), kind=MODE_FILES, videos=[video],
+                               video_count=1, file_count=1) for video in videos]
+        self.items = [i for i in self.all_items if self._matches(i)]
+        self.mode = MODE_FLAT
+        self.apply_sort()
+        self.index = 0
+        self._show_counts()
+
     def set_tab(self, tab: str, reposition: bool = True) -> None:
         """Change de point de vue sans changer de collection.
 
@@ -1068,26 +1154,32 @@ class MainWindow(QMainWindow):
         """
         if tab not in TABS or tab == self.tab:
             return
-        before = self.mode_for_content()
+        was = self.tab
         self.tab = tab
-        if tab == TAB_FOLDERS:
-            self.content = CONTENT_FOLDERS
-        elif tab == TAB_VIDEOS:
+        if tab == TAB_VIDEOS:
             self.content = CONTENT_VIDEOS
-            # Des milliers de vidéos par ordre alphabétique, c'est toujours le
-            # même début : le hasard fait voir la collection entière.
-            if not self.sort_mode:
-                self.set_sort("random")
-                self.controls.set_sort("random")
+        elif tab != TAB_EDIT:
+            self.content = CONTENT_FOLDERS
         self.cfg["tab"] = tab
         self.cfg["content"] = self.content
         self.cfg["view"] = self.view
         self.cfg.save()
         self._release_media()
         self._apply_selectors()
-        if self.root is not None and self.mode_for_content() != before:
-            self.start_root(self.root, self.mode_for_content(), reset_levels=False)
+
+        if self.root is None:
             return
+        if tab == TAB_VIDEOS and was != TAB_VIDEOS:
+            self.show_videos_tab()
+        elif tab in (TAB_FOLDERS, TAB_TAGS) and self.mode != MODE_FOLDERS:
+            if not self.restore_folders():
+                self.start_root(self.root, MODE_FOLDERS, reset_levels=False)
+                return
+            if tab == TAB_TAGS:
+                self._add_tag_items()
+        elif tab == TAB_TAGS or was == TAB_TAGS:
+            self._add_tag_items()
+
         if self.browsing:
             self.refresh_board()
         elif self.items:
@@ -1138,7 +1230,10 @@ class MainWindow(QMainWindow):
         """Aligne l'entête sur l'état réel, pour qu'il dise où l'on se trouve."""
         self.tabs.set_value(self.tab)
         self.tag_chips.set_value(self.tag_family)
+        self.tag_chips.setVisible(self.tab == TAB_TAGS)
         self.controls.set_browsing(self.browsing)
+        # La fiche ne dit rien qu'on ne lise deja ailleurs quand on parcourt.
+        self.item_card.setVisible(not self.browsing)
         item = self.current
         self.enter_button.setVisible(
             not self.browsing and item is not None

@@ -47,10 +47,10 @@ DEFAULTS = {
     "window": {"w": 1400, "h": 900},
     "skip_hidden": True,
     "use_scan_cache": True,      # reutiliser l analyse precedente
-    "sort_mode": "name",         # name | duration_desc | ... | random
+    "sort_mode": "random",       # random | duration_desc | size_asc | …
     "content": "folders",        # conserve pour compatibilite
     "view": "edit",              # conserve pour compatibilite
-    "tab": "edit",               # onglet : folders | videos | edit
+    "tab": "edit",               # onglet : folders | videos | edit | tags
     "tag_family": "mine",        # mots-cles affiches : mine | top
     "tree_action": "send",       # clic dans l arborescence : send | go
     "tags": [],                  # mots-cles, un par ligne

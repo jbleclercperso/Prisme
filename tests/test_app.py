@@ -41,7 +41,8 @@ from videosorter.config import Config  # noqa: E402
 from videosorter.media import Tools  # noqa: E402
 from videosorter.scan import MODE_FILES, MODE_FLAT, MODE_FOLDERS  # noqa: E402
 from videosorter.header import (  # noqa: E402
-    CONTENT_FOLDERS, CONTENT_VIDEOS, TAB_EDIT, TAB_FOLDERS, TAB_VIDEOS,
+    CONTENT_FOLDERS, CONTENT_VIDEOS, TAB_EDIT, TAB_FOLDERS, TAB_TAGS,
+    TAB_VIDEOS,
     VIEW_BROWSE, VIEW_EDIT,
 )
 from videosorter.window import MainWindow  # noqa: E402
@@ -783,43 +784,49 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
                      QPoint(card.width() // 2, 30))
     check(opened == [0], "un clic sur l'image ouvre bien la carte")
 
-    print("\n[34] Filtres chiffrés de la planche")
+    print("\n[34] Pastilles de tri")
     filters = window.controls
     check(not filters.isHidden(), "la barre de réglages est visible")
     check(filters.criteria()["stars"] == -1, "et ne masque rien au départ")
-    check(filters.duration_op.itemText(1) == "plus longue que",
-          "les opérateurs sont écrits en toutes lettres")
-    check(filters.duration_op.itemText(2) == "plus courte que", "dans les deux sens")
+    check(not hasattr(filters, "duration_op") and not hasattr(filters, "stars"),
+          "les filtres chiffrés ont quitté l'écran")
+    check(filters.exclude.isHidden(), "l'exclusion par le nom aussi")
 
-    window.ratings.data.clear()
-    window.apply_filter(window.cfg["filter_include"], window.cfg["filter_exclude"])
-    pump(app, 0.3)
-    total = len(window.items)
-    window.on_board_rate(0, 4)
-    filters.stars.setCurrentIndex(filters.stars.findData(4))
-    pump(app, 0.6)
-    check(len(window.items) == 1,
-          f"filtrer sur 4 étoiles ne garde que l'élément noté ({len(window.items)})")
-    filters.reset()
-    pump(app, 0.6)
-    check(len(window.items) == total, "« Tout afficher » rend la liste entière")
+    chips = filters.sorts
+    modes = []
+    chips.chosen.connect(modes.append)
+    chips.buttons["duration"].click()
+    check(modes[-1] == "duration_desc", f"un clic classe du plus long ({modes[-1]})")
+    check("▼" in chips.buttons["duration"].text(),
+          f"et la pastille le montre ({chips.buttons['duration'].text()})")
+    chips.buttons["duration"].click()
+    check(modes[-1] == "duration_asc", f"un second clic inverse ({modes[-1]})")
+    check("▲" in chips.buttons["duration"].text(), "la flèche suit")
+    chips.buttons["duration"].click()
+    check(modes[-1] == "random", f"un troisième remet au hasard ({modes[-1]})")
+    check(chips.buttons["duration"].text() == "Durée", "la pastille s'éteint")
 
-    # La durée s'appuie sur ce que le sondage a appris.
-    wait_for(app, lambda: any(c._pixmap for c in window.board.cards), 90)
-    filters.duration_op.setCurrentIndex(2)          # plus courte que
-    filters.duration_value.setText("120")
-    pump(app, 0.6)
-    check(len(window.items) <= total, "un filtre de durée restreint ou laisse tel quel")
-    filters.duration_op.setCurrentIndex(1)          # plus longue que
-    filters.duration_value.setText("600")
-    pump(app, 0.6)
-    check(len(window.items) < total,
-          f"aucun dossier ne dure plus de 10 heures ({len(window.items)} restants)")
-    filters.reset()
-    pump(app, 0.6)
-    check(len(window.items) == total,
-          f"réinitialiser après un filtre vidant la liste la rétablit "
-          f"({len(window.items)} sur {total})")
+    chips.buttons["size"].click()
+    check(modes[-1] == "size_desc", "la taille se classe pareil")
+    chips.buttons["stars"].click()
+    check(modes[-1] == "stars_desc", "et la note")
+    check(chips.buttons["size"].property("chosen") == "false",
+          "un seul critère à la fois")
+
+    # Le classement doit vraiment reordonner la liste.
+    window.sort_mode = "size_desc"
+    window.apply_sort()
+    sizes = [i.size for i in window.items]
+    check(sizes == sorted(sizes, reverse=True),
+          f"du plus gros au plus petit ({sizes[:5]})")
+    window.sort_mode = "size_asc"
+    window.apply_sort()
+    sizes = [i.size for i in window.items]
+    check(sizes == sorted(sizes), f"et l'inverse au clic suivant ({sizes[:5]})")
+    window.sort_mode = "stars_asc"
+    window.apply_sort()
+    notes = [window.ratings.get(i.path) for i in window.items]
+    check(notes == sorted(notes), "la note se classe dans les deux sens aussi")
 
     print("\n[35] Précédent et temps restant")
     window.toggle_board(False)
@@ -1132,12 +1139,21 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
             shutil.copy2(origin, tagged / folder / name)
 
     window.tags = ["plage", "montagne"]
+    window.set_tab(TAB_FOLDERS)
     window.start_root(tagged, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning, 60)
     pump(app, 0.4)
+    check(not any(i.is_tag for i in window.all_items),
+          "aucun dossier virtuel ne s'invite parmi les dossiers réels")
+
+    window.set_tab(TAB_TAGS)
+    pump(app, 0.4)
     tags_found = [i for i in window.all_items if i.is_tag]
     check(len(tags_found) == 2, f"deux dossiers virtuels ({len(tags_found)})")
-    check(window.all_items[0].is_tag, "placés en tête de liste")
+    check(all(i.is_tag for i in window.all_items),
+          "et l'onglet ne montre qu'eux")
+    check(not window.tag_chips.isHidden(),
+          "les deux familles de mots-clés s'offrent ici, et seulement ici")
     check(tags_found[0].video_count == 2,
           f"« plage » réunit les deux vidéos ({tags_found[0].video_count})")
 
@@ -1157,7 +1173,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(all("plage" in i.name.lower() for i in window.items),
           f"et rien d'autre ({[i.name for i in window.items]})")
 
-    print("\n[49] Un onglet à trois entrées dit où l'on est")
+    print("\n[49] Un onglet à quatre entrées dit où l'on est")
     # Sans mode imposé : c'est le chemin de l'écran d'accueil, celui que prend
     # « Choisir un dossier racine ». Il doit aboutir comme les autres.
     window.start_root(tagged)
@@ -1178,7 +1194,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(window.tabs.buttons[TAB_VIDEOS].property("chosen") == "true",
           "l'onglet suit")
     check(all(i.kind == MODE_FILES for i in window.items), "ce sont des fichiers")
-    check(window.sort_mode == "random", "et elles arrivent au hasard")
+    from videosorter.config import DEFAULTS
+    check(DEFAULTS["sort_mode"] == "random",
+          "et le classement par défaut est le hasard")
     check(window.viewer.currentWidget() is window.board, "la planche est affichée")
 
     window.set_tab(TAB_EDIT)
@@ -1210,7 +1228,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(item is not None and not item.categorized,
           "l'édition commence par un élément pas encore classé")
 
-    # Les deux familles de mots-cles.
+    # Les deux familles de mots-cles, dans l'onglet qui les porte.
+    window.set_tab(TAB_TAGS)
+    pump(app, 0.4)
+    check(window.mode == MODE_FOLDERS,
+          "l'onglet des mots-clés remet la liste des dossiers sans la relire")
     window.set_tag_family("top")
     pump(app, 0.4)
     tops = [i for i in window.all_items if i.is_tag]
@@ -1234,6 +1256,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     # Le fil d'Ariane doit montrer la descente et savoir y ramener.
     window.set_tab(TAB_FOLDERS)
+    window.start_root(tagged, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning, 60)
     top = str(window.root)
     position = next(i for i, item in enumerate(window.items)
