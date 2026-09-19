@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import actions
+from .backfill import ThumbBackfill
 from .board import COLUMN_CHOICES, BoardView
 from .actions import ActionError, HistoryEntry
 from .config import Config
@@ -135,6 +136,8 @@ class MainWindow(QMainWindow):
         self.tag_family = cfg["tag_family"]
         # Derniere liste de dossiers analysee, gardee telle quelle : changer
         # d'onglet ne doit jamais relire le disque pour la retrouver.
+        # Parcours de pre-fabrication des vignettes, quand il tourne.
+        self.backfill = None
         self._plain_items: list = []
         self._plain_root = None
         self.tags: list = list(cfg["tags"])
@@ -271,6 +274,7 @@ class MainWindow(QMainWindow):
             ("-", None),
             ("Recherche vidéo sur le web…", self.open_web_search),
             ("-", None),
+            ("Préparer toutes les vignettes", self.toggle_backfill),
             ("Réanalyser tout le disque", self.refresh_root),
             ("Changer de racine…", self.choose_root),
         ])
@@ -673,6 +677,59 @@ class MainWindow(QMainWindow):
                 f"Windows. Ils restent dans « {self.trash.FOLDER_NAME} ».\n\n"
                 f"Dernière erreur : {problem}",
             )
+
+    # ------------------------------------------------------------------
+    # Fabrication des vignettes d'avance
+    # ------------------------------------------------------------------
+    def toggle_backfill(self) -> None:
+        """Lance, ou arrête, la fabrication de toutes les vignettes manquantes.
+
+        Elle tourne pendant qu'on trie. Ce qu'on regarde passe devant : le
+        parcours n'occupe que la moitié des extractions simultanées.
+        """
+        if self.backfill is not None:
+            self.backfill.stop()
+            self.show_banner("Préparation des vignettes : arrêt demandé…", "#2a2f38")
+            return
+        if self.root is None:
+            return
+        top = Path(self.levels[0]["root"]) if self.levels else self.root
+        self.backfill = ThumbBackfill(top, self.cfg["thumb_width"],
+                                      self.cfg["skip_hidden"], self)
+        self.backfill.counted.connect(self.on_backfill_counted)
+        self.backfill.progress.connect(self.on_backfill_progress)
+        self.backfill.done.connect(self.on_backfill_done)
+        self.backfill.start()
+        self.show_banner(
+            f"Préparation des vignettes de {top} — recensement des vidéos…",
+            "#22303f",
+        )
+
+    def on_backfill_counted(self, total: int) -> None:
+        if self.scanning:
+            return
+        self.progress.setRange(0, max(1, total))
+        self.progress.setValue(0)
+        self.progress.setFormat("vignettes : %v / %m")
+        self.progress.show()
+
+    def on_backfill_progress(self, made: int, kept: int, total: int) -> None:
+        if self.scanning:
+            return
+        self.progress.setRange(0, max(1, total))
+        self.progress.setValue(made + kept)
+
+    def on_backfill_done(self, made: int, kept: int, complete: bool) -> None:
+        self.backfill = None
+        if not self.scanning:
+            self.progress.hide()
+            self.progress.setFormat("%v / %m analysés")
+        fin = "terminée" if complete else "interrompue"
+        self.show_banner(
+            f"Préparation {fin} : {made} vignette(s) fabriquée(s), "
+            f"{kept} déjà présente(s). Elle reprendra où elle s'est arrêtée.",
+            "#22303f",
+        )
 
     def refresh_root(self) -> None:
         """Relit tout le disque, sans se fier a l'analyse precedente."""
@@ -2459,6 +2516,9 @@ class MainWindow(QMainWindow):
         self.show_banner("Son coupé" if muted else "Son activé", "#2a2f38")
 
     def closeEvent(self, event):
+        if self.backfill is not None:
+            self.backfill.stop()
+            self.backfill.wait(3000)
         self.stop_scan()
         self._release_media()
         # Un transfert interrompu laisserait un dossier à moitié copié : on

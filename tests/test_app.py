@@ -1341,6 +1341,44 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(ok, "et cliquer un segment y ramène")
     check(window.levels == [], "en dépilant les niveaux traversés")
 
+    print("\n[50] Vignettes fabriquées d'avance")
+    from videosorter.backfill import ThumbBackfill
+
+    def run_backfill(target):
+        """Lance le parcours et rend (fabriquées, déjà là, mené à terme)."""
+        out = {}
+        worker = ThumbBackfill(target, window.cfg["thumb_width"], True)
+        worker.counted.connect(lambda n: out.__setitem__("total", n))
+        worker.done.connect(
+            lambda made, kept, whole: out.update(
+                made=made, kept=kept, whole=whole))
+        worker.start()
+        wait_for(app, lambda: "made" in out, 180)
+        return out
+
+    first = run_backfill(root)
+    check(first.get("total", 0) > 0,
+          f"le parcours recense les vidéos ({first.get('total')})")
+    check(first.get("whole") is True, "et va jusqu'au bout")
+    check(first.get("made", 0) + first.get("kept", 0) == first["total"],
+          f"chaque vidéo est comptée une fois "
+          f"({first.get('made')} faites, {first.get('kept')} déjà là)")
+
+    second = run_backfill(root)
+    check(second.get("made") == 0,
+          f"un second passage ne refait rien ({second.get('made')} refaite(s))")
+    check(second.get("kept") == first["total"],
+          "il les retrouve toutes en cache")
+
+    # Et ce que la planche demande doit etre exactement ce qui a ete fabrique :
+    # sinon la pre-fabrication ne servirait a rien.
+    from videosorter.media import build_preview_plan, thumb_path
+    sample = sorted(root.rglob("*.mp4"))[0]
+    plan = build_preview_plan([sample], 1, 0, True, True)
+    ready = thumb_path(Path(plan[0][0]), plan[0][1], window.cfg["thumb_width"])
+    check(ready.exists(),
+          "la vignette préparée est bien celle que la planche réclame")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,
