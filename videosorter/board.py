@@ -106,11 +106,14 @@ class BoardCard(QFrame):
         self.image.setPixmap(QPixmap())
         self.image.setText("…")
         self.meta.setText(self._line())
-        self.meta.setToolTip(f"{item.path}\n{human_size(item.size)}")
+        count = (f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}\n"
+                 if item.kind == MODE_FOLDERS else "")
+        self.meta.setToolTip(f"{item.path}\n{count}{human_size(item.size)}")
         if item.kind == MODE_FOLDERS:
-            # Connu d'avance : la pastille n'attend pas le sondage d'une video.
-            self._show_chip(f"{item.video_count} vidéo"
-                            f"{'s' if item.video_count > 1 else ''}")
+            # Le seul chiffre : sur une pastille posee au coin d'une image, le
+            # mot « videos » ne dit rien que la vignette ne montre deja, et il
+            # prend la moitie de la place.
+            self._show_chip(str(item.video_count))
         else:
             self.duration_chip.hide()
         self.set_state(item.status)

@@ -78,7 +78,7 @@ déjà vu est instantané.
 | `Alt+←` | Revenir à l'endroit précédemment visité |
 | `Ctrl+R` | Réanalyser tout le disque, sans se fier au cache |
 | `Ctrl+↓` | Entrer dans le dossier affiché pour en trier les vidéos |
-| `Ctrl+↑` | Remonter au dossier parent |
+| `Ctrl+↑`, ou le bouton `↑` | Remonter au dossier parent, d'où qu'on soit |
 | `Ctrl+T` | Afficher ou masquer l'arborescence |
 | `Ctrl+M` | Couper ou remettre le son |
 | `Ctrl+O` | Ouvrir l'élément courant dans l'explorateur |
@@ -171,6 +171,11 @@ chaque élément, en arrière-plan, deux extractions à la fois. Elle s'efface d
 que vous demandez quelque chose, reprend deux secondes plus tard, saute ce qui
 est déjà sur le disque, et reprend où elle s'était arrêtée au lancement suivant.
 Le bouton d'état l'annonce (`◷ aperçus 120 / 649`) et un clic l'arrête.
+
+**Elle commence par ce que vous regardez.** Changer de page la fait sauter à
+cette page : elle parcourait sinon la collection dans l'ordre, et arrivé à la
+page cinq on attendait ses aperçus pendant qu'elle préparait tranquillement la
+page une.
 
 Une fois passée, la navigation ne coûte plus rien.
 

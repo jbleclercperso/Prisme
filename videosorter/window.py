@@ -210,6 +210,16 @@ class MainWindow(QMainWindow):
         # Deux portees, deux boutons. Le general pioche dans toute la
         # collection ; le local, dans le seul element affiche. Ils etaient
         # confondus derriere un raccourci, et l un des deux se cherchait.
+        # Remonter d'un cran, d'ou qu'on soit. `go_up` ne savait revenir que
+        # par ou l'on etait descendu : arrive par un mot-cle, par l'historique
+        # ou par une racine choisie, la pile etait vide et rien ne remontait.
+        self.up_button = QPushButton("↑", sort_page)
+        self.up_button.setObjectName("up")
+        self.up_button.setFixedWidth(34)
+        self.up_button.setToolTip("Remonter au dossier parent   (Ctrl+↑)")
+        self.up_button.setFocusPolicy(Qt.NoFocus)
+        self.up_button.clicked.connect(self.go_parent)
+
         self.scan_button = QPushButton("⟲  Analyser", sort_page)
         self.scan_button.setObjectName("scanState")
         self.scan_button.setProperty("running", "false")
@@ -279,6 +289,7 @@ class MainWindow(QMainWindow):
         self.tag_chips.hide()
         selectors.addWidget(self.tag_chips)
 
+        selectors.addWidget(self.up_button)
         selectors.addStretch(1)
         selectors.addWidget(self.scan_button)
         selectors.addWidget(self.random_button)
@@ -753,6 +764,19 @@ class MainWindow(QMainWindow):
         elif self.items:
             self.show_item(0)
 
+    def go_parent(self) -> None:
+        """Remonte d'un cran : par ou l'on est venu, sinon vers le parent reel."""
+        if self.go_up():
+            return
+        if self.root is None:
+            return
+        parent = Path(self.root).parent
+        if parent == self.root or not parent.is_dir():
+            self.show_banner("Déjà au sommet.", "#2a2f38")
+            return
+        self.start_root(parent, self.mode_for_content(),
+                        restore_id=str(self.root))
+
     def go_up(self) -> bool:
         """Remonte d'un niveau, en retrouvant le dossier d'ou l'on etait parti."""
         if not self.levels:
@@ -791,13 +815,14 @@ class MainWindow(QMainWindow):
             if item.locked or not item.videos:
                 continue
             video = str(item.videos[0])
+            blind = BLIND_OFFSETS[index % len(BLIND_OFFSETS)]
             if item.kind == MODE_FOLDERS:
-                tasks.append((video, BLIND_OFFSETS[index % len(BLIND_OFFSETS)]))
+                tasks.append((item.item_id, video, blind))
             else:
                 info = INDEX.probe(video)
                 duration = (info or {}).get("duration") or 0.0
-                tasks.append((video, min(duration * 0.2, 20.0) if duration > 2
-                              else BLIND_OFFSETS[index % len(BLIND_OFFSETS)]))
+                tasks.append((item.item_id, video,
+                              min(duration * 0.2, 20.0) if duration > 2 else blind))
         if not tasks:
             return
         harvester = self.preview.start_harvest(tasks)
@@ -1328,6 +1353,21 @@ class MainWindow(QMainWindow):
     def on_board_page(self, first: int, last: int, total: int) -> None:
         if self.browsing:
             self._show_counts()
+        self._harvest_here(first, last)
+
+    def _harvest_here(self, first: int, last: int) -> None:
+        """Fait passer la page regardée en tête de la récolte.
+
+        Elle parcourait la collection dans l'ordre : arrivé à la page cinq, on
+        attendait ses aperçus pendant qu'elle préparait tranquillement la page
+        une. Ce qui est sous les yeux passe devant.
+        """
+        harvester = self.preview.harvester
+        if harvester is None:
+            return
+        keys = {item.item_id for item in self.items[max(0, first):last + 1]}
+        if keys:
+            harvester.prioritise(keys)
 
     def change_page(self, step: int) -> None:
         """Page suivante ou precedente : de cartes en planche, d'apercus en fiche."""
@@ -1659,6 +1699,10 @@ class MainWindow(QMainWindow):
             and item.kind == MODE_FOLDERS and not item.locked
         )
         self.stars.setVisible(not self.browsing)
+        root = self.root
+        self.up_button.setEnabled(
+            bool(self.levels) or (root is not None
+                                  and Path(root).parent != Path(root)))
         self.random_here_button.setVisible(
             item is not None and bool(item.videos) and not self.browsing)
 

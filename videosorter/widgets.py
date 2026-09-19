@@ -51,6 +51,11 @@ QPushButton#enter { background: #1d4a2e; border: 1px solid #2f7a4a;
                     border-radius: 6px; padding: 5px 12px; color: #cdf0da;
                     font-weight: 600; }
 QPushButton#enter:hover { background: #2a6a41; color: #ffffff; }
+QPushButton#up { background: transparent; border: 1px solid #39414d;
+                 border-radius: 6px; padding: 5px 0; color: #9aa4b2;
+                 font-size: 15px; }
+QPushButton#up:hover { color: #ffffff; border-color: #5a6575; }
+QPushButton#up:disabled { color: #3e454f; border-color: #262c35; }
 QPushButton#scanState { background: transparent; border: 1px solid #39414d;
                         border-radius: 6px; padding: 5px 11px; color: #9aa4b2; }
 QPushButton#scanState:hover { color: #ffffff; border-color: #5a6575; }

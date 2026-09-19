@@ -4,12 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import time
+from collections import deque
 
 from PySide6.QtCore import (
     QObject, QRunnable, QThread, QThreadPool, Signal,
@@ -397,9 +399,12 @@ class Harvester(QThread):
     def __init__(self, width: int, parent=None):
         super().__init__(parent)
         self.width = width
-        self.tasks: list = []          # [(video, ts)]
+        self.tasks: list = []          # [(cle, video, instant)]
         self.made = 0
         self.busy_until = 0.0
+        self._lock = threading.Lock()
+        self._queue: deque = deque()
+        self._urgent: set = set()
         self._stop = False
 
     def stop(self) -> None:
@@ -409,9 +414,28 @@ class Harvester(QThread):
         """Quelqu'un regarde : on s'ecarte."""
         self.busy_until = time.monotonic() + self.QUIET_AFTER_REQUEST
 
-    def run(self) -> None:
-        from concurrent.futures import ThreadPoolExecutor
+    def prioritise(self, keys) -> None:
+        """Fait passer ces elements en tete de la recolte.
 
+        Elle parcourait la collection dans l'ordre : arrive a la page cinq, on
+        attendait ses apercus pendant qu'elle preparait tranquillement la page
+        une. Ce qu'on a sous les yeux passe devant.
+        """
+        with self._lock:
+            self._urgent = set(keys)
+
+    def _next(self):
+        with self._lock:
+            if self._urgent:
+                for position, task in enumerate(self._queue):
+                    if task[0] in self._urgent:
+                        del self._queue[position]
+                        return task
+                # Plus rien d'urgent en attente : on reprend le fil.
+                self._urgent.clear()
+            return self._queue.popleft() if self._queue else None
+
+    def run(self) -> None:
         total = len(self.tasks)
         if not total:
             self.finished_harvest.emit(0)
@@ -420,7 +444,7 @@ class Harvester(QThread):
         # Ce qui est deja sur le disque ne se refait pas : la recolte reprend
         # ou elle s'etait arretee, meme apres avoir ferme l'application.
         todo = []
-        for video, ts in self.tasks:
+        for key, video, ts in self.tasks:
             if self._stop:
                 return
             out = thumb_path(Path(video), ts, self.width)
@@ -429,7 +453,7 @@ class Harvester(QThread):
                     continue
             except OSError:
                 pass
-            todo.append((video, ts))
+            todo.append((key, video, ts))
 
         done = total - len(todo)
         self.progress.emit(done, total)
@@ -437,27 +461,35 @@ class Harvester(QThread):
             self.finished_harvest.emit(0)
             return
 
-        def work(task):
-            while not self._stop and time.monotonic() < self.busy_until:
-                time.sleep(0.2)
-            if self._stop:
-                return False
-            return bool(extract_thumb(Path(task[0]), task[1], self.width))
+        self._queue = deque(todo)
+        counted = [done]
+        last = [0.0]
+        report_lock = threading.Lock()
 
-        last = 0.0
-        pool = ThreadPoolExecutor(max_workers=self.WORKERS)
-        try:
-            for made in pool.map(work, todo):
+        def worker():
+            while not self._stop:
+                task = self._next()
+                if task is None:
+                    return
+                while not self._stop and time.monotonic() < self.busy_until:
+                    time.sleep(0.15)
                 if self._stop:
-                    break
-                done += 1
-                self.made += bool(made)
-                now = time.monotonic()
-                if now - last >= 0.5 or done == total:
-                    self.progress.emit(done, total)
-                    last = now
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+                    return
+                made = extract_thumb(Path(task[1]), task[2], self.width)
+                with report_lock:
+                    counted[0] += 1
+                    self.made += bool(made)
+                    now = time.monotonic()
+                    if now - last[0] >= 0.5 or counted[0] == total:
+                        self.progress.emit(counted[0], total)
+                        last[0] = now
+
+        hands = [threading.Thread(target=worker, daemon=True)
+                 for _ in range(self.WORKERS)]
+        for hand in hands:
+            hand.start()
+        for hand in hands:
+            hand.join()
         if not self._stop:
             self.finished_harvest.emit(self.made)
 

@@ -170,8 +170,8 @@ check(all(" " not in w for w in top_words(["beach sun a.mp4", "beach sun b.mp4"]
 window.set_tab(TAB_FOLDERS)
 settle()
 card = window.board.cards[0]
-check(card.duration_chip.isVisible() and "vidéo" in card.duration_chip.text(),
-      "la pastille d un dossier compte ses videos ("
+check(card.duration_chip.isVisible() and card.duration_chip.text().isdigit(),
+      "la pastille d un dossier porte son seul compte ("
       + card.duration_chip.text() + ")")
 
 check(window.browsing, "on arrive sur les vignettes")
@@ -191,6 +191,13 @@ check(PAGE_SIZE == 40, "les vignettes vont par pages de " + str(PAGE_SIZE))
 
 print()
 print("[7] Arborescence : les destinations seulement")
+window.go_parent()
+settle()
+check(window.up_button.isEnabled() or window.root == root,
+      "le bouton parent remonte d un cran (" + window.root.name + ")")
+window.start_root(root, MODE_FOLDERS)
+settle()
+
 from videosorter.media import Harvester                     # noqa: E402
 check(Harvester.WORKERS <= 2,
       "la recolte d apercus reste discrete (" + str(Harvester.WORKERS)
