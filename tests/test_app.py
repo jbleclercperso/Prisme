@@ -41,8 +41,8 @@ from videosorter.config import Config  # noqa: E402
 from videosorter.media import Tools  # noqa: E402
 from videosorter.scan import MODE_FILES, MODE_FLAT, MODE_FOLDERS  # noqa: E402
 from videosorter.header import (  # noqa: E402
-    CONTENT_FOLDERS, CONTENT_VIDEOS, TAB_EDIT, TAB_FOLDERS, TAB_TAGS,
-    TAB_VIDEOS,
+    CONTENT_FOLDERS, CONTENT_VIDEOS, TAB_EDIT, TAB_FOLDERS, TAB_SPLIT,
+    TAB_TAGS, TAB_VIDEOS,
     VIEW_BROWSE, VIEW_EDIT,
 )
 from videosorter.window import MainWindow  # noqa: E402
@@ -833,16 +833,19 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     print("\n[33b] La fenêtre doit pouvoir rétrécir")
     # Une seule étiquette trop large imposait sa largeur à la fenêtre entière :
     # elle ne pouvait plus rétrécir, et tout débordait de l'écran à droite.
+    # Le seuil garde d'une catastrophe — une etiquette avait un jour porte ce
+    # minimum a 5076 px, et tout sortait de l'ecran par la droite — pas d'un
+    # pixel de trop. Il doit rester sous la largeur d'un ecran ordinaire.
     minimum = window.minimumSizeHint().width()
-    check(minimum <= 1280,
+    check(minimum <= 1400,
           f"la fenêtre tient dans un écran ordinaire ({minimum} px exigés)")
-    window.resize(1280, 800)
+    window.resize(1500, 800)
     pump(app, 0.4)
-    check(window.width() == 1280,
+    check(window.width() == 1500,
           f"et elle obéit quand on la redimensionne ({window.width()} px)")
     for name in ("crumbs", "tabs", "controls", "commands"):
         widget = getattr(window, name)
-        check(widget.minimumSizeHint().width() <= 1280,
+        check(widget.minimumSizeHint().width() <= 1400,
               f"« {name} » n'élargit pas la fenêtre "
               f"({widget.minimumSizeHint().width()} px)")
     window.resize(1400, 900)
@@ -1448,6 +1451,67 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
               f"avec la même liste qu'avant ({len(window.items)} sur {folders_seen})")
     finally:
         window.start_root = real_start
+
+    print("\n[53] Mur de vidéos verticales")
+    from videosorter.index import INDEX
+    from videosorter.split import DEFAULT_PANES
+    from videosorter.stamps import stamp_of
+
+    check(len(window.wall.panes) == DEFAULT_PANES,
+          f"le mur compte {DEFAULT_PANES} panneaux ({len(window.wall.panes)})")
+
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.set_tab(TAB_VIDEOS)
+    pump(app, 0.5)
+
+    # On declare verticales quelques videos connues : le mur ne sonde rien
+    # lui-meme, il se sert de ce qui a deja ete releve.
+    videos = [Path(v) for it in window.items for v in it.videos][:4]
+    check(bool(videos), "des vidéos sont disponibles pour l'essai")
+    for video in videos[:2]:
+        INDEX.put_probe(video, stamp_of(video),
+                        {"duration": 8.0, "width": 320, "height": 640,
+                         "codec": "h264", "ok": True})
+    for video in videos[2:]:
+        INDEX.put_probe(video, stamp_of(video),
+                        {"duration": 8.0, "width": 640, "height": 320,
+                         "codec": "h264", "ok": True})
+
+    pool = window.vertical_pool()
+    check(len(pool) == 2, f"seules les verticales entrent au vivier ({len(pool)})")
+    check(all(str(v) in pool for v in videos[:2]),
+          "et ce sont bien celles dont la hauteur dépasse la largeur")
+
+    window.set_tab(TAB_SPLIT)
+    pump(app, 0.6)
+    check(window.viewer.currentWidget() is window.wall, "l'onglet montre le mur")
+    playing = [p for p in window.wall.panes if p.video_path]
+    check(len(playing) == min(DEFAULT_PANES, len(pool)),
+          f"un panneau par vidéo disponible ({len(playing)})")
+    check(all(p.video_path in pool for p in playing),
+          "et chacun lit une vidéo du vivier")
+
+    # Un panneau se renouvelle sans toucher aux autres.
+    others = [p.video_path for p in window.wall.panes[1:]]
+    window.wall.refill_one(0)
+    pump(app, 0.3)
+    check([p.video_path for p in window.wall.panes[1:]] == others,
+          "changer un panneau laisse les autres en place")
+
+    # La recherche restreint le vivier.
+    window.controls.include.setText("zzz-introuvable")
+    pump(app, 0.8)
+    check(not window.wall.pool, "une recherche sans résultat vide le mur")
+    check(not window.wall.empty.isHidden(), "et le mur le dit au lieu de rester noir")
+    window.controls.include.setText("")
+    pump(app, 0.8)
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.4)
+    check(all(p.player.playbackState() != p.player.PlaybackState.PlayingState
+              for p in window.wall.panes),
+          "quitter le mur arrête ses lecteurs")
 
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]

@@ -24,9 +24,12 @@ TAB_FOLDERS = "folders"
 TAB_VIDEOS = "videos"
 TAB_EDIT = "edit"
 TAB_TAGS = "tags"
+# Plusieurs videos verticales cote a cote : un ecran large en contient
+# trois, la ou une seule y laisse deux bandes noires.
+TAB_SPLIT = "split"
 # L'edition n'est plus un onglet mais l'etage du dessous : on y entre
 # en cliquant une carte, on en sort par Echap.
-TABS = (TAB_FOLDERS, TAB_VIDEOS, TAB_TAGS)
+TABS = (TAB_FOLDERS, TAB_VIDEOS, TAB_TAGS, TAB_SPLIT)
 
 # Conserves pour les appels existants : un onglet dit a la fois quoi et comment.
 CONTENT_FOLDERS = TAB_FOLDERS

@@ -84,6 +84,7 @@ QCheckBox#cardPick::indicator { width: 18px; height: 18px;
                                 border: 1px solid #6b7684; border-radius: 4px;
                                 background: rgba(8, 10, 13, 0.75); }
 QCheckBox#cardPick::indicator:checked { background: #2f6fed; border-color: #2f6fed; }
+QWidget#asideBar { background: rgba(8, 10, 13, 0.72); }
 QLabel#tileDuration { background: rgba(0,0,0,0.78); color: #ffffff;
                      border-radius: 5px; padding: 2px 8px;
                      font-size: 13px; font-weight: 700; }
@@ -152,7 +153,11 @@ class PreviewTile(QFrame):
         self.slot = slot
         self.video: str = ""
         self.ts: float = 0.0
-        self.setMinimumSize(190, 132)
+        # Cinq cases par rangee : un minimum genereux ici devient mille
+        # pixels exiges par la fenetre entiere, qui ne peut alors plus
+        # retrecir. Les cases s'etirent de toute facon pour occuper la
+        # place disponible.
+        self.setMinimumSize(120, 84)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.image = QLabel(self)
@@ -664,6 +669,7 @@ class SinglePlayer(QWidget):
             self.tiles.append(tile)
         strip.setFixedWidth(176)
         layout.addWidget(strip)
+        self.strip = strip
 
         self.audio = QAudioOutput(self)
         self.player = QMediaPlayer(self)
@@ -691,6 +697,10 @@ class SinglePlayer(QWidget):
         super().hideEvent(event)
         self.hover_timer.stop()
         self.stop()
+
+    def hide_strip(self) -> None:
+        """Retire la pellicule : tout l'espace revient a l'image."""
+        self.strip.hide()
 
     def set_muted(self, muted: bool) -> None:
         self.audio.setMuted(muted)

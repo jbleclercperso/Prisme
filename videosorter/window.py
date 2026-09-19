@@ -6,11 +6,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl, Qt
+from PySide6.QtCore import QSize, QTimer, QUrl, Qt
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
     QMainWindow, QMessageBox, QProgressBar, QProgressDialog, QPushButton,
-    QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
+    QLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import actions
@@ -20,7 +20,7 @@ from .actions import ActionError, HistoryEntry
 from .config import APP_DIR, Config
 from .header import (
     CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, TAB_FOLDERS,
-    TAB_TAGS, TAB_VIDEOS, TABS, VIEW_BROWSE, VIEW_EDIT, Breadcrumb, Chips,
+    TAB_SPLIT, TAB_TAGS, TAB_VIDEOS, TABS, VIEW_BROWSE, VIEW_EDIT, Breadcrumb, Chips,
     ControlBar, Segmented,
     build_overflow,
 )
@@ -28,6 +28,7 @@ from . import media
 from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
 from .tagging import MIN_BUCKET, build_tag_items, top_words
+from .split import DEFAULT_PANES, SplitWall
 from .scan import (
     MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, Item, RefreshThread,
     cached_items, detect_mode, human_duration, human_resolution, human_size,
@@ -197,6 +198,12 @@ class MainWindow(QMainWindow):
 
         sort_page = QWidget(self)
         layout = QVBoxLayout(sort_page)
+        # Sans cela, Qt additionne les largeurs minimales de tout ce que la
+        # page contient et en fait la largeur minimale de la fenetre : il a
+        # suffi une fois d'une etiquette un peu large pour la rendre
+        # impossible a retrecir, et tout debordait de l'ecran. La page se
+        # laisse desormais comprimer, quitte a rogner ce qu'elle montre.
+        layout.setSizeConstraint(QLayout.SetNoConstraint)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(12)
 
@@ -210,6 +217,11 @@ class MainWindow(QMainWindow):
         # sur quatre rangees.
         self.crumbs.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         header_row.addWidget(self.crumbs, 0)
+
+        # Ce qui se fabrique, dit en trois mots a cote du fil d'Ariane.
+        self.activity_label = QLabel("", sort_page)
+        self.activity_label.setObjectName("hint")
+        header_row.addWidget(self.activity_label)
 
         self.pending_label = QLabel("", sort_page)
         self.pending_label.setObjectName("pending")
@@ -290,6 +302,7 @@ class MainWindow(QMainWindow):
             (TAB_FOLDERS, "Dossiers", "Chaque dossier comme une carte"),
             (TAB_VIDEOS, "Vidéos", "Toutes les vidéos en vrac, au hasard"),
             (TAB_TAGS, "Mots-clés", "Les vidéos réunies par les mots de leurs noms"),
+            (TAB_SPLIT, "Mur", "Trois vidéos verticales à la fois"),
         ], sort_page)
         self.tabs.chosen.connect(self.set_tab)
         selectors.addWidget(self.tabs)
@@ -447,7 +460,11 @@ class MainWindow(QMainWindow):
         self.board.pageChanged.connect(self.on_board_page)
         self.viewer.addWidget(self.grid)
         self.viewer.addWidget(self.single)
+        self.wall = SplitWall(
+            DEFAULT_PANES, self.cfg["scroll_seconds"], self.viewer)
+        self.wall.opened.connect(self.open_video_path)
         self.viewer.addWidget(self.board)
+        self.viewer.addWidget(self.wall)
         middle.addWidget(self.viewer, 1)
 
         # Le lecteur de cote : on y envoie une video d'un clic droit, et la
@@ -456,28 +473,37 @@ class MainWindow(QMainWindow):
         self.aside = QWidget(sort_page)
         aside_box = QVBoxLayout(self.aside)
         aside_box.setContentsMargins(0, 0, 0, 0)
-        aside_box.setSpacing(6)
-        aside_bar = QHBoxLayout()
-        aside_bar.setContentsMargins(0, 0, 0, 0)
-        self.aside_title = QLabel("", self.aside)
+        aside_box.setSpacing(0)
+        self.aside_player = SinglePlayer(
+            self.cfg["thumb_count"], self.cfg["scroll_seconds"], self.aside)
+        # Pas de pellicule ici : on regarde, on ne cherche pas un passage. Elle
+        # volait de la largeur a l'image sans rien apporter.
+        self.aside_player.hide_strip()
+        aside_box.addWidget(self.aside_player, 1)
+
+        # Le bandeau se pose **sur** l'image, en bas, au lieu de la surmonter :
+        # une rangee de boutons au-dessus coutait quarante pixels de hauteur a
+        # chaque fois, et c'est la hauteur qui fait voir une video.
+        self.aside_bar = QWidget(self.aside_player.video_area)
+        self.aside_bar.setObjectName("asideBar")
+        bar_row = QHBoxLayout(self.aside_bar)
+        bar_row.setContentsMargins(10, 4, 6, 4)
+        bar_row.setSpacing(6)
+        self.aside_title = QLabel("", self.aside_bar)
         self.aside_title.setObjectName("parentPath")
         self.aside_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        aside_bar.addWidget(self.aside_title, 1)
+        bar_row.addWidget(self.aside_title, 1)
         for text, tip, slot in (
             ("◂", "Précédente", lambda: self.aside_step(-1)),
             ("▸", "Suivante", lambda: self.aside_step(1)),
             ("✕", "Fermer le lecteur", self.close_aside),
         ):
-            button = QPushButton(text, self.aside)
+            button = QPushButton(text, self.aside_bar)
             button.setFixedWidth(30)
             button.setToolTip(tip)
             button.setFocusPolicy(Qt.NoFocus)
             button.clicked.connect(slot)
-            aside_bar.addWidget(button)
-        aside_box.addLayout(aside_bar)
-        self.aside_player = SinglePlayer(
-            self.cfg["thumb_count"], self.cfg["scroll_seconds"], self.aside)
-        aside_box.addWidget(self.aside_player, 1)
+            bar_row.addWidget(button)
         self.aside.hide()
         self.aside_index = -1
         middle.addWidget(self.aside, 1)
@@ -633,7 +659,11 @@ class MainWindow(QMainWindow):
         # La barre d'avancement n'occupe l'ecran que tant qu'il n'y a rien a
         # regarder : une fois la liste affichee, la relecture se signale d'un
         # mot dans le compteur et ne vole plus la place aux vignettes.
-        self.progress.setRange(0, 0)
+        # Une barre indeterminee va et vient sans rien promettre : elle attire
+        # l'oeil en permanence pour ne rien apprendre. Elle reste donc fixe, et
+        # c'est son texte qui dit ce qui se passe.
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
         self.progress.setVisible(not self.items)
 
         if INDEX.rebuilt and not getattr(self, "_told_rebuild", False):
@@ -782,7 +812,8 @@ class MainWindow(QMainWindow):
         self.backfill.done.connect(self.on_backfill_done)
         self._backfill_started = time.monotonic()
         self.backfill.start()
-        self.progress.setRange(0, 0)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
         self.progress.setFormat("recensement des vidéos…")
         self.progress.show()
         self.show_banner(
@@ -791,18 +822,16 @@ class MainWindow(QMainWindow):
         )
 
     def _show_activity(self) -> None:
-        """Annonce le travail en cours, sans voler la place a l'analyse."""
+        """Dit ce qui se fabrique, en toutes lettres et sans barre qui ondule.
+
+        Une barre indeterminee va et vient sans rien promettre : elle attire
+        l'oeil en permanence pour ne rien apprendre. Un compte discret a cote du
+        fil d'Ariane suffit, et s'efface des qu'il n'y a plus rien a dire.
+        """
         if self.scanning or self.backfill is not None:
             return
         busy = self.preview.busy()
-        if busy:
-            self.progress.setRange(0, 0)
-            self.progress.setFormat(f"aperçus : {busy} en cours…")
-            self.progress.show()
-        elif self.progress.isVisible() and self.progress.maximum() == 0:
-            # On ne masque que notre propre annonce : une barre chiffree
-            # appartient a l'analyse ou a la preparation.
-            self.progress.hide()
+        self.activity_label.setText(f"⋯ {busy} aperçu(s)" if busy else "")
 
     def _name_backfill_action(self) -> None:
         """Rappelle, dans le menu, quand la preparation a ete menee a terme."""
@@ -818,7 +847,8 @@ class MainWindow(QMainWindow):
         """Le recensement dure : il dit ce qu'il trouve en chemin."""
         if self.scanning:
             return
-        self.progress.setRange(0, 0)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
         self.progress.setFormat(f"recensement : {found} vidéo(s) trouvée(s)…")
         self.progress.show()
 
@@ -1516,13 +1546,6 @@ class MainWindow(QMainWindow):
 
     def on_plan_ready(self, key: str, plan: list) -> None:
         self.plans[key] = plan
-        if key.startswith("aside@"):
-            if plan and not self.aside.isHidden():
-                self.aside_player.set_plan(plan)
-                for slot, entry in enumerate(plan):
-                    self.preview.request_thumb(key, slot, entry[0], entry[1],
-                                               urgent=False)
-            return
         if key.startswith("board@"):
             position = self._board_position_of(key)
             if position >= 0 and plan:
@@ -1565,10 +1588,6 @@ class MainWindow(QMainWindow):
             self.grid.set_info(slot, duration, height)
 
     def on_thumb_ready(self, key: str, slot: int, path: str) -> None:
-        if key.startswith("aside@"):
-            if not self.aside.isHidden():
-                self.aside_player.set_thumb(slot, path)
-            return
         if key.startswith("board@"):
             position = self._board_position_of(key)
             if position >= 0:
@@ -1797,6 +1816,49 @@ class MainWindow(QMainWindow):
         self._show_counts()
         return True
 
+    def vertical_pool(self) -> list:
+        """Les vidéos verticales connues, filtrées par la recherche en cours.
+
+        « Connues » veut dire : dont la résolution a déjà été relevée. On ne
+        sonde rien ici — mille sondages sur un partage réseau feraient attendre
+        plusieurs minutes pour remplir trois cadres. Le vivier s'étoffe de
+        lui-même à mesure qu'on parcourt les vignettes.
+        """
+        from .index import INDEX
+        terms = self._terms((self.criteria or {}).get(
+            "include", self.cfg["filter_include"]))
+        found = []
+        seen = set()
+        for video in self._videos_from_items():
+            key = str(video)
+            if key in seen:
+                continue
+            seen.add(key)
+            if terms and not any(term in key.lower() for term in terms):
+                continue
+            info = INDEX.probe(video)
+            if not info:
+                continue
+            width = info.get("width") or 0
+            height = info.get("height") or 0
+            if height > width > 0:
+                found.append(key)
+        return found
+
+    def show_wall(self) -> None:
+        """Remplit le mur avec ce que l'on connaît de vertical."""
+        self.viewer.setCurrentWidget(self.wall)
+        self.wall.set_pool(self.vertical_pool())
+        self.item_title.setText(f"{len(self.wall.pool)} vidéo(s) verticale(s)")
+
+    def open_video_path(self, path: str) -> None:
+        """Ouvre dans la fiche une vidéo désignée par son chemin."""
+        for position, item in enumerate(self.items):
+            if str(item.path) == path:
+                self.on_board_open(position)
+                return
+        self.open_external(path)
+
     def show_videos_tab(self) -> None:
         """Toutes les vidéos de la racine, sans relire le disque.
 
@@ -1849,6 +1911,8 @@ class MainWindow(QMainWindow):
         self.cfg["view"] = self.view
         self.cfg.save()
         self._release_media()
+        if tab != TAB_SPLIT:
+            self.wall.stop()
         self._apply_selectors()
 
         if self.root is None:
@@ -1864,6 +1928,12 @@ class MainWindow(QMainWindow):
         # sous-dossier ou l on se trouvait. Rester en place donnait un onglet
         # « Dossiers » qui montrait trois sous-dossiers au lieu de la racine.
         top = Path(self.levels[0]["root"]) if self.levels else self.root
+        if tab == TAB_SPLIT:
+            # Le mur ne change ni de dossier ni de mode : il regarde autrement
+            # ce que l'on a deja sous la main.
+            self.show_wall()
+            self.setFocus()
+            return
         mode = MODE_FLAT if tab == TAB_VIDEOS else MODE_FOLDERS
         if tab == TAB_VIDEOS:
             # Sans quoi les memes vidéos reviennent toujours en tete.
@@ -2043,13 +2113,25 @@ class MainWindow(QMainWindow):
         self.aside_title.setText(item.name)
         self.aside_title.setToolTip(str(item.path))
         self.aside.show()
+        self._place_aside_bar()
         self.aside_player.set_muted(self.cfg["muted"])
         self.aside_player.set_item(video)
-        key = f"aside@{item.item_id}"
-        self.preview.request_plan(
-            key, item.videos, SinglePlayer.STRIP_COUNT, page=0,
-            one_per_video=item.kind == MODE_FOLDERS,
-        )
+        # Aucun apercu n'est demande : le lecteur de cote n'a pas de pellicule,
+        # et fabriquer cinq images pour rien retardait celles de la planche.
+
+    def _place_aside_bar(self) -> None:
+        """Pose le bandeau au bas de l'image, sur toute sa largeur."""
+        area = self.aside_player.video_area.rect()
+        height = self.aside_bar.sizeHint().height()
+        self.aside_bar.setGeometry(0, max(0, area.height() - height),
+                                   area.width(), height)
+        self.aside_bar.raise_()
+        self.aside_bar.show()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self.aside.isHidden():
+            self._place_aside_bar()
 
     def aside_step(self, step: int) -> None:
         """Passe a la vignette voisine, dans l'ordre de la planche."""
@@ -2345,6 +2427,16 @@ class MainWindow(QMainWindow):
         return True
 
     def on_controls_changed(self) -> None:
+        if self.tab == TAB_SPLIT:
+            rules = self.controls.criteria()
+            self.criteria = rules
+            self.cfg["filter_include"] = rules["include"]
+            self.cfg.save()
+            self.show_wall()
+            return
+        return self._on_controls_changed()
+
+    def _on_controls_changed(self) -> None:
         """Un reglage a bouge : on refiltre, puis on reclasse."""
         rules = self.controls.criteria()
         self.criteria = rules
@@ -2828,6 +2920,19 @@ class MainWindow(QMainWindow):
         self.single.set_muted(muted)
         self._refresh_mute()
         self.show_banner("Son coupé" if muted else "Son activé", "#2a2f38")
+
+    def minimumSizeHint(self):
+        """Plafonne ce que la fenetre exige, quoi qu'en disent ses pieces.
+
+        Qt additionne les largeurs minimales de tout ce qu'elle contient, et il
+        a suffi une fois d'une etiquette un peu large pour rendre la fenetre
+        impossible a retrecir — tout debordait alors de l'ecran par la droite.
+        Plutot que de surveiller chaque piece a jamais, on pose la limite ici :
+        la fenetre peut toujours descendre a cette taille, quitte a rogner ce
+        qu'elle montre.
+        """
+        hint = super().minimumSizeHint()
+        return QSize(min(hint.width(), 1100), min(hint.height(), 620))
 
     def closeEvent(self, event):
         if self.backfill is not None:
