@@ -685,8 +685,17 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           f"une carte par élément ({len(window.board.items)})")
     visible = [c for c in window.board.cards if not c.isHidden()]
     check(len(visible) == len(window.items), "toutes les cartes sont affichées")
-    check(visible[0].name.text() != "", "chaque carte porte son nom")
-    check("vidéo" in visible[0].meta.text(), "et ses chiffres")
+    check(visible[0].meta.text() != "", "chaque carte porte son nom")
+    check(visible[0].meta.text().count("\n") == 0,
+          f"sur une seule ligne ({visible[0].meta.text()!r})")
+    check(not visible[0].duration_chip.isHidden(),
+          "le nombre de vidéos tient dans la pastille")
+    chip = visible[0].duration_chip
+    image = visible[0].image.geometry()
+    check(chip.y() > image.center().y(),
+          f"posée en bas de la vignette (y={chip.y()}, image {image.top()}"
+          f"–{image.bottom()})")
+    check(chip.x() > image.center().x(), "et à droite")
 
     ok = wait_for(app, lambda: any(c._pixmap for c in window.board.cards), 120)
     check(ok, "les images des cartes arrivent")
@@ -695,7 +704,10 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.ratings.set(window.items[0].path, 0)
     window.on_board_rate(0, 3)
     check(window.ratings.get(window.items[0].path) == 3, "on note depuis une carte")
-    check(window.board.cards[0].stars.value == 3, "l'étoile de la carte suit")
+    # La carte ne porte plus d'etoiles : elles doublaient la hauteur du texte
+    # sous chaque vignette. La note se relit sur la fiche.
+    check(not hasattr(window.board.cards[0], "stars"),
+          "la carte ne porte plus d'étoiles")
 
     # Un clic sur une carte de dossier ouvre, il ne déplace rien.
     before = str(window.root)
@@ -776,7 +788,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(window.cfg["board_columns"] == 6, "le choix est mémorisé")
 
     card = window.board.cards[0]
-    for child in (card.image, card.name, card.meta):
+    for child in (card.image, card.meta):
         check(child.testAttribute(Qt.WA_TransparentForMouseEvents),
               f"un clic traverse « {child.objectName() or 'image'} »")
     opened = []
@@ -1236,15 +1248,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "et le classement par défaut est le hasard")
     check(window.viewer.currentWidget() is window.board, "la planche est affichée")
 
-    window.set_tab(TAB_EDIT)
-    pump(app, 0.4)
-    check(not window.browsing, "l'onglet « Édition » montre un élément à la fois")
-    check(window.tabs.buttons[TAB_EDIT].property("chosen") == "true",
-          "annoncé lui aussi")
-    check(window.viewer.currentWidget() is not window.board,
-          "et la planche cède la place à la fiche")
-    check(window.content == CONTENT_VIDEOS,
-          "éditer ne change pas la collection regardée, seulement sa présentation")
+    check(TAB_EDIT not in window.tabs.buttons,
+          "l'édition n'est plus un onglet : on y entre en ouvrant un élément")
 
     # Un clic sur une carte ouvre cette carte-la, et pas une autre.
     window.set_tab(TAB_VIDEOS)

@@ -11,7 +11,7 @@ import random
 
 from PySide6.QtCore import QPoint, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QCursor, QPixmap
-from PySide6.QtMultimedia import QMediaPlayer
+from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
@@ -102,9 +102,20 @@ class BoardCard(QFrame):
     def _show_chip(self, text: str) -> None:
         self.duration_chip.setText(text)
         self.duration_chip.adjustSize()
-        self.duration_chip.move(self.width() - self.duration_chip.width() - 14, 14)
+        self._place_chip()
         self.duration_chip.raise_()
         self.duration_chip.show()
+
+    def _place_chip(self) -> None:
+        """En bas a droite de l'image, la ou elle ne cache rien d'utile.
+
+        En haut, elle tombait sur le sujet ; en bas, le coin d'une vignette est
+        presque toujours du decor.
+        """
+        chip = self.duration_chip
+        area = self.image.geometry()
+        chip.move(area.right() - chip.width() - 8,
+                  area.bottom() - chip.height() - 8)
 
     def set_item(self, item, stars: int) -> None:
         self.item = item
@@ -185,6 +196,8 @@ class BoardCard(QFrame):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._rescale()
+        if not self.duration_chip.isHidden():
+            self._place_chip()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -250,6 +263,14 @@ class BoardView(QWidget):
         # autant de travail et de bande passante réseau en moins par vignette.
         self.player = QMediaPlayer(self)
         self.player.setVideoOutput(self.video)
+        # Le widget video garde a l'ecran la derniere image affichee. En passant
+        # d'une carte a l'autre, on le deplacait puis on le montrait des que le
+        # media etait charge : pendant une fraction de seconde, la nouvelle
+        # vignette portait donc l'image de la precedente. On attend desormais
+        # qu'une image du nouveau media soit reellement arrivee, et on vide la
+        # surface entre-temps.
+        self._awaiting_frame = False
+        self.video.videoSink().videoFrameChanged.connect(self._on_frame)
         self.player.mediaStatusChanged.connect(self._on_status)
         self.player.positionChanged.connect(self._on_position)
         self.player.errorOccurred.connect(self._on_error)
@@ -505,7 +526,7 @@ class BoardView(QWidget):
             return
         if self.hovered != -1 and self.hovered < len(self.cards):
             self.cards[self.hovered].set_hovered(False)
-        self.video.hide()
+        self._blank()
         self.remaining.hide()
         self.hovered = found
         if found == -1:
@@ -514,10 +535,32 @@ class BoardView(QWidget):
         self.cards[found].set_hovered(True)
         self._play(found)
 
+    def _blank(self) -> None:
+        """Cache l'apercu et efface ce qu'il restait de l'image precedente."""
+        self._awaiting_frame = False
+        self.video.hide()
+        try:
+            self.video.videoSink().setVideoFrame(QVideoFrame())
+        except (RuntimeError, TypeError):
+            pass
+
+    def _on_frame(self, frame) -> None:
+        """Premiere image du media survole : c'est maintenant qu'on l'affiche."""
+        if not self._awaiting_frame or self.hovered == -1:
+            return
+        try:
+            valid = frame.isValid()
+        except (RuntimeError, AttributeError):
+            valid = True
+        if not valid:
+            return
+        self._awaiting_frame = False
+        self.video.show()
+
     def _play(self, position: int) -> None:
         card = self.cards[position]
         if not card.video or card.video in self.unplayable:
-            self.video.hide()
+            self._blank()
             return
         area = card.image
         origin = area.mapTo(self.canvas, QPoint(0, 0))
@@ -527,9 +570,9 @@ class BoardView(QWidget):
         self._segment_start = int(card.ts * 1000)
         self._pending_seek = self._segment_start
         url = QUrl.fromLocalFile(card.video)
+        self._awaiting_frame = True
         if self.player.source() == url:
             self.player.setPosition(self._segment_start)
-            self.video.show()
         else:
             self.player.setSource(url)
         self.player.play()
@@ -541,10 +584,9 @@ class BoardView(QWidget):
             if self._pending_seek:
                 self.player.setPosition(self._pending_seek)
                 self._pending_seek = 0
-            # L'image n'est devoilee qu'une fois prete : la vignette reste
-            # visible jusque-la, au lieu d'un rectangle noir.
-            if self.hovered != -1:
-                self.video.show()
+            # L'affichage n'a plus lieu ici : charge ne veut pas dire affiche,
+            # et montrer le widget a cet instant devoilait l'image du media
+            # precedent. C'est _on_frame qui decide.
         elif status == QMediaPlayer.MediaStatus.EndOfMedia:
             self.player.setPosition(self._segment_start)
             self.player.play()
@@ -572,12 +614,12 @@ class BoardView(QWidget):
     def _on_error(self, *_args) -> None:
         if 0 <= self.hovered < len(self.cards) and self.cards[self.hovered].video:
             self.unplayable.add(self.cards[self.hovered].video)
-        self.video.hide()
+        self._blank()
         self.player.stop()
 
     def stop(self) -> None:
         self.player.stop()
-        self.video.hide()
+        self._blank()
         self.remaining.hide()
         for card in self.cards:
             card.set_hovered(False)

@@ -9,7 +9,7 @@ from PySide6.QtCore import (
     QPoint, QPointF, QRect, QSize, QTimer, QUrl, Qt, Signal,
 )
 from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap, QPolygonF
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -327,6 +327,11 @@ class PreviewGrid(QWidget):
         # autant de travail et de bande passante réseau en moins par vignette.
         self.player = QMediaPlayer(self)
         self.player.setVideoOutput(self.video)
+        # « Charge » ne veut pas dire « affiche » : montrer le widget des la fin
+        # du chargement devoilait la derniere image du media precedent, le temps
+        # que la nouvelle soit rendue. On attend cette image-la.
+        self._awaiting_frame = False
+        self.video.videoSink().videoFrameChanged.connect(self._on_frame)
         self.player.mediaStatusChanged.connect(self._on_status)
         self.player.positionChanged.connect(self._on_position)
         self.player.errorOccurred.connect(self._on_error)
@@ -426,9 +431,10 @@ class PreviewGrid(QWidget):
         if self.hovered_slot != -1:
             self.tiles[self.hovered_slot].set_hovered(False)
             self.tiles[self.hovered_slot].show_duration()
-        # Masquer avant tout : sinon l'image de la case quittee reste affichee
-        # par-dessus la nouvelle, le temps que celle-ci se charge.
-        self.video.hide()
+        # Masquer avant tout, et effacer la surface : sinon l'image de la case
+        # quittee reste affichee par-dessus la nouvelle, le temps que celle-ci
+        # se charge.
+        self._blank()
         self.progress.hide()
         self.remaining.hide()
         self.hovered_slot = slot
@@ -442,13 +448,35 @@ class PreviewGrid(QWidget):
         self.hovered_slot = -1
         self.stop()
 
+    def _blank(self) -> None:
+        """Cache l'apercu et efface ce qu'il restait de l'image precedente."""
+        self._awaiting_frame = False
+        self.video.hide()
+        try:
+            self.video.videoSink().setVideoFrame(QVideoFrame())
+        except (RuntimeError, TypeError):
+            pass
+
+    def _on_frame(self, frame) -> None:
+        """Premiere image du nouvel extrait : c'est maintenant qu'on l'affiche."""
+        if not self._awaiting_frame or self.hovered_slot == -1:
+            return
+        try:
+            valid = frame.isValid()
+        except (RuntimeError, AttributeError):
+            valid = True
+        if not valid:
+            return
+        self._awaiting_frame = False
+        self.video.show()
+
     def _play_slot(self, slot: int) -> None:
         tile = self.tiles[slot]
         if not tile.video:
-            self.video.hide()
+            self._blank()
             return
         if tile.video in self.unplayable:
-            self.video.hide()
+            self._blank()
             return
 
         self.video.setGeometry(tile.geometry().adjusted(1, 1, -1, -19))
@@ -457,18 +485,16 @@ class PreviewGrid(QWidget):
         self._segment_start = int(tile.ts * 1000)
         self._pending_seek = self._segment_start
         url = QUrl.fromLocalFile(tile.video)
+        # Meme fichier ou non, le widget garde la derniere image rendue : celle
+        # d'un autre instant du meme extrait trompe autant que celle d'un autre
+        # fichier. Dans les deux cas on attend la nouvelle, la vignette prenant
+        # le relais jusque-la.
+        self._awaiting_frame = True
         if self.player.source() == url:
-            # Meme fichier : rien a charger, l'image est deja bonne.
             self.player.setPosition(self._segment_start)
-            self.player.play()
-            self.video.show()
         else:
-            # Fichier different : le widget garde la derniere image du precedent
-            # tant que le nouveau n'a pas rendu la sienne. On le masque jusque-la,
-            # la vignette prenant le relais.
-            self.video.hide()
             self.player.setSource(url)
-            self.player.play()
+        self.player.play()
 
     def _on_status(self, status) -> None:
         loaded = (QMediaPlayer.MediaStatus.LoadedMedia,
@@ -477,8 +503,7 @@ class PreviewGrid(QWidget):
             if self._pending_seek:
                 self.player.setPosition(self._pending_seek)
                 self._pending_seek = 0
-            if self.hovered_slot != -1:
-                self.video.show()
+            # L'affichage revient a _on_frame : ici, rien n'est encore rendu.
         elif status == QMediaPlayer.MediaStatus.EndOfMedia:
             self.player.setPosition(self._segment_start)
             self.player.play()
@@ -517,7 +542,7 @@ class PreviewGrid(QWidget):
             video = self.tiles[self.hovered_slot].video
             if video:
                 self.unplayable.add(video)
-        self.video.hide()
+        self._blank()
         self.player.stop()
 
     def wheelEvent(self, event):
@@ -538,7 +563,7 @@ class PreviewGrid(QWidget):
 
     def stop(self) -> None:
         self.player.stop()
-        self.video.hide()
+        self._blank()
         self.progress.hide()
         self.remaining.hide()
         for tile in self.tiles:
