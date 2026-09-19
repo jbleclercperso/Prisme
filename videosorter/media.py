@@ -197,14 +197,28 @@ def extract_thumb(video: Path, ts: float, width: int) -> Path | None:
             "-q:v", "4", "-y", str(out)]
     seek = ["-ss", f"{max(0.0, ts):.2f}"]
 
-    # Du plus rapide au plus sur : en-tete borne a l'endroit voulu, puis borne
-    # au debut, puis sans borne. La quasi-totalite des fichiers s'arretent au
-    # premier essai ; les rares recalcitrants coutent ce qu'ils coutaient avant.
-    attempts = [base + seek + ["-i", str(video)] + tail]
+    # Deux economies sur le premier essai, toutes deux payees en reseau :
+    #
+    # -noaccurate_seek : sans lui, ffmpeg se pose sur l'image cle qui precede
+    #   l'instant demande, puis decode tout ce qui suit jusqu'a tomber pile.
+    #   C'est parfois plusieurs secondes de video tirees du reseau pour une
+    #   vignette ou l'ecart ne se voit pas.
+    # -probesize / -analyzeduration : l'analyse d'en-tete par defaut lit
+    #   plusieurs megaoctets avant la premiere image. Deux suffisent ici.
+    #
+    # Du plus rapide au plus sur : image cle et en-tete abrege, puis seek exact
+    # et en-tete complet, puis sans borne du tout. La quasi-totalite des
+    # fichiers s'arretent au premier essai ; les rares recalcitrants coutent ce
+    # qu'ils coutaient avant.
+    quick = ["-noaccurate_seek", "-probesize", "2M", "-analyzeduration", "2M"]
+    attempts = [base + quick + seek + ["-i", str(video)] + tail]
     if ts > 0:
+        attempts.append(base + seek + ["-i", str(video)] + tail)
         # Certaines vidéos refusent le seek rapide, d'autres sont plus courtes
         # que l'instant demandé : on retombe sur la première image.
         attempts.append(base + ["-i", str(video)] + tail)
+    else:
+        attempts.append(base + seek + ["-i", str(video)] + tail)
 
     for cmd in attempts:
         code, _ = _run(cmd, timeout=25)
