@@ -111,7 +111,7 @@ def matches(term: str, path) -> bool:
     return fold(term) in fold(Path(path).name)
 
 
-def build_tag_items(tags: list, videos: list) -> list:
+def build_tag_items(tags: list, videos: list, minimum: int = 1) -> list:
     """Une catégorie par mot-clé, **chaque vidéo n'allant que dans une seule**.
 
     C'est tout l'écart avec la version précédente, qui rangeait une vidéo dans
@@ -124,6 +124,13 @@ def build_tag_items(tags: list, videos: list) -> list:
     Elles sortent de la plus fournie à la plus rare : c'est l'ordre dans lequel
     on veut les parcourir. La comparaison ignore casse et accents, « Été »,
     « ete » et « ETE » tombent dans la même.
+
+    `minimum` est le nombre de vidéos en dessous duquel une catégorie se dissout.
+    Il vaut un pour les mots que l'on a saisis soi-même : s'il n'y a qu'une seule
+    vidéo qui porte « montagne », c'est celle-là qu'on cherchait, et la faire
+    disparaître serait perdre ce qu'on venait d'écrire. Les mots tirés
+    automatiquement des noms de fichiers, eux, se dissolvent plus volontiers :
+    personne ne les a demandés, et une catégorie à une vidéo n'y range rien.
     """
     if not tags or not videos:
         return []
@@ -169,7 +176,7 @@ def build_tag_items(tags: list, videos: list) -> list:
             best = max(eligible, key=lambda needle: (counts[needle], len(needle)))
             buckets[best].append(Path(video))
         thin = {needle for needle, found in buckets.items()
-                if len(found) < MIN_BUCKET}
+                if len(found) < minimum}
         if not thin or len(thin) == len(active):
             break
         active -= thin

@@ -25,7 +25,7 @@ from .header import (
 from . import media
 from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
-from .tagging import build_tag_items, top_words
+from .tagging import MIN_BUCKET, build_tag_items, top_words
 from .scan import (
     MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, Item, RefreshThread,
     cached_items, detect_mode, human_duration, human_resolution, human_size,
@@ -1062,7 +1062,11 @@ class MainWindow(QMainWindow):
             self._show_counts()
             self.update_counter()
             return
-        found = build_tag_items(words, videos)
+        # Mes propres mots valent pour une seule video ; ceux tires des noms
+        # de fichiers doivent en reunir plusieurs pour meriter une categorie.
+        found = build_tag_items(
+            words, videos, 1 if self.tag_family == "mine" else MIN_BUCKET
+        )
         if not found:
             return
         # Dans son onglet, un mot-cle n'est pas un en-tete pose sur la liste des

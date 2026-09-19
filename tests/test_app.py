@@ -187,19 +187,28 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           f"la touche « {letter} » envoie bien vers sa destination")
 
     print("\n[15] Mode arborescence")
+    # L'arborescence ne montre que les dossiers de tete — ceux prefixes d'un
+    # « + ». Ce sont les seules destinations : chercher les bonnes parmi des
+    # centaines de dossiers ordinaires invitait a la faute.
+    shelf_dest = tri / "+archive"
+    shelf_dest.mkdir(exist_ok=True)
     window.cfg["tree_root"] = str(tri)
     window.toggle_tree(True)
+    window.tree.set_root(str(tri))
+    pump(app, 0.4)
     check(not window.tree.isHidden(), "panneau affiché")
     check(window.tree.root == str(tri), "arborescence enracinée sur le dossier de tri")
-    index = window.tree.model.index(str(tri / "2019"))
-    check(index.isValid(), "les sous-dossiers sont listés")
+    index = window.tree.model.index(str(shelf_dest))
+    check(index.isValid(), "les dossiers de tête sont listés")
+    check(not window.tree.model.index(str(tri / "2019")).isValid(),
+          "les dossiers ordinaires, non")
 
     window.show_item(first_untouched(window))
     name = window.current.name
     window.tree.view.clicked.emit(index)
     settle(app, window)
-    check((tri / "2019" / name).exists(),
-          f"un clic sur « 2019 » envoie « {name} » sans confirmation")
+    check((shelf_dest / name).exists(),
+          f"un clic sur « +archive » envoie « {name} » sans confirmation")
     window.toggle_tree(False)
     check(window.tree.isHidden(), "panneau masqué à la bascule")
 
@@ -438,9 +447,16 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     QTest.keyClick(window, Qt.Key_Down, Qt.ControlModifier)
     wait_for(app, lambda: not window.scanning and window.root == parent_item.path, 60)
     check(len(window.levels) == 1, "Ctrl+↓ entre aussi dans le dossier")
+    # Echap sort maintenant par etages : de la fiche aux vignettes, puis d'un
+    # niveau de dossier, puis seulement du tri. On n'a jamais l'impression de
+    # tout perdre d'un coup.
+    QTest.keyClick(window, Qt.Key_Escape)
+    pump(app, 0.4)
+    check(window.browsing, "Échap rend d'abord la planche")
+    check(window.root == parent_item.path, "sans quitter le dossier ouvert")
     QTest.keyClick(window, Qt.Key_Escape)
     ok = wait_for(app, lambda: not window.scanning and window.root == root, 60)
-    check(ok, "Échap remonte au lieu de quitter le tri")
+    check(ok, "le suivant remonte d'un niveau")
     check(window.stack.currentIndex() == 1, "on reste dans l'écran de tri")
     check(window.levels == [], "la pile de navigation est vidée")
     QTest.keyClick(window, Qt.Key_Escape)
@@ -709,26 +725,35 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(not hasattr(window.board.cards[0], "stars"),
           "la carte ne porte plus d'étoiles")
 
-    # Un clic sur une carte de dossier ouvre, il ne déplace rien.
+    # Un clic sur une carte descend a l'etage du dessous — sa fiche — sans
+    # changer de dossier ni rien deplacer. On entre dans le dossier depuis la
+    # fiche, par « Entrer » ou Ctrl+Bas.
     before = str(window.root)
     position = next(i for i, item in enumerate(window.items)
                     if item.kind == MODE_FOLDERS and Path(item.path).is_dir()
                     and not item.loose_only)
     opened_name = window.items[position].name
     window.on_board_open(position)
-    ok = wait_for(app, lambda: not window.scanning
-                  and window.root.name == opened_name, 60)
-    check(ok, f"un clic sur une carte ouvre le dossier ({opened_name})")
-    check((Path(before) / opened_name).exists(), "sans le déplacer")
+    pump(app, 0.5)
+    check(not window.browsing, f"un clic sur une carte ouvre sa fiche ({opened_name})")
+    check(window.current is not None and window.current.name == opened_name,
+          "celle de l'élément cliqué")
+    check(str(window.root) == before, "sans quitter le dossier courant")
+    check((Path(before) / opened_name).exists(), "ni rien déplacer")
+    window.toggle_board(True)
+    pump(app, 0.4)
 
     print("\n[30] L'arborescence navigue en planche, envoie en fiche")
     window.cfg["tree_root"] = str(tri)
     window.toggle_tree(True)
     window.toggle_board(True)
     pump(app, 0.3)
-    index = window.tree.model.index(str(tri / "2019"))
+    window.tree.set_root(str(tri))
+    pump(app, 0.4)
+    index = window.tree.model.index(str(tri / "+archive"))
     window.tree.view.clicked.emit(index)
-    ok = wait_for(app, lambda: not window.scanning and window.root.name == "2019", 60)
+    ok = wait_for(app, lambda: not window.scanning
+                  and window.root.name == "+archive", 60)
     check(ok, "en planche, un clic dans l'arbre ouvre le dossier visé")
     check(window.transfers.active == 0, "et ne déclenche aucun transfert")
     window.toggle_tree(False)
@@ -1092,11 +1117,14 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(len(loose_videos(shelf / "+beach")) == 2,
           "les vidéos en vrac d'un rayonnage sont repérées")
 
+    # Sans traversee, un rayonnage disparait de la liste : c'est une
+    # destination, l'endroit ou l'on range, pas quelque chose a ranger. Le
+    # laisser revenait a proposer de trier le rangement lui-meme.
     plain = list_entries(shelf, MODE_FOLDERS, True, False)
-    check(sorted(x.name for x in plain) == ["+beach", "+montagne", "dossier_normal"],
-          f"sans traversée, les rayonnages figurent tels quels ({[x.name for x in plain]})")
+    check(sorted(x.name for x in plain) == ["dossier_normal"],
+          f"sans traversée, les rayonnages s'effacent ({[x.name for x in plain]})")
 
-    opened = expand_parents(list_entries(shelf, MODE_FOLDERS, True, False))
+    opened = list_entries(shelf, MODE_FOLDERS, True, True)
     names = [x.name for x in opened]
     check("serie_a" in names and "serie_b" in names,
           f"traversés, ce sont leurs sous-dossiers qui apparaissent ({names})")
@@ -1387,6 +1415,12 @@ def main() -> int:
 
     # ------------------------------------------------------------- aperçus
     print("\n[2] Plans d'aperçus et vignettes")
+    # L'édition n'est plus un onglet : l'application s'ouvre sur la planche, et
+    # l'on descend à la fiche en ouvrant un élément. Ce sont les aperçus de la
+    # fiche que l'on éprouve ici, il faut donc commencer par y entrer.
+    window.toggle_board(False)
+    window.show_item([i.name for i in window.items].index("Anniversaire"))
+    pump(app, 0.5)
     ok = wait_for(app, lambda: len(window.plans) >= 3, 90)
     check(ok, f"plans calculés ({len(window.plans)} éléments)")
 
