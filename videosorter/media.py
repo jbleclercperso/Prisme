@@ -19,6 +19,7 @@ from PySide6.QtCore import (
 
 from .config import THUMB_DIR
 from .index import INDEX
+from .stamps import stamp_of
 
 # Évite une fenêtre console qui clignote à chaque appel ffmpeg sous Windows.
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -121,12 +122,13 @@ BLIND_START = 20.0
 
 
 def _stamp_of(path: Path) -> str:
-    """Taille et date : ce qui distingue deux versions d'un meme chemin."""
-    try:
-        st = path.stat()
-        return f"{int(st.st_mtime)}|{st.st_size}"
-    except OSError:
-        return ""
+    """Taille et date : ce qui distingue deux versions d'un meme chemin.
+
+    Deleguee a `stamps`, qui retient ce que l'analyse a deja lu : sans cela,
+    afficher une planche demandait une lecture reseau par carte, meme quand
+    toutes les vignettes etaient deja fabriquees.
+    """
+    return stamp_of(path)
 
 
 def probe(path: Path) -> dict:

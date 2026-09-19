@@ -69,8 +69,11 @@ def _forget(src: Path, target: Path) -> None:
     """Retire du cache les dossiers que ce deplacement va changer."""
     # Import tardif : l'index depend de modules qui dependent d'ici.
     from .index import INDEX
+    from .stamps import forget as forget_stamp
     for path in (Path(src).parent, Path(target).parent, Path(src)):
         INDEX.forget(path)
+    # Le fichier change de place : l'empreinte retenue pour lui ne vaut plus.
+    forget_stamp(src)
 
 
 def _relocate(src: Path, target: Path) -> None:

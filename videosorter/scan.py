@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from .config import VIDEO_EXTS
+from .stamps import remember as remember_stamp
 
 MODE_FOLDERS = "folders"   # les sous-dossiers, un par un
 MODE_FILES = "files"       # les videos posees directement dans la racine
@@ -236,6 +237,13 @@ def scan_folder(folder: Path) -> Item:
                 video_count += 1
                 if len(videos) < MAX_VIDEOS_PER_ITEM:
                     videos.append(entry.path)
+                    # L'enumeration vient de lire taille et date : les retenir
+                    # epargne autant de lectures reseau a l'affichage.
+                    try:
+                        st = entry.stat(follow_symlinks=False)
+                        remember_stamp(entry.path, st.st_size, st.st_mtime)
+                    except OSError:
+                        pass
 
     item.size = size
     item.file_count = file_count
