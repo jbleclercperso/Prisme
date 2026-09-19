@@ -21,14 +21,15 @@ from .header import (
     ControlBar, Segmented,
     build_overflow,
 )
-from .media import PreviewManager, Tools, page_count, probe
+from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
 from .tagging import build_tag_items, top_words
 from .scan import (
-    MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, Item, ScanThread,
-    detect_mode, human_duration, human_resolution, human_size, known_media,
-    list_entries, scan_file,
+    MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, Item, RefreshThread,
+    cached_items, detect_mode, human_duration, human_resolution, human_size,
+    known_media, list_entries, scan_file,
 )
+from .index import INDEX
 from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
@@ -140,7 +141,7 @@ class MainWindow(QMainWindow):
         self.criteria: dict = {}    # filtres chiffres de la planche
         self.history: list = []
         self.stats = {"moved": 0, "deleted": 0, "skipped": 0}
-        self.scan_thread: ScanThread | None = None
+        self.scan_thread: RefreshThread | None = None
         self.scanning = False
         # Pile des dossiers traverses, pour pouvoir remonter d'ou l'on vient.
         self.levels: list = []
@@ -400,6 +401,15 @@ class MainWindow(QMainWindow):
         self.banner_timer.setSingleShot(True)
         self.banner_timer.timeout.connect(self.banner.hide)
 
+        # La planche se rebatit au plus une fois par seconde : pendant une
+        # relecture qui corrige cinquante dossiers, la refaire a chaque paquet
+        # la ferait clignoter sans rien apprendre a personne.
+        self._board_dirty = False
+        self.board_timer = QTimer(self)
+        self.board_timer.setSingleShot(True)
+        self.board_timer.setInterval(1000)
+        self.board_timer.timeout.connect(self._flush_board)
+
     # ------------------------------------------------------------------
     # Racine et analyse
     # ------------------------------------------------------------------
@@ -411,7 +421,7 @@ class MainWindow(QMainWindow):
 
     def start_root(self, root: Path | None, mode: str = "",
                    reset_levels: bool = True, restore_id: str = "",
-                   use_cache: bool = True) -> None:
+                   force: bool = False) -> None:
         if root is None or not Path(root).is_dir():
             QMessageBox.warning(self, "Dossier introuvable", f"{root} n'existe plus.")
             return
@@ -436,16 +446,6 @@ class MainWindow(QMainWindow):
                 self.tab = (TAB_FOLDERS if self.content == CONTENT_FOLDERS
                             else TAB_VIDEOS)
         self.mode = mode or self.mode_for_content()
-        # Sans traverser les dossiers de tete : la question posee est « y a-t-il
-        # quelque chose ici », et la traversee, qui lit tout le reseau, ne la
-        # change pas. Elle bloquait l'ouverture une demi-minute avant que le
-        # moindre element ne s'affiche.
-        if self.mode == MODE_FOLDERS and not list_entries(
-                self.root, MODE_FOLDERS, self.cfg["skip_hidden"], False):
-            # Rien a parcourir en dossiers : on bascule sur les videos plutot
-            # que de presenter une liste vide sans explication.
-            self.mode = MODE_FLAT
-            self.content = CONTENT_VIDEOS
         self.all_items = []
         self.items = []
         self.plans = {}
@@ -453,6 +453,22 @@ class MainWindow(QMainWindow):
         self.index = 0
         self.stats = {"moved": 0, "deleted": 0, "skipped": 0}
         self.preview.cancel_all()
+
+        # Ce qu'on savait de cette racine, sans rien demander au disque. C'est
+        # tout le propos : l'ecran se remplit avant que la question « qu'y a-t-il
+        # ici » ne parte sur le reseau.
+        indexed = self.cfg["use_scan_cache"] and not force
+        known = cached_items(self.root, self.mode) if indexed else []
+        if not known and self.mode == MODE_FOLDERS and not list_entries(
+                self.root, MODE_FOLDERS, self.cfg["skip_hidden"], False):
+            # Racine inconnue et sans sous-dossier : on bascule sur les videos
+            # plutot que de presenter une liste vide sans explication. Sans
+            # traverser les dossiers de tete — la question posee est « y a-t-il
+            # quelque chose ici », et la traversee, qui lit tout le reseau, ne
+            # la change pas.
+            self.mode = MODE_FLAT
+            self.content = CONTENT_VIDEOS
+            known = cached_items(self.root, self.mode) if indexed else []
 
         self.preview.tune_for(self.root)
         self.trash.set_base(self.levels[0]["root"] if self.levels else self.root)
@@ -472,23 +488,55 @@ class MainWindow(QMainWindow):
         )
         if self.browsing:
             self.board.set_items([], self.ratings.get)
-        self.item_title.setText("Analyse en cours…")
-        self.item_subtitle.setText("")
-        self.progress.setRange(0, 0)
-        self.progress.show()
         self.stack.setCurrentIndex(PAGE_SORT)
         self.setFocus()
 
+        if known:
+            self._show_known(known, restore_id)
+        else:
+            self.item_title.setText("Analyse en cours…")
+            self.item_subtitle.setText("")
+        # La barre d'avancement n'occupe l'ecran que tant qu'il n'y a rien a
+        # regarder : une fois la liste affichee, la relecture se signale d'un
+        # mot dans le compteur et ne vole plus la place aux vignettes.
+        self.progress.setRange(0, 0)
+        self.progress.setVisible(not self.items)
+
         self.scanning = True
-        self.scan_thread = ScanThread(
+        self.scan_thread = RefreshThread(
             self.root, self.mode, self.cfg["skip_hidden"],
-            use_cache and self.cfg["use_scan_cache"],
-            self.cfg["expand_parents"], self,
+            self.cfg["use_scan_cache"], self.cfg["expand_parents"],
+            [item.item_id for item in self.all_items], force, self,
         )
         self.scan_thread.progress.connect(self.on_scan_progress)
-        self.scan_thread.items_ready.connect(self.on_items_ready)
+        self.scan_thread.patch.connect(self.on_patch)
         self.scan_thread.finished_scan.connect(self.on_scan_finished)
-        self.scan_thread.start()
+        # Sous la priorite normale : la reconciliation a tout son temps, les
+        # vignettes de ce qu'on regarde, non.
+        self.scan_thread.start(RefreshThread.LowPriority)
+
+    def _show_known(self, known: list, restore_id: str = "") -> None:
+        """Affiche d'emblee ce que l'index savait de cette racine."""
+        self.all_items = known
+        self.items = [item for item in known if self._matches(item)]
+        self.apply_sort()
+        if self.browsing:
+            self.refresh_board()
+        elif self.items:
+            target = 0
+            if restore_id:
+                for position, item in enumerate(self.items):
+                    if item.item_id == restore_id:
+                        target = position
+                        # Trouve : la consigne est honoree, on l'oublie. Sinon
+                        # on la garde, car l'element cherche est justement celui
+                        # que l'index ne connait plus — la relecture va le
+                        # republier, et c'est elle qui nous y posera.
+                        self._restore_id = ""
+                        break
+            self.show_item(target)
+        self._show_counts()
+        self.update_counter()
 
     def stop_scan(self) -> None:
         if self.scan_thread is not None:
@@ -546,7 +594,7 @@ class MainWindow(QMainWindow):
         if self.root is None:
             return
         self.show_banner("Réanalyse complète en cours…", "#22303f")
-        self.start_root(self.root, self.mode, reset_levels=False, use_cache=False)
+        self.start_root(self.root, self.mode, reset_levels=False, force=True)
 
     def toggle_mode(self) -> None:
         """Bascule entre dossiers et videos, comme le selecteur."""
@@ -647,25 +695,90 @@ class MainWindow(QMainWindow):
         )
         return True
 
-    def on_scan_progress(self, done: int, total: int, name: str) -> None:
+    def on_scan_progress(self, done: int, total: int) -> None:
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(done)
         if not self.items:
-            self.item_subtitle.setText(f"Analyse {done}/{total} — {name}")
+            self.item_subtitle.setText(f"Analyse {done}/{total}…")
 
-    def on_items_ready(self, batch: list) -> None:
-        """Encaisse un paquet d'éléments, avec une seule mise à jour d'affichage.
+    def on_patch(self, added: list, replaced: list, removed: list) -> None:
+        """Applique ce que la relecture a trouvé de différent, et rien d'autre.
 
-        Rafraîchir compteurs et planche à chaque élément coûtait plus cher que
-        l'analyse elle-même : sur six cents dossiers relus depuis le cache,
-        l'interface représentait l'essentiel du temps d'ouverture.
+        L'ancien moteur republiait la collection entière à chaque lancement :
+        même inchangée, elle était reconstruite dossier par dossier. Ici un
+        relancement sur une collection stable n'appelle simplement jamais cette
+        méthode — c'est le cas courant, et c'est ce qui rend l'ouverture immédiate.
         """
-        for item in batch:
+        if removed:
+            self._drop_items(removed)
+        if replaced:
+            self._replace_items(replaced)
+        for item in added:
             self.all_items.append(item)
             if self._matches(item):
                 self._accept_item(item)
+        if (added or removed) and self.browsing:
+            self._board_dirty = True
+        if self._board_dirty:
+            # Rebâtir la planche à chaque paquet la ferait clignoter : on le
+            # fait au plus une fois par seconde, quand la rafale est passée.
+            self.board_timer.start()
         self._show_counts()
         self.update_counter()
+
+    def _drop_items(self, removed: list) -> None:
+        """Retire les éléments que le disque ne porte plus."""
+        gone = set(removed)
+        current = self.current
+        self.all_items = [item for item in self.all_items if item.item_id not in gone]
+        self.items = [item for item in self.items if item.item_id not in gone]
+        if self.browsing:
+            self._board_dirty = True
+            return
+        if current is not None and current.item_id in gone:
+            self.index = min(self.index, max(0, len(self.items) - 1))
+            if self.items:
+                self.show_item(self.index)
+            else:
+                self._release_media()
+        elif current is not None:
+            # Rester sur le meme element, meme si des voisins ont disparu.
+            try:
+                self.index = self.items.index(current)
+            except ValueError:
+                self.index = min(self.index, max(0, len(self.items) - 1))
+
+    def _replace_items(self, fresh: list) -> None:
+        """Substitue les éléments relus, en gardant ce que la session a décidé."""
+        by_id = {item.item_id: item for item in fresh}
+        current = self.current
+        current_id = current.item_id if current is not None else ""
+        redraw = False
+        for holder in (self.all_items, self.items):
+            for position, old in enumerate(holder):
+                new = by_id.get(old.item_id)
+                if new is None:
+                    continue
+                # Une decision prise, ou un transfert encore en vol, survit a la
+                # relecture : le disque ne sait rien de ce que la session a fait.
+                new.status = old.status
+                new.status_detail = old.status_detail
+                new.info = old.info
+                holder[position] = new
+                if old.item_id == current_id and not redraw:
+                    redraw = [str(v) for v in old.videos] != [str(v) for v in new.videos]
+        if self.browsing:
+            self._board_dirty = True
+        elif redraw:
+            # Les apercus retenus portent l'ancienne composition du dossier.
+            self.plans = {key: plan for key, plan in self.plans.items()
+                          if not key.startswith(current_id + "@")}
+            self.show_item(self.index)
+
+    def _flush_board(self) -> None:
+        self._board_dirty = False
+        if self.browsing:
+            self.refresh_board()
 
     def _accept_item(self, item) -> None:
         first = not self.items
@@ -745,10 +858,10 @@ class MainWindow(QMainWindow):
         self._add_tag_items()
         self._show_counts()
         thread = self.scan_thread
-        if thread is not None and thread.reused:
+        if thread is not None and thread.rescanned:
             self.show_banner(
-                f"{thread.reused} dossier(s) relu(s) depuis l'analyse précédente, "
-                f"{thread.rescanned} réanalysé(s).   Ctrl+R pour tout revérifier.",
+                f"{thread.rescanned} élément(s) mis à jour, "
+                f"{thread.reused} inchangé(s).   Ctrl+R pour tout revérifier.",
                 "#22303f",
             )
         self.progress.setRange(0, max(1, total))
@@ -774,7 +887,9 @@ class MainWindow(QMainWindow):
 
     def update_counter(self) -> None:
         total = len(self.items)
-        suffix = " (analyse…)" if self.scanning else ""
+        # Le mot change de sens : ce n'est plus l'attente d'une liste, c'est
+        # une relecture qui tourne derriere une liste deja utilisable.
+        suffix = " (vérification…)" if self.scanning else ""
         hidden = len(self.all_items) - total
         if hidden > 0:
             suffix += f" · {hidden} filtrés"
@@ -806,16 +921,15 @@ class MainWindow(QMainWindow):
             parts = parts[:2] + ["…"] + parts[-3:]
         return "  ›  ".join(parts)
 
-    def show_item(self, index: int) -> None:
-        if not self.items:
-            return
-        self.index = max(0, min(index, len(self.items) - 1))
-        item = self.items[self.index]
-        self.update_counter()
-        self.commands.rebuild(
-            self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer")
-        )
+    def _describe(self, item) -> None:
+        """Titre et ligne d'informations de l'élément affiché.
 
+        Pour une vidéo, ce qu'on sait vient de l'index, en mémoire. L'ancienne
+        version lançait ici un ffprobe **depuis le fil de l'interface** : la
+        fenêtre restait figée le temps d'un aller-retour réseau, à chaque
+        élément. Ce qui manque encore arrive avec le plan d'aperçus, préparé en
+        tâche de fond, et la ligne se complète alors d'elle-même.
+        """
         if item.kind == MODE_FOLDERS:
             # Une icône devant le titre : on sait sans lire si l'on décide du
             # sort d'un dossier entier ou d'un seul fichier.
@@ -828,7 +942,7 @@ class MainWindow(QMainWindow):
             if item.subdir_count:
                 parts.append(f"{item.subdir_count} sous-dossier{'s' if item.subdir_count > 1 else ''}")
         else:
-            info = item.info or probe(item.path)
+            info = item.info or INDEX.probe(item.path) or {}
             item.info = info
             # La durée rejoint le titre : c'est ce qu'on veut savoir en premier
             # d'une vidéo, et la ligne d'informations est déjà chargée.
@@ -848,6 +962,18 @@ class MainWindow(QMainWindow):
         if item.mtime:
             parts.append("modifié le " + datetime.fromtimestamp(item.mtime).strftime("%d/%m/%Y"))
         self.item_subtitle.setText("   ·   ".join(parts))
+
+    def show_item(self, index: int) -> None:
+        if not self.items:
+            return
+        self.index = max(0, min(index, len(self.items) - 1))
+        item = self.items[self.index]
+        self.update_counter()
+        self.commands.rebuild(
+            self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer")
+        )
+
+        self._describe(item)
 
         self.stars.show()
         self.stars.set_value(self.ratings.get(item.path))
@@ -907,6 +1033,12 @@ class MainWindow(QMainWindow):
         return f"{item.item_id}@{page}"
 
     def _request_previews(self, item, current: bool, page: int | None = None) -> None:
+        """Demande les aperçus d'un élément. `current` le fait passer devant.
+
+        Les deux éléments suivants sont préparés d'avance, mais derrière : sans
+        cette distinction, leurs vingt vignettes occupaient les huit fils
+        pendant que la case qu'on regarde attendait son tour.
+        """
         if not item.videos or item.locked:
             return
         page = self.page_of(item) if page is None else page
@@ -916,12 +1048,13 @@ class MainWindow(QMainWindow):
             self.preview.request_plan(
                 key, item.videos, self.cfg["thumb_count"],
                 page=page, one_per_video=item.kind == MODE_FOLDERS,
+                urgent=current,
             )
             return
         if current:
             self._apply_plan(item, plan)
         for slot, entry in enumerate(plan):
-            self.preview.request_thumb(key, slot, entry[0], entry[1])
+            self.preview.request_thumb(key, slot, entry[0], entry[1], urgent=current)
 
     def _apply_plan(self, item, plan: list) -> None:
         viewer = self.grid if item.kind == MODE_FOLDERS else self.single
@@ -942,9 +1075,14 @@ class MainWindow(QMainWindow):
         current = self.current
         if current is not None and key == self._current_key():
             self._apply_plan(current, plan)
+            # Le sondage a eu lieu dans le fil du plan : la fiche se complete
+            # sans que l'interface ait attendu quoi que ce soit.
+            if current.kind != MODE_FOLDERS and not current.info:
+                self._describe(current)
             self._update_page_bar()
+        urgent = key == self._current_key()
         for slot, entry in enumerate(plan):
-            self.preview.request_thumb(key, slot, entry[0], entry[1])
+            self.preview.request_thumb(key, slot, entry[0], entry[1], urgent)
 
     def on_thumb_ready(self, key: str, slot: int, path: str) -> None:
         if key.startswith("board@"):
@@ -1007,13 +1145,11 @@ class MainWindow(QMainWindow):
     def apply_sort(self) -> None:
         """Reclasse la liste visible selon le mode choisi."""
         import random
-        from .media import PROBE_CACHE
 
         def duration_of(item):
             total = 0.0
             for video in item.videos[:8]:
-                info = PROBE_CACHE.get(Path(video))
-                total += (info or {}).get("duration", 0.0)
+                total += (INDEX.probe(video) or {}).get("duration", 0.0)
             return total
 
         if self.sort_mode == "random":
@@ -1047,10 +1183,8 @@ class MainWindow(QMainWindow):
         if not self.sort_mode:
             item.videos.sort(key=lambda path: str(path).lower())
             return
-        from .media import PROBE_CACHE
         def duration_of(path):
-            cached = PROBE_CACHE.get(Path(path))
-            return (cached or {}).get("duration", 0.0)
+            return (INDEX.probe(path) or {}).get("duration", 0.0)
         item.videos.sort(key=duration_of, reverse=self.sort_mode == "desc")
 
     def _show_counts(self) -> None:
@@ -1983,6 +2117,11 @@ class MainWindow(QMainWindow):
         self._flush_trash_on_close()
         self.preview.shutdown()
         self.ratings.flush()
+        # Tout ce que la relecture a appris est deja ecrit : il ne reste qu'a
+        # refermer. C'est l'inverse de l'ancien cache, qui n'ecrivait qu'a la
+        # fin d'une analyse complete et perdait tout des qu'on fermait avant.
+        INDEX.prune()
+        INDEX.close()
         self.cfg["window"] = {"w": self.width(), "h": self.height()}
         self.cfg.save()
         super().closeEvent(event)

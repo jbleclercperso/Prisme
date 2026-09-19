@@ -54,36 +54,44 @@ def measure(base: Path, label: str) -> float:
 
 
 def measure_with_cache(base: Path) -> None:
-    """Compare l'analyse complète et la relecture depuis le cache."""
-    from videosorter.scan_cache import CACHE, signature
+    """Compare l'analyse complète et la relecture depuis l'index."""
+    from videosorter.index import INDEX
+    from videosorter.scan import signature
 
     entries = vs_scan.list_entries(base, vs_scan.MODE_FOLDERS)
+    ids = [str(path) for path in entries]
 
-    CACHE.data = {}
+    INDEX.clear()
     start = time.perf_counter()
     for path in entries:
         item = vs_scan.scan_folder(path)
-        CACHE.put(item, signature(path))
+        INDEX.put_folder(item, signature(path))
+    INDEX.commit(force=True)
     cold = time.perf_counter() - start
     print(f"{'analyse complète':28s} {cold:7.2f} s")
 
+    # Le relancement ne demande plus rien au disque : une requête rend la
+    # collection entière, et seules les empreintes sont ensuite comparées.
     start = time.perf_counter()
-    reused = 0
-    for path in entries:
-        if CACHE.get(path, signature(path)) is not None:
-            reused += 1
-        else:
-            vs_scan.scan_folder(path)
+    known = INDEX.folders(ids)
+    restore = time.perf_counter() - start
+    print(f"{'restitution de l index':28s} {restore:7.3f} s   "
+          f"({len(known)}/{len(entries)} éléments, sans lecture disque)")
+
+    start = time.perf_counter()
+    stored = INDEX.signatures(ids)
+    reused = sum(1 for path in entries if stored.get(str(path)) == signature(path))
     warm = time.perf_counter() - start
-    print(f"{'relecture depuis le cache':28s} {warm:7.2f} s   "
-          f"({reused}/{len(entries)} réutilisés, {cold / max(warm, 1e-6):.0f}× plus rapide)")
+    print(f"{'vérification des dates':28s} {warm:7.2f} s   "
+          f"({reused}/{len(entries)} inchangés, {cold / max(warm, 1e-6):.0f}× "
+          f"plus rapide que l analyse)")
 
     # Un fichier ajouté au deuxième niveau doit invalider son dossier.
     victim = entries[0]
     target = next((p for p in victim.iterdir() if p.is_dir()), victim)
     (target / "nouveau.mp4").touch()
-    fresh = CACHE.get(victim, signature(victim))
-    print(f"{'modification détectée':28s} {'oui' if fresh is None else 'NON'}")
+    changed = INDEX.signatures([str(victim)]).get(str(victim)) != signature(victim)
+    print(f"{'modification détectée':28s} {'oui' if changed else 'NON'}")
     (target / "nouveau.mp4").unlink()
 
 

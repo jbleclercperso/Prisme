@@ -9,6 +9,8 @@ APP_NAME = "VideoSorter"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / APP_NAME
 CONFIG_PATH = APP_DIR / "config.json"
 THUMB_DIR = APP_DIR / "thumbs"
+INDEX_PATH = APP_DIR / "index.db"
+# Anciens caches JSON, repris puis effaces par l'index au premier lancement.
 PROBE_CACHE_PATH = APP_DIR / "probe-cache.json"
 SCAN_CACHE_PATH = APP_DIR / "scan-cache.json"
 RATINGS_PATH = APP_DIR / "ratings.json"

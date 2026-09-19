@@ -92,12 +92,12 @@ def known_media(item) -> tuple:
     regardées pour un aperçu. Les filtres chiffrés s'appuient donc sur ce qu'on
     sait, et laissent passer ce dont on ne sait rien plutôt que de le masquer.
     """
-    from .media import PROBE_CACHE
+    from .index import INDEX
     total = 0.0
     height = 0
     known = 0
     for video in item.videos:
-        info = PROBE_CACHE.get(Path(video))
+        info = INDEX.probe(video)
         if not info:
             continue
         known += 1
@@ -246,8 +246,17 @@ def scan_folder(folder: Path) -> Item:
     return item
 
 
-def scan_file(path: Path) -> Item:
+def scan_file(path: Path, stat_pair=None) -> Item:
+    """Un element pour cette video.
+
+    `stat_pair`, quand on l'a, est le (taille, date) deja rapporte par
+    l'enumeration du dossier : redemander au disque ce qu'il vient de dire
+    coutait une lecture reseau par video, soit des milliers en vue a plat.
+    """
     item = Item(path=path, kind=MODE_FILES, file_count=1, video_count=1, videos=[path])
+    if stat_pair:
+        item.size, item.mtime = stat_pair
+        return item
     try:
         st = path.stat()
         item.size = st.st_size
@@ -255,6 +264,11 @@ def scan_file(path: Path) -> Item:
     except OSError:
         pass
     return item
+
+
+def file_signature(item) -> str:
+    """Empreinte d'une video : sa taille et sa date. Elle ne bouge qu'a l'edition."""
+    return f"{item.size}|{int(item.mtime)}"
 
 
 def scan_loose(folder: Path, skip_hidden: bool = True) -> Item:
@@ -288,11 +302,16 @@ def detect_mode(root: Path, skip_hidden: bool = True) -> str:
     return MODE_FILES
 
 
-def list_all_videos(root: Path, skip_hidden: bool = True, limit: int = 50000) -> list:
+def list_all_videos(root: Path, skip_hidden: bool = True, limit: int = 50000,
+                    stamps: dict | None = None) -> list:
     """Toutes les vidéos de l'arborescence, à plat, quel que soit leur dossier.
 
     C'est la vue qu'on veut pour chercher par nom dans toute une collection :
     les dossiers n'y sont qu'un détail de rangement.
+
+    `stamps`, s'il est fourni, recueille au passage le (taille, date) de chaque
+    vidéo : l'énumération les rapporte déjà, les redemander ensuite ferait une
+    lecture réseau par fichier.
     """
     found = []
     stack = [str(root)]
@@ -315,6 +334,12 @@ def list_all_videos(root: Path, skip_hidden: bool = True, limit: int = 50000) ->
                 if skip_hidden and _is_hidden(entry):
                     continue
                 found.append(entry.path)
+                if stamps is not None:
+                    try:
+                        st = entry.stat(follow_symlinks=False)
+                        stamps[entry.path] = (st.st_size, st.st_mtime)
+                    except OSError:
+                        pass
                 if len(found) >= limit:
                     break
     found.sort(key=str.lower)
@@ -363,7 +388,7 @@ def expand_parents(entries: list, skip_hidden: bool = True,
             continue
 
         own = (stamps or {}).get(str(path), 0)
-        known = cache.get_expansion(path, own) if cache is not None else None
+        known = cache.expansion(path, own) if cache is not None else None
         if known is not None:
             # Le rayonnage n'a pas bouge : sa composition est connue, inutile de
             # redemander au reseau ce qu'on a deja note.
@@ -423,7 +448,7 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
     par dossier pour savoir s'il a bougé.
     """
     if mode == MODE_FLAT:
-        return list_all_videos(root, skip_hidden)
+        return list_all_videos(root, skip_hidden, stamps=stamps)
     entries = []
     try:
         for entry in sorted(os.scandir(root), key=lambda e: e.name.lower()):
@@ -437,6 +462,12 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
                 dot = entry.name.rfind(".")
                 if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
                     entries.append(Path(entry.path))
+                    if stamps is not None:
+                        try:
+                            st = entry.stat(follow_symlinks=False)
+                            stamps[entry.path] = (st.st_size, st.st_mtime)
+                        except OSError:
+                            pass
     except OSError:
         pass
     if mode == MODE_FOLDERS and expand_parent_folders:
@@ -444,90 +475,274 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
     return entries
 
 
-class ScanThread(QThread):
-    """Analyse la racine en tâche de fond, en publiant les éléments au fil de l'eau."""
 
-    progress = Signal(int, int, str)   # fait, total, nom courant
+
+def signature(folder: Path, stamp: int | None = None) -> str:
+    """Empreinte d'un dossier : sa date de modification, ou "" s'il est illisible.
+
+    Lue en nanosecondes : arrondies à la seconde, deux modifications rapprochées
+    donneraient la même empreinte et la seconde passerait inaperçue.
+
+    `stamp` est la date déjà relevée en énumérant le dossier parent. Quand on
+    l'a, on s'en sert : la redemander coûte un aller-retour réseau par dossier.
+
+    Elle couvre ce qui compte ici — un fichier ajouté, retiré ou renommé dans le
+    dossier, ce que fait l'application elle-même en rangeant. Un changement
+    survenu plus profond passe inaperçu jusqu'à une relecture forcée (Ctrl+R).
+    """
+    if stamp:
+        return str(stamp)
+    try:
+        return str(folder.stat().st_mtime_ns)
+    except OSError:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Le moteur, en deux temps
+#
+# 1. `cached_items` rend instantanement ce qu'on savait de cette racine au
+#    dernier passage. Aucun acces disque : la liste est a l'ecran avant que
+#    l'oeil ait fini de s'y poser.
+# 2. `RefreshThread` relit le disque derriere, compare, et ne publie que les
+#    differences. Un dossier qui n'a pas bouge ne coute rien : ni parcours, ni
+#    signal, ni repeinte.
+#
+# L'ancien moteur faisait les deux d'un bloc, avant tout affichage, et
+# n'enregistrait son travail qu'a la toute fin : une analyse interrompue —
+# fermer la fenetre, entrer dans un dossier, changer d'onglet — jetait tout, si
+# bien que chaque lancement repayait le parcours complet.
+# ---------------------------------------------------------------------------
+
+
+def item_id_for(path: Path, mode: str, expand: bool) -> str:
+    """Identifiant d'un element, deduit de son chemin sans rien lire."""
+    if mode == MODE_FOLDERS and expand and is_parent_folder(path):
+        return f"{path}|vrac"
+    return str(path)
+
+
+def cached_items(root: Path, mode: str) -> list:
+    """Ce qu'on savait de cette racine, sans toucher au disque.
+
+    Rend la liste telle qu'elle etait au dernier passage, dans l'ordre. Ce qui a
+    bouge depuis sera corrige par la reconciliation ; presenter d'abord une
+    collection presque juste vaut mieux que de n'en presenter aucune pendant
+    une minute et demie.
+    """
+    from .index import INDEX
+    ids = INDEX.listing(root, mode)
+    if not ids:
+        return []
+    known = INDEX.folders(ids)
+    return [known[key] for key in ids if key in known]
+
+
+class RefreshThread(QThread):
+    """Relit le disque en tache de fond et ne publie que ce qui a change."""
+
+    progress = Signal(int, int)            # verifies, total
+    # ajoutes [Item], remplaces [Item], retires [item_id]
+    patch = Signal(list, list, list)
+    finished_scan = Signal(str, int)       # mode, total
+
     # Les elements partent par paquets : une mise a jour d'interface par
     # element coutait plus cher que l'analyse elle-meme sur un gros dossier.
-    items_ready = Signal(list)
-    finished_scan = Signal(str, int)   # mode, total
-
     BATCH_SIZE = 40
-    BATCH_DELAY = 0.12                 # secondes
+    BATCH_DELAY = 0.12                     # secondes
 
     def __init__(self, root: Path, mode: str = "", skip_hidden: bool = True,
-                 use_cache: bool = True, expand_parents: bool = False, parent=None):
+                 use_cache: bool = True, expand_parents: bool = False,
+                 known_ids: list | None = None, force: bool = False,
+                 parent=None):
         super().__init__(parent)
         self.root = Path(root)
         self.mode = mode
         self.skip_hidden = skip_hidden
         self.use_cache = use_cache
+        # Ctrl+R : tout reparcourir sans se fier aux empreintes — mais en
+        # reecrivant l'index au passage. L'ancienne version le court-circuitait
+        # aussi en ecriture, si bien qu'une relecture forcee laissait la
+        # collection aussi inconnue qu'avant.
+        self.force = force
         self.expand_parents = expand_parents
-        self.reused = 0        # dossiers relus depuis le cache
-        self.rescanned = 0     # dossiers qu il a fallu reparcourir
+        # Ce que la fenetre affiche deja : tout le reste est une nouveaute.
+        self.known_ids = list(known_ids or [])
+        self.reused = 0        # elements laisses tels quels
+        self.rescanned = 0     # elements qu il a fallu reparcourir
         self._stop = False
 
     def stop(self) -> None:
         self._stop = True
 
-    def run(self) -> None:
-        # Import tardif : le cache depend de ce module, l importer en tete
-        # creerait un cycle.
-        from .scan_cache import CACHE, signature
+    def _workers(self) -> int:
+        """Combien de dossiers parcourir de front.
 
+        Le parcours attend le disque, pas le processeur : sur un partage reseau,
+        huit attentes simultanees coutent a peu pres le temps d'une seule. C'est
+        ce qui ramene un premier inventaire de six cents dossiers de
+        quatre-vingts secondes a une dizaine.
+        """
+        from .media import is_network_path
+        if is_network_path(self.root):
+            return 8
+        return max(2, min(6, os.cpu_count() or 4))
+
+    def _signature_of(self, path: Path, key: str, mode: str, stamps) -> str:
+        if mode != MODE_FOLDERS:
+            pair = stamps.get(str(path)) if stamps else None
+            return f"{pair[0]}|{int(pair[1])}" if pair else ""
+        if not self.use_cache:
+            return ""
+        return signature(path, stamps.get(str(path)) if stamps else None)
+
+    def run(self) -> None:
         import time as _time
+        from concurrent.futures import ThreadPoolExecutor
+
+        from .index import INDEX
 
         mode = self.mode or detect_mode(self.root, self.skip_hidden)
         # Les dates relevees pendant l'enumeration evitent, plus bas, une lecture
-        # reseau par dossier : sur le NAS de mesure, 79 ms chacune.
-        stamps: dict = {} if _stamps_are_trustworthy(self.root) else None
+        # reseau par element. Pour un fichier elles sont toujours exactes ; pour
+        # un repertoire, NTFS les laisse retarder, on ne s'y fie donc que sur un
+        # volume reseau, dont le serveur les tient a jour.
+        if mode == MODE_FOLDERS:
+            stamps = {} if _stamps_are_trustworthy(self.root) else None
+        else:
+            stamps = {}
         paths = list_entries(self.root, mode, self.skip_hidden,
                              self.expand_parents, stamps,
-                             CACHE if self.use_cache else None)
+                             None if self.force or not self.use_cache else INDEX)
+        if self._stop:
+            INDEX.commit(force=True)
+            return
+
+        ids = [item_id_for(path, mode, self.expand_parents) for path in paths]
         total = len(paths)
-        batch: list = []
-        last_flush = _time.monotonic()
+        if self.use_cache:
+            # La composition de la racine est notee tout de suite, avant meme de
+            # verifier quoi que ce soit. Attendre la fin aurait reproduit le
+            # defaut qu'on corrige : un premier inventaire interrompu aurait
+            # garde ses dossiers sans que rien ne sache plus qu'ils forment
+            # cette racine, et le lancement suivant serait reparti de zero.
+            INDEX.put_listing(self.root, mode, ids)
 
-        last_progress = 0.0
-        for index, path in enumerate(paths, start=1):
+        # Ce que la liste affichee porte encore alors que le disque ne le porte
+        # plus : on le retire avant meme de verifier le reste. Un dossier disparu
+        # n'a pas a rester une minute a l'ecran.
+        present = set(ids)
+        gone = [key for key in self.known_ids if key not in present]
+        if gone:
+            self.patch.emit([], [], gone)
+        shown = set(self.known_ids) - set(gone)
+
+        known_sigs = {} if self.force or not self.use_cache else INDEX.signatures(ids)
+
+        # Premier tri, sans rien lire : qui peut rester en l'etat, qui doit etre
+        # reparcouru. C'est ici que se joue la fluidite d'un relancement — sur
+        # une collection qui n'a pas bouge, `todo` est vide et il ne se passe
+        # tout simplement rien.
+        todo = []          # (chemin, id, empreinte) a reparcourir
+        recall = set()     # connus de l'index, mais pas encore affiches
+        for path, key in zip(paths, ids):
+            sig = self._signature_of(path, key, mode, stamps)
+            if sig and known_sigs.get(key) == sig:
+                self.reused += 1
+                if key not in shown:
+                    recall.add(key)
+                continue
+            todo.append((path, key, sig))
+
+        # Ce qui n'a pas bouge mais n'etait pas affiche : l'index le rend sans
+        # aucune lecture disque.
+        if recall and not self._stop:
+            # L'ordre de la racine prime sur celui de la table : on republie
+            # dans la suite ou l'on trie, pas dans celle ou SQLite a repondu.
+            wanted = [key for key in ids if key in recall]
+            found = INDEX.folders(wanted)
+            fresh = [found[key] for key in wanted if key in found]
+            for start in range(0, len(fresh), self.BATCH_SIZE):
+                batch = fresh[start:start + self.BATCH_SIZE]
+                self.patch.emit(batch, [], [])
+                shown.update(item.item_id for item in batch)
+            # Celui que l'index ne sait plus rendre se reparcourt.
+            for path, key in zip(paths, ids):
+                if key in recall and key not in found:
+                    todo.append((path, key,
+                                 self._signature_of(path, key, mode, stamps)))
+
+        done = total - len(todo)
+        self.progress.emit(done, total)
+
+        def work(entry):
+            path, _key, _sig = entry
             if self._stop:
-                return
-            # L'avancement est annonce au rythme de l'oeil, pas du disque :
-            # un signal par element repeignait la barre six cents fois.
-            now_progress = _time.monotonic()
-            if now_progress - last_progress >= 0.10 or index == total:
-                self.progress.emit(index, total, path.name)
-                last_progress = now_progress
-
+                return None
             if mode != MODE_FOLDERS:
-                item = scan_file(path)
-            elif self.expand_parents and is_parent_folder(path):
-                item = scan_loose(path, self.skip_hidden)
-            else:
-                stamp = stamps.get(str(path)) if stamps else None
-                sig = signature(path, stamp) if self.use_cache else ""
-                item = CACHE.get(path, sig) if sig else None
-                if item is None:
-                    item = scan_folder(path)
-                    CACHE.put(item, sig or signature(path, stamp))
+                return scan_file(path, stamps.get(str(path)) if stamps else None)
+            if self.expand_parents and is_parent_folder(path):
+                return scan_loose(path, self.skip_hidden)
+            return scan_folder(path)
+
+        added: list = []
+        replaced: list = []
+        last_flush = _time.monotonic()
+        last_progress = 0.0
+
+        def flush() -> None:
+            nonlocal added, replaced, last_flush
+            if added or replaced:
+                self.patch.emit(added, replaced, [])
+                added, replaced = [], []
+            last_flush = _time.monotonic()
+
+        stopped = False
+        if todo:
+            pool = ThreadPoolExecutor(max_workers=self._workers())
+            try:
+                for entry, item in zip(todo, pool.map(work, todo)):
+                    if self._stop or item is None:
+                        stopped = True
+                        break
+                    key, sig = entry[1], entry[2]
+                    done += 1
                     self.rescanned += 1
-                else:
-                    self.reused += 1
+                    if self.use_cache:
+                        stored = sig or (signature(Path(item.path))
+                                         if mode == MODE_FOLDERS
+                                         else file_signature(item))
+                        INDEX.put_folder(item, stored)
+                    if key in shown:
+                        replaced.append(item)
+                    else:
+                        added.append(item)
+                        shown.add(key)
 
-            if self._stop:
-                return
-            batch.append(item)
-            # Le premier element part seul : on veut pouvoir trier tout de suite,
-            # sans attendre que le paquet se remplisse.
-            now = _time.monotonic()
-            if (len(batch) >= self.BATCH_SIZE or index == 1
-                    or now - last_flush >= self.BATCH_DELAY):
-                self.items_ready.emit(batch)
-                batch = []
-                last_flush = now
+                    # L'avancement est annonce au rythme de l'oeil, pas du
+                    # disque : un signal par element repeignait la barre six
+                    # cents fois.
+                    now = _time.monotonic()
+                    if now - last_progress >= 0.10 or done == total:
+                        self.progress.emit(done, total)
+                        last_progress = now
+                    # Le premier element part seul : on veut pouvoir trier tout
+                    # de suite, sans attendre que le paquet se remplisse.
+                    if (len(added) + len(replaced) >= self.BATCH_SIZE
+                            or done == 1 or now - last_flush >= self.BATCH_DELAY):
+                        flush()
+            finally:
+                # Sans `cancel_futures`, sortir du bloc attendrait les six cents
+                # parcours deja soumis : fermer la fenetre prendrait une minute.
+                pool.shutdown(wait=False, cancel_futures=True)
 
-        if batch and not self._stop:
-            self.items_ready.emit(batch)
-        CACHE.flush()
+        if stopped or self._stop:
+            # L'index garde ce qui a ete appris avant l'arret : c'est tout
+            # l'interet d'ecrire au fil de l'eau plutot qu'a la fin.
+            INDEX.commit(force=True)
+            return
+
+        flush()
+        INDEX.commit(force=True)
+        self.progress.emit(total, total)
         self.finished_scan.emit(mode, total)

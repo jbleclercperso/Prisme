@@ -67,10 +67,10 @@ def retry(func, *args, attempts: int = 4, delay: float = 0.12):
 
 def _forget(src: Path, target: Path) -> None:
     """Retire du cache les dossiers que ce deplacement va changer."""
-    # Import tardif : le cache d'analyse depend de modules qui dependent d'ici.
-    from .scan_cache import CACHE
+    # Import tardif : l'index depend de modules qui dependent d'ici.
+    from .index import INDEX
     for path in (Path(src).parent, Path(target).parent, Path(src)):
-        CACHE.forget(path)
+        INDEX.forget(path)
 
 
 def _relocate(src: Path, target: Path) -> None:

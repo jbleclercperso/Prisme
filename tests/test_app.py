@@ -467,18 +467,19 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     wait_for(app, lambda: not window.scanning and window.root.name == "Sous-dossiers", 60)
     check(len(window.levels) == 1, "Ctrl+↑ remonte d'un seul niveau")
 
-    print("\n[24] Cache d'analyse")
-    from videosorter.scan_cache import CACHE, signature
+    print("\n[24] Index d'analyse")
+    from videosorter.index import INDEX
+    from videosorter.scan import signature
 
-    CACHE.data = {}
+    INDEX.clear()
     window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
     first_pass = window.scan_thread
     check(first_pass.reused == 0, "premier passage : rien à réutiliser")
     check(first_pass.rescanned == len(window.all_items),
           f"tout est analysé ({first_pass.rescanned})")
-    check(len(CACHE.data) == len(window.all_items),
-          f"chaque dossier est mémorisé ({len(CACHE.data)})")
+    check(INDEX.count_folders() == len(window.all_items),
+          f"chaque dossier est mémorisé ({INDEX.count_folders()})")
     reference = {i.name: (i.size, i.file_count, i.video_count) for i in window.all_items}
 
     window.start_root(root, MODE_FOLDERS)
@@ -1024,18 +1025,36 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.toggle_board(False)
     pump(app, 0.3)
 
-    print("\n[44] L'analyse livre par paquets")
-    from videosorter.scan import ScanThread
-    check(ScanThread.BATCH_SIZE > 1,
-          f"les éléments partent groupés ({ScanThread.BATCH_SIZE} par paquet)")
+    print("\n[44] La relecture livre par paquets, et rien que les différences")
+    from videosorter.index import INDEX as _INDEX
+    from videosorter.scan import RefreshThread
+    check(RefreshThread.BATCH_SIZE > 1,
+          f"les éléments partent groupés ({RefreshThread.BATCH_SIZE} par paquet)")
+    _INDEX.clear()
     batches = []
     window.start_root(root, MODE_FOLDERS)
-    window.scan_thread.items_ready.connect(lambda b: batches.append(len(b)))
+    window.scan_thread.patch.connect(
+        lambda a, r, g: batches.append((len(a), len(r), len(g))))
     wait_for(app, lambda: not window.scanning and len(window.all_items) >= 3, 60)
     pump(app, 0.3)
-    check(sum(batches) >= 1, f"des paquets ont bien été reçus ({batches})")
+    check(sum(added for added, _, _ in batches) >= 3,
+          f"des paquets ont bien été reçus ({batches})")
     check(len(window.all_items) >= 3,
           f"et tous les éléments sont arrivés ({len(window.all_items)})")
+
+    # Le relancement est le cas qui comptait : rien n'a bougé, donc rien n'est
+    # republié — la liste est à l'écran avant même que la relecture commence.
+    quiet = []
+    shown = len(window.all_items)
+    window.start_root(root, MODE_FOLDERS)
+    check(len(window.all_items) == shown,
+          f"la liste s'affiche d'emblée, sans attendre le disque "
+          f"({len(window.all_items)})")
+    window.scan_thread.patch.connect(
+        lambda a, r, g: quiet.append((len(a), len(r), len(g))))
+    wait_for(app, lambda: not window.scanning, 60)
+    pump(app, 0.3)
+    check(quiet == [], f"et la relecture n'a rien eu à corriger ({quiet})")
 
     print("\n[45] Les dossiers de tete se traversent")
     from videosorter.scan import (
@@ -1326,9 +1345,8 @@ def main() -> int:
     vs_actions.LOCAL_TRASH = sandbox / "_TRASH"
     import videosorter.ratings as vs_ratings
     vs_ratings.RATINGS_PATH = sandbox / "ratings.json"
-    import videosorter.scan_cache as vs_scan_cache
-    vs_scan_cache.CACHE.path = sandbox / "scan-cache.json"
-    vs_scan_cache.CACHE.data = {}
+    from videosorter.index import INDEX
+    INDEX.reopen(sandbox / "index.db")
 
     app = QApplication.instance() or QApplication(sys.argv)
     cfg = Config(path=sandbox / "config.json")

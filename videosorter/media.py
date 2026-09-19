@@ -11,7 +11,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
-from .config import APP_DIR, PROBE_CACHE_PATH, THUMB_DIR
+from .config import THUMB_DIR
+from .index import INDEX
 
 # Évite une fenêtre console qui clignote à chaque appel ffmpeg sous Windows.
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -85,54 +86,22 @@ def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str]:
 
 
 # ---------------------------------------------------------------------------
-# Sondage (durée / résolution / codec) avec cache disque
+# Sondage (durée / résolution / codec), retenu par l'index
 # ---------------------------------------------------------------------------
 
-class _ProbeCache:
-    def __init__(self):
-        self.data: dict[str, dict] = {}
-        self.dirty = False
-        try:
-            loaded = json.loads(PROBE_CACHE_PATH.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                self.data = loaded
-        except (OSError, ValueError):
-            self.data = {}
-
-    def key(self, path: Path) -> str:
-        try:
-            st = path.stat()
-            return f"{path}|{int(st.st_mtime)}|{st.st_size}"
-        except OSError:
-            return str(path)
-
-    def get(self, path: Path):
-        return self.data.get(self.key(path))
-
-    def put(self, path: Path, info: dict) -> None:
-        self.data[self.key(path)] = info
-        self.dirty = True
-
-    def flush(self) -> None:
-        if not self.dirty:
-            return
-        APP_DIR.mkdir(parents=True, exist_ok=True)
-        # Borne la taille du cache pour qu'il ne grossisse pas sans fin.
-        if len(self.data) > 20000:
-            self.data = dict(list(self.data.items())[-10000:])
-        try:
-            PROBE_CACHE_PATH.write_text(json.dumps(self.data), encoding="utf-8")
-            self.dirty = False
-        except OSError:
-            pass
-
-
-PROBE_CACHE = _ProbeCache()
+def _stamp_of(path: Path) -> str:
+    """Taille et date : ce qui distingue deux versions d'un meme chemin."""
+    try:
+        st = path.stat()
+        return f"{int(st.st_mtime)}|{st.st_size}"
+    except OSError:
+        return ""
 
 
 def probe(path: Path) -> dict:
     """Retourne {duration, width, height, codec, ok} pour une vidéo."""
-    cached = PROBE_CACHE.get(path)
+    stamp = _stamp_of(path)
+    cached = INDEX.probe(path, stamp)
     if cached is not None:
         return cached
 
@@ -167,7 +136,7 @@ def probe(path: Path) -> dict:
             break
         info["ok"] = info["width"] > 0 or info["duration"] > 0
 
-    PROBE_CACHE.put(path, info)
+    INDEX.put_probe(path, stamp, info)
     return info
 
 
@@ -176,11 +145,7 @@ def probe(path: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 def thumb_path(video: Path, ts: float, width: int) -> Path:
-    try:
-        st = video.stat()
-        stamp = f"{int(st.st_mtime)}|{st.st_size}"
-    except OSError:
-        stamp = "0|0"
+    stamp = _stamp_of(video) or "0|0"
     digest = hashlib.sha1(
         f"{video}|{stamp}|{ts:.2f}|{width}".encode("utf-8", "replace")
     ).hexdigest()
@@ -376,16 +341,24 @@ class PreviewManager(QObject):
                 job.cancelled = True
         self.jobs = kept
 
+    # L element affiche passe devant ceux qu on prepare pour apres : sans cela,
+    # les vingt vignettes des deux suivants occupaient les huit fils pendant que
+    # la case qu on regarde attendait son tour.
+    URGENT = 10
+    AHEAD = 0
+
     def request_plan(self, item_id: str, videos: list, count: int,
-                     page: int = 0, one_per_video: bool = True) -> None:
+                     page: int = 0, one_per_video: bool = True,
+                     urgent: bool = True) -> None:
         job = PlanJob(self.signals, item_id, videos, count, page, one_per_video)
         self._track(job)
-        self.pool.start(job)
+        self.pool.start(job, self.URGENT if urgent else self.AHEAD)
 
-    def request_thumb(self, item_id: str, slot: int, video: str, ts: float) -> None:
+    def request_thumb(self, item_id: str, slot: int, video: str, ts: float,
+                      urgent: bool = True) -> None:
         job = ThumbJob(self.signals, item_id, slot, Path(video), ts, self.thumb_width)
         self._track(job)
-        self.pool.start(job)
+        self.pool.start(job, self.URGENT if urgent else self.AHEAD)
 
     def quiesce(self, timeout_ms: int = 6000) -> None:
         """Annule et attend la fin des ffmpeg en cours.
@@ -404,4 +377,4 @@ class PreviewManager(QObject):
 
     def shutdown(self) -> None:
         self.quiesce(2000)
-        PROBE_CACHE.flush()
+        INDEX.commit(force=True)
