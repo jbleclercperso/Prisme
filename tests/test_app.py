@@ -1590,11 +1590,21 @@ def main() -> int:
     check(window.current.info.get("width") == 320, "résolution lue par ffprobe")
     check(window.viewer.currentWidget() is window.single, "lecteur plein cadre affiché")
 
-    ok = wait_for(app, lambda: sum(1 for t in window.single.tiles if t._pixmap) >= 10, 90)
-    check(ok, "pellicule de 10 images pour la vidéo courante")
+    # Cinq reperes suffisent a se deplacer dans une video, et la pellicule est
+    # passee a droite du lecteur : en bas, elle lui volait quatre-vingt-dix
+    # pixels sur toute la largeur.
+    from videosorter.widgets import SinglePlayer
+    width = SinglePlayer.STRIP_COUNT
+    ok = wait_for(
+        app, lambda: sum(1 for t in window.single.tiles if t._pixmap) >= width, 90)
+    check(ok, f"pellicule de {width} images pour la vidéo courante")
     plan_file = window.plans.get(f"{window.current.path}@0", [])
-    check(len({round(entry[1], 2) for entry in plan_file}) == 10,
-          "10 instants distincts dans la même vidéo")
+    check(len({round(entry[1], 2) for entry in plan_file}) == width,
+          f"{width} instants distincts dans la même vidéo")
+    check(len(window.single.tiles) == width, "et autant de cases sous la main")
+    tiles = window.single.tiles
+    check(tiles[1].y() > tiles[0].y() and tiles[1].x() == tiles[0].x(),
+          "empilées verticalement, donc posées sur le côté")
 
     print("\n[10] Déplacement d'un fichier seul")
     video_name = window.current.name

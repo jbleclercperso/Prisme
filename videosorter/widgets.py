@@ -595,11 +595,22 @@ class PreviewGrid(QWidget):
 class SinglePlayer(QWidget):
     """Mode fichier : la vidéo courante est lue en grand, avec une pellicule."""
 
+    # Cinq reperes suffisent a se reperer dans une video : un cinquieme, deux
+    # cinquiemes, et ainsi de suite. Dix prenaient deux fois plus de place pour
+    # une precision dont on ne fait rien — on survole pour chercher, on ne
+    # compte pas les images.
+    STRIP_COUNT = 5
+
     def __init__(self, count: int = 10, scroll_seconds: int = 5, parent=None):
         super().__init__(parent)
-        self.count = count
+        # La pellicule ne suit plus le reglage du nombre d'apercus : elle sert a
+        # se deplacer dans une video, pas a en faire le tour.
+        self.count = self.STRIP_COUNT
         self.scroll_seconds = scroll_seconds
-        layout = QVBoxLayout(self)
+        # Posee a droite plutot qu'en dessous : une bande horizontale volait au
+        # lecteur quatre-vingt-dix pixels sur toute la largeur, alors que la
+        # place perdue sur le cote ne coute rien a une video large.
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
@@ -637,19 +648,19 @@ class SinglePlayer(QWidget):
         self.remaining.hide()
 
         strip = QWidget(self)
-        self.strip_layout = QHBoxLayout(strip)
+        self.strip_layout = QVBoxLayout(strip)
         self.strip_layout.setContentsMargins(0, 0, 0, 0)
         self.strip_layout.setSpacing(6)
         self.tiles: list = []
-        for slot in range(count):
+        for slot in range(self.count):
             tile = PreviewTile(slot, strip)
             tile.strip_mode = True
             tile.duration_chip.hide()
-            tile.setMinimumSize(110, 72)
-            tile.setMaximumHeight(86)
-            self.strip_layout.addWidget(tile)
+            tile.setMinimumSize(150, 86)
+            tile.setMaximumWidth(190)
+            self.strip_layout.addWidget(tile, 1)
             self.tiles.append(tile)
-        strip.setFixedHeight(92)
+        strip.setFixedWidth(176)
         layout.addWidget(strip)
 
         self.audio = QAudioOutput(self)

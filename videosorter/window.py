@@ -1487,11 +1487,16 @@ class MainWindow(QMainWindow):
         if not item.videos or item.locked:
             return
         page = self.page_of(item) if page is None else page
+        # Un dossier montre une image par video, par pages ; une video montre
+        # les cinq reperes de sa pellicule. En demander dix pour une video
+        # faisait tourner ffmpeg cinq fois pour rien.
+        count = (self.cfg["thumb_count"] if item.kind == MODE_FOLDERS
+                 else SinglePlayer.STRIP_COUNT)
         key = self._plan_key(item, page)
         plan = self.plans.get(key)
         if plan is None:
             self.preview.request_plan(
-                key, item.videos, self.cfg["thumb_count"],
+                key, item.videos, count,
                 page=page, one_per_video=item.kind == MODE_FOLDERS,
                 urgent=current, blind=item.kind == MODE_FOLDERS,
             )
@@ -2026,7 +2031,7 @@ class MainWindow(QMainWindow):
         self.aside_player.set_item(video)
         key = f"aside@{item.item_id}"
         self.preview.request_plan(
-            key, item.videos, self.cfg["thumb_count"], page=0,
+            key, item.videos, SinglePlayer.STRIP_COUNT, page=0,
             one_per_video=item.kind == MODE_FOLDERS,
         )
 
