@@ -69,6 +69,7 @@ QPushButton#randomHere { background: transparent; border: 1px solid #8c3b52;
 QPushButton#randomHere:hover { background: rgba(140, 59, 82, 0.28);
                                color: #ffffff; }
 QLabel#boardMeta { font-size: 12px; color: #8b95a3; }
+QLabel#subpath { font-size: 12px; color: #7d8796; }
 QScrollArea#boardScroll { background: transparent; border: 0; }
 QWidget#videoArea { background: #000000; }
 QWidget#focusPlayer { background: #07080a; }

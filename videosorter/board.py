@@ -66,6 +66,7 @@ class BoardCard(QFrame):
         # ce qu'on lit deja sur l'image, et chaque planche en portait vingt.
         self.meta = QLabel("", self)
         self.meta.setObjectName("boardMeta")
+        self.meta.setWordWrap(False)
         layout.addWidget(self.meta)
 
         self.duration_chip = QLabel("", self)
@@ -88,8 +89,15 @@ class BoardCard(QFrame):
         if item is None:
             return ""
         head = "" if item.kind == MODE_FOLDERS else (lead or self._resolution)
-        name = elide(item.name, 40)
-        return f"{head}   ·   {name}" if head else name
+        name = elide(item.name, 38)
+        line = f"{head}   ·   {name}" if head else name
+        if item.kind != MODE_FOLDERS:
+            # En vue a plat, toutes les videos de la collection se cotoient :
+            # sans son dossier, un nom de fichier ne dit plus d'ou il sort.
+            folder = item.path.parent.name
+            if folder:
+                line += f"\n{elide(folder, 34)}"
+        return line
 
     def _show_chip(self, text: str) -> None:
         self.duration_chip.setText(text)

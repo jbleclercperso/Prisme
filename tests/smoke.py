@@ -198,6 +198,21 @@ check(window.up_button.isEnabled() or window.root == root,
 window.start_root(root, MODE_FOLDERS)
 settle()
 
+window.set_tab(TAB_VIDEOS)
+settle()
+check(window.preview.harvester is not None,
+      "l onglet Videos prepare aussi ses apercus d avance")
+video = window.items[0]
+window.on_board_open(0)
+settle()
+check(window.crumbs.layout_.count() >= 2,
+      "et la fiche d une video montre son arborescence ("
+      + str(window.crumbs.layout_.count()) + " segments)")
+check(bool(window.item_title.text()),
+      "avec son titre (" + window.item_title.text()[:40] + ")")
+window.set_tab(TAB_FOLDERS)
+settle()
+
 from videosorter.media import Harvester                     # noqa: E402
 check(Harvester.WORKERS <= 2,
       "la recolte d apercus reste discrete (" + str(Harvester.WORKERS)

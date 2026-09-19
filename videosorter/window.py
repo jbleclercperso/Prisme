@@ -31,6 +31,7 @@ from .scan import (
     known_media, list_entries,
 )
 from .index import INDEX
+from .search_dialog import WebSearchDialog
 from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
@@ -264,6 +265,8 @@ class MainWindow(QMainWindow):
             ("-", None),
             ("Corbeille de session", self.open_trash),
             ("Arborescence des destinations", self.toggle_tree),
+            ("-", None),
+            ("Recherche vidéo sur le web…", self.open_web_search),
             ("-", None),
             ("Réanalyser tout le disque", self.refresh_root),
             ("Changer de racine…", self.choose_root),
@@ -575,6 +578,9 @@ class MainWindow(QMainWindow):
         self.all_items = known
         self.items = [item for item in known if self._matches(item)]
         self.apply_sort()
+        # Des que la liste est a l'ecran, on prepare ce qu'elle montrera : la
+        # relecture du disque n'a pas a finir pour que les apercus commencent.
+        self.start_harvest()
         if self.browsing:
             self.refresh_board()
         elif self.items:
@@ -752,6 +758,7 @@ class MainWindow(QMainWindow):
         self.mode = MODE_FLAT
         self.content = CONTENT_VIDEOS
         self.index = 0
+        self.start_harvest()
         self._apply_selectors()
         self.crumbs.set_path(
             Path(self.levels[0]["root"]) if self.levels else self.root, self.root
@@ -799,6 +806,7 @@ class MainWindow(QMainWindow):
                 else f"Analyse {done}/{total}…")
 
     def start_harvest(self) -> None:
+        """Voir `_harvest_tasks`. Idempotent : relancer remplace la precedente."""
         """Fabrique d'avance la vignette de chaque élément, une fois pour toutes.
 
         Sur le partage, une vignette coûte environ une seconde et seize
@@ -1059,6 +1067,7 @@ class MainWindow(QMainWindow):
         self.all_items = found if self.tab == TAB_TAGS else found + plain
         self.items = [item for item in self.all_items if self._matches(item)]
         self.apply_sort()
+        self.start_harvest()
         if self.browsing:
             self.refresh_board()
         elif self.items:
@@ -1199,9 +1208,20 @@ class MainWindow(QMainWindow):
 
         self.stars.show()
         self.stars.set_value(self.ratings.get(item.path))
-        crumbs = self._breadcrumb(item)
-        self.item_parent.setText(crumbs)
+        self.item_parent.setText(self._breadcrumb(item))
         self.item_parent.setToolTip(str(Path(item.path).parent))
+        # Le fil d'Ariane mene jusqu'au dossier de l'element, et non plus
+        # seulement jusqu'a la racine regardee. En vue a plat, ou toutes les
+        # videos de la collection se cotoient, le seul nom du fichier ne disait
+        # plus du tout d'ou il sortait — et ses segments restent cliquables,
+        # donc il sert aussi a y retourner.
+        top = Path(self.levels[0]["root"]) if self.levels else (self.root or item.path)
+        folder = Path(item.path) if item.kind == MODE_FOLDERS else Path(item.path).parent
+        try:
+            folder.relative_to(top)
+        except ValueError:
+            folder = self.root or top
+        self.crumbs.set_path(top, folder)
 
         if item.pending:
             self.show_banner(f"Transfert en cours vers {item.status_detail}…", "#2a3340")
@@ -1576,6 +1596,9 @@ class MainWindow(QMainWindow):
         self.apply_sort()
         self.index = 0
         self._show_counts()
+        # Sans cela, l'onglet Videos ne beneficiait d'aucune preparation : il ne
+        # passe par aucune analyse, et c'est elle seule qui lancait la recolte.
+        self.start_harvest()
 
     def set_tab(self, tab: str, reposition: bool = True) -> None:
         """Change de point de vue sans changer de collection.
@@ -1733,6 +1756,9 @@ class MainWindow(QMainWindow):
         )
         self.item_parent.setText(str(self.root) if self.root else "")
         self.item_title.setToolTip(str(self.root) if self.root else "")
+        if self.root is not None:
+            top = Path(self.levels[0]["root"]) if self.levels else self.root
+            self.crumbs.set_path(top, self.root)
         self.item_subtitle.setText(
             "Survolez une carte pour la lire, cliquez pour l'ouvrir, "
             "notez d'un clic sur les étoiles."
@@ -2304,6 +2330,12 @@ class MainWindow(QMainWindow):
             self.commands.rebuild(
                 self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer")
             )
+        self.setFocus()
+
+    def open_web_search(self) -> None:
+        """Recherche de videos hors des grandes plateformes, en lien seul."""
+        dialog = WebSearchDialog(self.cfg, self)
+        dialog.exec()
         self.setFocus()
 
     # ------------------------------------------------------------------

@@ -45,11 +45,14 @@ entre en mode dossiers, et l'on continue à descendre.
   proche, un 352p s'affiche donc `360p`.
 
 Dans la fiche du haut, la durée de la vidéo est accolée à son titre, et la ligne
-d'informations — poids, résolution, dimensions, codec, date — est dimensionnée
-pour se lire d'un coup d'œil. Juste en dessous figure **la chaîne des dossiers
-depuis la racine du tri** (`Archives › 2019 › Vacances`) : en mode fichier, le
-seul nom du dossier parent ne suffit pas à se situer, plusieurs dossiers portant
-souvent le même nom à des endroits différents.
+d'informations — poids, nombre de vidéos, date — est dimensionnée pour se lire
+d'un coup d'œil.
+
+**Le fil d'Ariane mène jusqu'au dossier de l'élément affiché**, et non plus
+seulement jusqu'à la racine regardée : en vue à plat, où toutes les vidéos de la
+collection se côtoient, le seul nom du fichier ne dit plus d'où il sort. Ses
+segments restent cliquables, il sert donc aussi à y retourner. Sur une carte de
+vidéo, le nom du dossier figure sous celui du fichier, pour la même raison.
 - Un double-clic sur une case ouvre l'explorateur sur ce fichier.
 
 Les vignettes des deux éléments suivants sont fabriquées à l'avance, donc
@@ -173,6 +176,11 @@ chaque élément, en arrière-plan, deux extractions à la fois. Elle s'efface d
 que vous demandez quelque chose, reprend deux secondes plus tard, saute ce qui
 est déjà sur le disque, et reprend où elle s'était arrêtée au lancement suivant.
 Le bouton d'état l'annonce (`◷ aperçus 120 / 649`) et un clic l'arrête.
+
+Elle sert **tous les onglets**, y compris Vidéos et Mots-clés, qui se
+construisent en mémoire sans passer par une analyse : c'est elle seule qui la
+déclenchait, si bien qu'aucune vignette n'y était jamais préparée d'avance et
+que chaque page se fabriquait sous les yeux.
 
 **Elle commence par ce que vous regardez.** Changer de page la fait sauter à
 cette page : elle parcourait sinon la collection dans l'ordre, et arrivé à la

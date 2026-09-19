@@ -58,6 +58,10 @@ DEFAULTS = {
     "tags": [],                  # mots-cles, un par ligne
     "board_columns": 5,          # cartes par rangee en vue planche
     "expand_parents": True,      # traverser les dossiers prefixes « + »
+    "web_search_api_key": "",           # cle Bing Web Search (Azure, quota gratuit)
+    "web_search_min_duration_min": 0,   # filtre de la recherche web, en minutes
+    "web_search_min_height": 0,         # filtre de la recherche web, en pixels
+    "web_search_max_sites": 15,         # nombre de sites explores par recherche
 }
 
 
