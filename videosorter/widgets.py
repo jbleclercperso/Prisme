@@ -619,7 +619,6 @@ class SinglePlayer(QWidget):
         self.video_area = QWidget(self)
         self.video_area.setObjectName("videoArea")
         self.video_area.setMinimumHeight(320)
-        self.video_area.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.video = QVideoWidget(self.video_area)
         self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         layout.addWidget(self.video_area, 1)
@@ -627,22 +626,25 @@ class SinglePlayer(QWidget):
         self.zoom = 1.0
         self.zoom_focus = QPointF(0.5, 0.5)   # point fixe, en proportion du cadre
 
-        self.position_label = QLabel("", self)
+        self.position_label = QLabel("", self.video_area)
         self.position_label.setObjectName("tileBadge")
         self.position_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.position_label.hide()
 
-        # Rail et trait d'avancement : discrets, mais toujours la.
-        self.progress_rail = QFrame(self)
+        # Rail et trait d'avancement : discrets, mais toujours la. Enfants du
+        # cadre video et non de la fenetre : poses ailleurs, ils passaient
+        # derriere l'image et l'on ne voyait jamais ou en etait la lecture.
+        self.progress_rail = QFrame(self.video_area)
         self.progress_rail.setObjectName("playRail")
         self.progress_rail.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.progress = QFrame(self)
+        self.progress = QFrame(self.video_area)
         self.progress.setObjectName("playProgress")
         self.progress.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-        # Le temps restant, en permanence : c'est la question qu'on se pose en
-        # regardant, bien plus que la position absolue.
-        self.remaining = QLabel("", self)
+        # Le temps restant, en permanence, en haut a droite de l'image : c'est
+        # la question qu'on se pose en regardant, bien plus que la position
+        # absolue.
+        self.remaining = QLabel("", self.video_area)
         self.remaining.setObjectName("remaining")
         self.remaining.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.remaining.hide()
@@ -724,12 +726,14 @@ class SinglePlayer(QWidget):
     def _on_position(self, position: int) -> None:
         duration = self.player.duration()
         fraction = (position / duration) if duration > 0 else 0.0
-        area = self.video_area.geometry()
-        top = area.bottom() - self.RAIL_HEIGHT - 1
-        self.progress_rail.setGeometry(area.x(), top, area.width(), self.RAIL_HEIGHT)
+        # Coordonnees du cadre video, ces pieces en etant les enfants.
+        area = self.video_area.rect()
+        top = area.bottom() - self.RAIL_HEIGHT
+        self.progress_rail.setGeometry(0, top, area.width(), self.RAIL_HEIGHT)
         self.progress.setGeometry(
-            area.x(), top,
-            max(0, int(area.width() * max(0.0, min(1.0, fraction)))), self.RAIL_HEIGHT,
+            0, top,
+            max(0, int(area.width() * max(0.0, min(1.0, fraction)))),
+            self.RAIL_HEIGHT,
         )
         self.progress_rail.show()
         self.progress.show()
@@ -740,8 +744,7 @@ class SinglePlayer(QWidget):
             left = max(0, duration - position) / 1000.0
             self.remaining.setText(f"−{human_duration(left)}")
             self.remaining.adjustSize()
-            self.remaining.move(area.right() - self.remaining.width() - 12,
-                                area.top() + 12)
+            self.remaining.move(area.right() - self.remaining.width() - 12, 12)
             self.remaining.raise_()
             self.remaining.show()
         else:
@@ -804,8 +807,11 @@ class SinglePlayer(QWidget):
         self._apply_zoom()
         self.position_label.setText(f"×{self.zoom:.1f}" if self.zoom > 1 else "×1")
         self.position_label.adjustSize()
-        self.position_label.move(area.right() - self.position_label.width() - 10,
-                                 area.top() + 10)
+        # La pastille est fille du cadre video : ses coordonnees sont celles du
+        # cadre, pas de la fenetre.
+        inner = self.video_area.rect()
+        self.position_label.move(
+            inner.right() - self.position_label.width() - 10, 10)
         self.position_label.raise_()
         self.position_label.show()
         self.position_timer.start(1500)
