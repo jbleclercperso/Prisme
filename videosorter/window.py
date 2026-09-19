@@ -166,6 +166,7 @@ class MainWindow(QMainWindow):
         self.preview.plan_ready.connect(self.on_plan_ready)
         self.preview.thumb_ready.connect(self.on_thumb_ready)
         self.preview.thumb_failed.connect(self.on_thumb_failed)
+        self.preview.info_ready.connect(self.on_info_ready)
 
         self._build_ui()
         self.welcome.set_recent(cfg["recent_roots"])
@@ -278,11 +279,6 @@ class MainWindow(QMainWindow):
         self.tag_chips.hide()
         selectors.addWidget(self.tag_chips)
 
-        self.enter_button = QPushButton("Entrer ▸", sort_page)
-        self.enter_button.setToolTip("Trier le contenu de ce dossier   (Ctrl+↓)")
-        self.enter_button.setFocusPolicy(Qt.NoFocus)
-        self.enter_button.clicked.connect(self.enter_current)
-        selectors.addWidget(self.enter_button)
         selectors.addStretch(1)
         selectors.addWidget(self.scan_button)
         selectors.addWidget(self.random_button)
@@ -336,6 +332,16 @@ class MainWindow(QMainWindow):
             label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         header_layout.addWidget(self.item_title, 0)
         header_layout.addWidget(self.item_subtitle, 1)
+
+        # « Entrer » se lit au bout de la ligne qui decrit le dossier — poids,
+        # nombre de videos, date — la ou l'on vient de decider qu'il fallait y
+        # descendre. Il etait perdu dans la rangee des onglets, loin de son objet.
+        self.enter_button = QPushButton("Entrer dans le dossier  ▸", header)
+        self.enter_button.setObjectName("enter")
+        self.enter_button.setToolTip("Trier le contenu de ce dossier   (Ctrl+↓)")
+        self.enter_button.setFocusPolicy(Qt.NoFocus)
+        self.enter_button.clicked.connect(self.enter_current)
+        header_layout.addWidget(self.enter_button, 0)
         # En planche, ce bloc repetait le fil d'Ariane et une phrase d'aide, sur
         # trois lignes, au detriment d'une rangee entiere de vignettes.
         self.item_card = header
@@ -941,8 +947,22 @@ class MainWindow(QMainWindow):
         # et decrivent souvent mieux la collection que ce qu'on aurait pense.
         words = self.tags if self.tag_family == "mine" else top_words(videos)
         if not words:
-            self.all_items = [i for i in self.all_items if not i.is_tag]
-            self.items = [i for i in self.all_items if self._matches(i)]
+            # Aucun mot-cle : la liste se vide **et l'affichage suit**. Il
+            # restait auparavant sur les categories precedentes, si bien que
+            # « Mes mots-cles » semblait rendre les mots frequents.
+            self.all_items = []
+            self.items = []
+            if self.browsing:
+                self.refresh_board()
+            self.item_title.setText("Aucun mot-clé")
+            self.item_subtitle.setText(
+                "Ajoutez les vôtres par « ⋯ › Mots-clés automatiques… », ou "
+                "choisissez « Mots fréquents » pour les laisser deviner."
+                if self.tag_family == "mine"
+                else "Aucun mot ne revient assez souvent dans ces noms de fichiers."
+            )
+            self._show_counts()
+            self.update_counter()
             return
         found = build_tag_items(words, videos)
         if not found:
@@ -1047,9 +1067,10 @@ class MainWindow(QMainWindow):
             # Une icône devant le titre : on sait sans lire si l'on décide du
             # sort d'un dossier entier ou d'un seul fichier.
             self.item_title.setText(f"📁  {item.name}")
+            # Le compte de fichiers melait aux videos les images et les textes
+            # qui trainent a cote : on ne trie pas ceux-la.
             parts = [
                 human_size(item.size),
-                f"{item.file_count} fichier{'s' if item.file_count > 1 else ''}",
                 f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}",
             ]
             if item.subdir_count:
@@ -1161,7 +1182,7 @@ class MainWindow(QMainWindow):
             self.preview.request_plan(
                 key, item.videos, self.cfg["thumb_count"],
                 page=page, one_per_video=item.kind == MODE_FOLDERS,
-                urgent=current,
+                urgent=current, blind=item.kind == MODE_FOLDERS,
             )
             return
         if current:
@@ -1184,6 +1205,8 @@ class MainWindow(QMainWindow):
             if position >= 0 and plan:
                 self.board.set_source(position, plan[0])
                 self.preview.request_thumb(key, 0, plan[0][0], plan[0][1])
+                if not plan[0][2]:
+                    self.preview.request_info(key, 0, plan[0][0])
             return
         current = self.current
         if current is not None and key == self._current_key():
@@ -1196,6 +1219,27 @@ class MainWindow(QMainWindow):
         urgent = key == self._current_key()
         for slot, entry in enumerate(plan):
             self.preview.request_thumb(key, slot, entry[0], entry[1], urgent)
+            if not entry[2]:
+                # Duree inconnue : l'image part d'abord, le sondage suivra.
+                self.preview.request_info(key, slot, entry[0])
+
+    def on_info_ready(self, key: str, slot: int, duration: float,
+                      height: int) -> None:
+        """La durée et la résolution arrivent après l'image, et la complètent."""
+        if key.startswith("board@"):
+            position = self._board_position_of(key)
+            if position >= 0:
+                self.board.set_info(position, duration, height)
+            return
+        current = self.current
+        if current is None or key != self._current_key():
+            return
+        plan = self.plans.get(key)
+        if plan and slot < len(plan):
+            video, ts, _d, _h = plan[slot]
+            plan[slot] = (video, ts, duration, height)
+        if current.kind == MODE_FOLDERS:
+            self.grid.set_info(slot, duration, height)
 
     def on_thumb_ready(self, key: str, slot: int, path: str) -> None:
         if key.startswith("board@"):
@@ -1601,7 +1645,7 @@ class MainWindow(QMainWindow):
         if plan is None:
             self.preview.request_plan(
                 key, item.videos, 1, page=0,
-                one_per_video=item.kind == MODE_FOLDERS,
+                one_per_video=item.kind == MODE_FOLDERS, blind=True,
             )
             return
         self.board.set_source(position, plan[0])

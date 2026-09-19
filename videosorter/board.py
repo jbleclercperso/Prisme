@@ -138,6 +138,12 @@ class BoardCard(QFrame):
         if duration:
             self._show_chip(human_duration(duration))
 
+    def set_info(self, duration: float, height: int) -> None:
+        """Ce que le sondage a fini par apprendre, une fois l'image posée."""
+        if self.item is None:
+            return
+        self.set_source(self.video, self.ts, duration, height)
+
     def set_thumb(self, path: str) -> None:
         pixmap = QPixmap(path)
         if pixmap.isNull():
@@ -424,6 +430,11 @@ class BoardView(QWidget):
         card = self._card_for(position)
         if card is not None:
             card.set_source(*entry)
+
+    def set_info(self, position: int, duration: float, height: int) -> None:
+        card = self._card_for(position)
+        if card is not None:
+            card.set_info(duration, height)
 
     def set_thumb(self, position: int, path: str) -> None:
         card = self._card_for(position)

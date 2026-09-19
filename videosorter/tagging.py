@@ -53,6 +53,9 @@ STOP_WORDS = {
 MIN_WORD = 3
 MAX_WORD = 12
 
+# En deca, ce n'est pas une categorie mais une video isolee sous un titre.
+MIN_BUCKET = 2
+
 # Un nom de fichier separe ses mots de trois facons, souvent dans le meme nom :
 # par une ponctuation, par une majuscule (« BeachSunset »), ou par un chiffre
 # (« s01e02 », « 4kbeach »). Ne couper qu'a la ponctuation laissait les deux
@@ -150,12 +153,29 @@ def build_tag_items(tags: list, videos: list) -> list:
             counts[needle] += 1
 
     # Second passage : chacun choisit sa categorie, celle qui rassemble le plus.
-    buckets: dict = {needle: [] for _term, needle in folded}
-    for video, hits in carried:
-        best = max(hits, key=lambda needle: (counts[needle], len(needle)))
-        buckets[best].append(Path(video))
+    #
+    # Un mot present dans deux noms peut n'en garder qu'un, l'autre etant parti
+    # vers un mot plus frequent — d'ou des categories a une seule video, qui ne
+    # categorisent rien. On dissout donc les trop maigres et l'on replace leurs
+    # videos sur le mot suivant, jusqu'a ce que tout ce qui reste tienne debout.
+    active = {needle for _term, needle in folded}
+    buckets: dict = {}
+    for _ in range(8):
+        buckets = {needle: [] for needle in active}
+        for video, hits in carried:
+            eligible = [needle for needle in hits if needle in active]
+            if not eligible:
+                continue
+            best = max(eligible, key=lambda needle: (counts[needle], len(needle)))
+            buckets[best].append(Path(video))
+        thin = {needle for needle, found in buckets.items()
+                if len(found) < MIN_BUCKET}
+        if not thin or len(thin) == len(active):
+            break
+        active -= thin
 
     labels = {needle: term for term, needle in folded}
+    # Les mots dissous n'ont plus de bac : rien a rendre pour eux.
     items = []
     for needle, found in buckets.items():
         if not found:

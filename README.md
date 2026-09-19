@@ -136,6 +136,32 @@ de ce qui a été lu. À la fin, un bandeau annonce la durée et ce qui a chang�
 L'index retient aussi les sondages ffprobe, repris de l'ancien cache au premier
 lancement. `use_scan_cache: false` le désactive entièrement.
 
+## Vitesse des aperçus
+
+Une vignette se paie en allers-retours sur le réseau, et c'est ce qui reste le
+plus cher une fois l'analyse en cache. Trois choix, mesurés sur le NAS :
+
+- **le sondage ne précède plus l'image.** Connaître la durée d'une vidéo coûte
+  un `ffprobe` de 0,36 s, soit plus que l'extraction elle-même. Pour un dossier,
+  où chaque case montre une vidéo différente, l'image part sans rien demander ;
+  la durée et la résolution la rejoignent après, en tâche de fond. Seule la
+  pellicule d'une vidéo seule a besoin de sa durée — et un sondage y sert dix
+  images.
+- **on cherche l'image près du début.** Atteindre la soixantième seconde d'un
+  fichier coûte presque le double de la dixième — il faut faire venir ce qu'on
+  saute — et échoue sur les vidéos plus courtes, ce qui oblige à recommencer :
+  1,94 s et 11 réussites sur 14 à `t=60`, contre 1,05 s et 13 sur 14 à `t=10`.
+- **seize extractions de front** au lieu de huit sur un partage réseau : elles
+  attendent la ligne, elles ne la saturent pas.
+
+Borner l'analyse d'en-tête de ffmpeg (`-probesize`) a été essayé et **écarté** :
+trois fois plus rapide sur certains fichiers, deux fois plus lent sur d'autres,
+où ffmpeg doit relire après avoir échoué dans la borne.
+
+Les vignettes obtenues restent sur le disque, indexées par fichier, date et
+instant : revenir sur une page déjà vue est instantané. `thumb_count` (10 par
+défaut) est le levier restant si l'on veut moins d'aperçus par fiche.
+
 ## Vue planche
 
 `Ctrl+P`, ou le bouton **Planche**. Les éléments passent en cartes. Sous chaque

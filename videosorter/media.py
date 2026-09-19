@@ -89,6 +89,24 @@ def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str]:
 # Sondage (durée / résolution / codec), retenu par l'index
 # ---------------------------------------------------------------------------
 
+# Borner l'examen de l'en-tete ne tient pas la mesure : trois fois plus rapide
+# sur certains fichiers, deux fois plus lent sur d'autres, ou ffmpeg doit relire
+# apres avoir echoue dans la borne. On ne le fait donc que pour ffprobe, dont
+# c'est justement le travail de lire l'en-tete, et ou deux megaoctets suffisent.
+PROBE_LIMITS = ["-probesize", "2M", "-analyzeduration", "2M"]
+
+# Instants d'essai quand on ignore la duree : plutot que de payer un ffprobe
+# pour la connaitre, on tente un endroit plausible.
+#
+# Ils sont volontairement proches du debut. Sur un partage, atteindre la
+# soixantieme seconde d'un fichier coute presque deux fois la dixieme — il faut
+# faire venir ce qu'on saute — et echoue sur les videos plus courtes, ce qui
+# oblige a tout recommencer : 1,94 s et 11 reussites sur 14 a t=60, contre
+# 1,05 s et 13 sur 14 a t=10. Une image prise un peu plus tot vaut mieux qu'une
+# image qui coute le double et manque une fois sur cinq.
+BLIND_OFFSETS = (6.0, 12.0, 20.0, 9.0, 16.0, 25.0)
+
+
 def _stamp_of(path: Path) -> str:
     """Taille et date : ce qui distingue deux versions d'un meme chemin."""
     try:
@@ -110,8 +128,9 @@ def probe(path: Path) -> dict:
         return info
 
     code, out = _run([
-        Tools.ffprobe, "-v", "error", "-print_format", "json",
-        "-show_format", "-show_streams", str(path),
+        Tools.ffprobe, "-v", "error",
+    ] + PROBE_LIMITS + [
+        "-print_format", "json", "-show_format", "-show_streams", str(path),
     ])
     if code == 0 and out:
         try:
@@ -168,10 +187,15 @@ def extract_thumb(video: Path, ts: float, width: int) -> Path | None:
     # -an : pas de piste son a demultiplexer pour fabriquer une image fixe.
     tail = ["-an", "-frames:v", "1", "-vf", f"scale={width}:-2",
             "-q:v", "4", "-y", str(out)]
+    seek = ["-ss", f"{max(0.0, ts):.2f}"]
 
-    attempts = [base + ["-ss", f"{max(0.0, ts):.2f}", "-i", str(video)] + tail]
+    # Du plus rapide au plus sur : en-tete borne a l'endroit voulu, puis borne
+    # au debut, puis sans borne. La quasi-totalite des fichiers s'arretent au
+    # premier essai ; les rares recalcitrants coutent ce qu'ils coutaient avant.
+    attempts = [base + seek + ["-i", str(video)] + tail]
     if ts > 0:
-        # Certaines vidéos refusent le seek rapide : on retombe sur la première image.
+        # Certaines vidéos refusent le seek rapide, d'autres sont plus courtes
+        # que l'instant demandé : on retombe sur la première image.
         attempts.append(base + ["-i", str(video)] + tail)
 
     for cmd in attempts:
@@ -207,7 +231,7 @@ def page_count(videos: list, count: int, one_per_video: bool = True) -> int:
 
 
 def build_preview_plan(videos: list, count: int, page: int = 0,
-                       one_per_video: bool = True) -> list:
+                       one_per_video: bool = True, blind: bool = False) -> list:
     """Construit une page d'aperçus.
 
     Chaque entrée est (fichier, instant, durée, hauteur) : le sondage ffprobe a
@@ -237,8 +261,20 @@ def build_preview_plan(videos: list, count: int, page: int = 0,
         ]
 
     plan = []
-    for video, fraction in pairs:
-        info = probe(Path(video))
+    for index, (video, fraction) in enumerate(pairs):
+        info = INDEX.probe(video)
+        if info is None:
+            if blind:
+                # Une image par video : on ne saurait que faire de la duree, et
+                # la demander couterait un ffprobe de plus que l'extraction
+                # elle-meme (0,36 s contre 0,17 s). Elle arrivera apres, sans
+                # retenir l'image.
+                ts = BLIND_OFFSETS[index % len(BLIND_OFFSETS)]
+                plan.append((str(video), ts, 0.0, 0))
+                continue
+            # Dix instants dans une meme video : sans sa duree, on ne sait pas
+            # les echelonner. Un seul sondage sert alors les dix images.
+            info = probe(Path(video))
         duration = info.get("duration") or 0.0
         ts = min(duration - 1.0, duration * fraction) if duration > 2 else 0.0
         plan.append((str(video), max(0.0, ts), duration, info.get("height") or 0))
@@ -253,13 +289,14 @@ class JobSignals(QObject):
     plan_ready = Signal(str, list)        # item_id, [(video, ts), ...]
     thumb_ready = Signal(str, int, str)   # item_id, slot, chemin vignette
     thumb_failed = Signal(str, int)       # item_id, slot
+    info_ready = Signal(str, int, float, int)   # item_id, slot, duree, hauteur
 
 
 class PlanJob(QRunnable):
     """Sonde les vidéos retenues et calcule les instants des aperçus."""
 
     def __init__(self, signals: JobSignals, item_id: str, videos: list, count: int,
-                 page: int = 0, one_per_video: bool = True):
+                 page: int = 0, one_per_video: bool = True, blind: bool = False):
         super().__init__()
         self.signals = signals
         self.item_id = item_id
@@ -267,16 +304,43 @@ class PlanJob(QRunnable):
         self.count = count
         self.page = page
         self.one_per_video = one_per_video
+        self.blind = blind
         self.cancelled = False
 
     def run(self) -> None:
         if self.cancelled:
             return
         plan = build_preview_plan(
-            self.videos, self.count, self.page, self.one_per_video
+            self.videos, self.count, self.page, self.one_per_video, self.blind
         )
         if not self.cancelled:
             self.signals.plan_ready.emit(self.item_id, plan)
+
+
+class InfoJob(QRunnable):
+    """Sonde une video apres coup, pour completer sa duree et sa resolution.
+
+    L'image passe devant : on la montre des qu'elle est la, et ces deux
+    chiffres la rejoignent quand ils arrivent. Les demander d'abord doublait le
+    temps avant le premier apercu, pour une pastille.
+    """
+
+    def __init__(self, signals: JobSignals, item_id: str, slot: int, video: str):
+        super().__init__()
+        self.signals = signals
+        self.item_id = item_id
+        self.slot = slot
+        self.video = video
+        self.cancelled = False
+
+    def run(self) -> None:
+        if self.cancelled:
+            return
+        info = probe(Path(self.video))
+        if not self.cancelled:
+            self.signals.info_ready.emit(
+                self.item_id, self.slot,
+                info.get("duration") or 0.0, info.get("height") or 0)
 
 
 class ThumbJob(QRunnable):
@@ -309,6 +373,7 @@ class PreviewManager(QObject):
     plan_ready = Signal(str, list)
     thumb_ready = Signal(str, int, str)
     thumb_failed = Signal(str, int)
+    info_ready = Signal(str, int, float, int)
 
     def __init__(self, thumb_width: int, parent=None):
         super().__init__(parent)
@@ -317,6 +382,7 @@ class PreviewManager(QObject):
         self.signals.plan_ready.connect(self.plan_ready)
         self.signals.thumb_ready.connect(self.thumb_ready)
         self.signals.thumb_failed.connect(self.thumb_failed)
+        self.signals.info_ready.connect(self.info_ready)
         self.pool = QThreadPool()
         self.local_workers = max(2, min(4, (os.cpu_count() or 4) // 2))
         self.pool.setMaxThreadCount(self.local_workers)
@@ -349,10 +415,17 @@ class PreviewManager(QObject):
 
     def request_plan(self, item_id: str, videos: list, count: int,
                      page: int = 0, one_per_video: bool = True,
-                     urgent: bool = True) -> None:
-        job = PlanJob(self.signals, item_id, videos, count, page, one_per_video)
+                     urgent: bool = True, blind: bool = False) -> None:
+        job = PlanJob(self.signals, item_id, videos, count, page, one_per_video,
+                      blind)
         self._track(job)
         self.pool.start(job, self.URGENT if urgent else self.AHEAD)
+
+    def request_info(self, item_id: str, slot: int, video: str) -> None:
+        """Duree et resolution, en dernier : l'image ne les attend pas."""
+        job = InfoJob(self.signals, item_id, slot, video)
+        self._track(job)
+        self.pool.start(job, -10)
 
     def request_thumb(self, item_id: str, slot: int, video: str, ts: float,
                       urgent: bool = True) -> None:
@@ -371,7 +444,10 @@ class PreviewManager(QObject):
 
     def tune_for(self, root) -> None:
         """Adapte le nombre d'extractions simultanées au support de stockage."""
-        workers = 8 if is_network_path(root) else self.local_workers
+        # Une extraction attend le reseau bien plus qu'elle n'occupe le
+        # processeur : on en lance seize de front la ou une seule tiendrait la
+        # ligne occupee a ne rien faire.
+        workers = 16 if is_network_path(root) else self.local_workers
         if workers != self.pool.maxThreadCount():
             self.pool.setMaxThreadCount(workers)
 

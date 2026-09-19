@@ -47,6 +47,10 @@ QLabel#boardName { font-size: 14px; font-weight: 600; color: #e6e8ea; }
    Elles se distinguent a la couleur, pour qu on sache ce qu on declenche. */
 /* L'etat de l'analyse, en toutes lettres : au repos on peut la lancer,
    en marche elle compte, et un clic l'arrete. */
+QPushButton#enter { background: #1d4a2e; border: 1px solid #2f7a4a;
+                    border-radius: 6px; padding: 5px 12px; color: #cdf0da;
+                    font-weight: 600; }
+QPushButton#enter:hover { background: #2a6a41; color: #ffffff; }
 QPushButton#scanState { background: transparent; border: 1px solid #39414d;
                         border-radius: 6px; padding: 5px 11px; color: #9aa4b2; }
 QPushButton#scanState:hover { color: #ffffff; border-color: #5a6575; }
@@ -374,6 +378,14 @@ class PreviewGrid(QWidget):
                 tile.set_source(*plan[slot])
             else:
                 tile.set_empty("")
+
+    def set_info(self, slot: int, duration: float, height: int) -> None:
+        """La durée et la résolution rejoignent une case déjà affichée."""
+        if not 0 <= slot < len(self.tiles):
+            return
+        tile = self.tiles[slot]
+        tile.set_source(tile.video, tile.ts, duration or tile.duration,
+                        height or tile.height_px)
 
     def set_thumb(self, slot: int, path: str) -> None:
         if 0 <= slot < len(self.tiles):
