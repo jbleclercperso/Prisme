@@ -101,16 +101,18 @@ def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str]:
 # c'est justement le travail de lire l'en-tete, et ou deux megaoctets suffisent.
 PROBE_LIMITS = ["-probesize", "2M", "-analyzeduration", "2M"]
 
-# Instants d'essai quand on ignore la duree : plutot que de payer un ffprobe
-# pour la connaitre, on tente un endroit plausible.
+# Ou prendre l'image d'une carte, quand on ignore la duree de la video.
 #
-# Ils sont volontairement proches du debut. Sur un partage, atteindre la
-# soixantieme seconde d'un fichier coute presque deux fois la dixieme — il faut
-# faire venir ce qu'on saute — et echoue sur les videos plus courtes, ce qui
-# oblige a tout recommencer : 1,94 s et 11 reussites sur 14 a t=60, contre
-# 1,05 s et 13 sur 14 a t=10. Une image prise un peu plus tot vaut mieux qu'une
-# image qui coute le double et manque une fois sur cinq.
-BLIND_OFFSETS = (6.0, 12.0, 20.0, 9.0, 16.0, 25.0)
+# C'est le reglage le plus cher de toute l'application. Chercher l'image a la
+# sixieme seconde coute le double de la prendre au tout debut — 1,00 s contre
+# 0,48 s par image, mesure sur le NAS — parce qu'un saut oblige a faire venir ce
+# qu'on saute, et la difference se multiplie par quarante a chaque page.
+#
+# Deux secondes : assez pour depasser l'image noire ou le logo d'ouverture, mais
+# ffmpeg y rejoint presque toujours la meme image-cle qu'a zero, donc sans rien
+# faire venir de plus. `preview_start` dans la configuration deplace ce curseur
+# — 0 pour le plus rapide, davantage pour des images plus parlantes.
+BLIND_START = 2.0
 
 
 def _stamp_of(path: Path) -> str:
@@ -273,10 +275,8 @@ def build_preview_plan(videos: list, count: int, page: int = 0,
             if blind:
                 # Une image par video : on ne saurait que faire de la duree, et
                 # la demander couterait un ffprobe de plus que l'extraction
-                # elle-meme (0,36 s contre 0,17 s). Elle arrivera apres, sans
-                # retenir l'image.
-                ts = BLIND_OFFSETS[index % len(BLIND_OFFSETS)]
-                plan.append((str(video), ts, 0.0, 0))
+                # elle-meme. Elle arrivera apres, sans retenir l'image.
+                plan.append((str(video), BLIND_START, 0.0, 0))
                 continue
             # Dix instants dans une meme video : sans sa duree, on ne sait pas
             # les echelonner. Un seul sondage sert alors les dix images.

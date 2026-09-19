@@ -150,10 +150,14 @@ plus cher une fois l'analyse en cache. Trois choix, mesurés sur le NAS :
   la durée et la résolution la rejoignent après, en tâche de fond. Seule la
   pellicule d'une vidéo seule a besoin de sa durée — et un sondage y sert dix
   images.
-- **on cherche l'image près du début.** Atteindre la soixantième seconde d'un
-  fichier coûte presque le double de la dixième — il faut faire venir ce qu'on
-  saute — et échoue sur les vidéos plus courtes, ce qui oblige à recommencer :
-  1,94 s et 11 réussites sur 14 à `t=60`, contre 1,05 s et 13 sur 14 à `t=10`.
+- **on cherche l'image tout au début.** C'est le réglage le plus cher de
+  l'application : un saut oblige à faire venir ce qu'on saute, et la différence
+  se multiplie par quarante à chaque page. Mesuré sur le partage — **0,48 s par
+  image au tout début, 1,00 s à six secondes, 1,94 s à soixante**, cette
+  dernière échouant en plus sur les vidéos trop courtes, ce qui oblige à
+  recommencer. Le défaut est à deux secondes : assez pour dépasser l'image noire
+  d'ouverture, mais ffmpeg y rejoint presque toujours la même image-clé qu'à
+  zéro, donc sans rien faire venir de plus. `preview_start` déplace ce curseur.
 - **huit extractions de front, pas davantage.** Elles attendent la ligne plus
   qu'elles n'occupent le processeur, mais au-delà le partage se met à piétiner :
   1,49 s par image à huit, 1,58 s à quatre, et **3,31 s à seize** — deux fois

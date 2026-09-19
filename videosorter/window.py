@@ -22,6 +22,7 @@ from .header import (
     ControlBar, Segmented,
     build_overflow,
 )
+from . import media
 from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
 from .tagging import build_tag_items, top_words
@@ -163,6 +164,8 @@ class MainWindow(QMainWindow):
         self.transfers.finished.connect(self.on_transfer_finished)
         self.transfers.changed.connect(self.on_transfers_changed)
 
+        # Le curseur le plus cher de l'application : voir `media.BLIND_START`.
+        media.BLIND_START = max(0.0, float(cfg["preview_start"]))
         self.preview = PreviewManager(cfg["thumb_width"], self)
         self.preview.plan_ready.connect(self.on_plan_ready)
         self.preview.thumb_ready.connect(self.on_thumb_ready)
@@ -817,13 +820,13 @@ class MainWindow(QMainWindow):
         avant, pendant qu'on fait autre chose, et la récolte s'écarte dès que
         quelqu'un demande quelque chose.
         """
-        from .media import BLIND_OFFSETS
+        from . import media
         tasks = []
         for index, item in enumerate(self.all_items):
             if item.locked or not item.videos:
                 continue
             video = str(item.videos[0])
-            blind = BLIND_OFFSETS[index % len(BLIND_OFFSETS)]
+            blind = media.BLIND_START
             if item.kind == MODE_FOLDERS:
                 tasks.append((item.item_id, video, blind))
             else:
