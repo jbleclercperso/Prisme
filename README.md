@@ -151,8 +151,10 @@ plus cher une fois l'analyse en cache. Trois choix, mesurés sur le NAS :
   fichier coûte presque le double de la dixième — il faut faire venir ce qu'on
   saute — et échoue sur les vidéos plus courtes, ce qui oblige à recommencer :
   1,94 s et 11 réussites sur 14 à `t=60`, contre 1,05 s et 13 sur 14 à `t=10`.
-- **seize extractions de front** au lieu de huit sur un partage réseau : elles
-  attendent la ligne, elles ne la saturent pas.
+- **huit extractions de front, pas davantage.** Elles attendent la ligne plus
+  qu'elles n'occupent le processeur, mais au-delà le partage se met à piétiner :
+  1,49 s par image à huit, 1,58 s à quatre, et **3,31 s à seize** — deux fois
+  pire. Le débit d'un partage ne s'additionne pas indéfiniment, il s'écroule.
 
 Borner l'analyse d'en-tête de ffmpeg (`-probesize`) a été essayé et **écarté** :
 trois fois plus rapide sur certains fichiers, deux fois plus lent sur d'autres,
@@ -161,10 +163,10 @@ où ffmpeg doit relire après avoir échoué dans la borne.
 ### Les aperçus se préparent d'avance
 
 C'est le choix qui change tout. Mesuré sur le partage : une page de 40 cartes
-demande **33 s** la première fois, et **0,07 s** la seconde. Seize extractions
-de front n'y vont pas plus vite que huit — la ligne est saturée, pas le
-processeur — donc rien ne peut raccourcir cette première fois **au moment où on
-la regarde**.
+demande **33 s** la première fois, et **0,07 s** la seconde. Et l'on ne peut pas
+y aller plus vite en lançant davantage d'extractions : au-delà de huit, le
+partage piétine et le temps par image double. Rien ne peut donc raccourcir
+cette première fois **au moment où on la regarde**.
 
 Dès que l'analyse se termine, une **récolte** fabrique donc la vignette de
 chaque élément, en arrière-plan, deux extractions à la fois. Elle s'efface dès

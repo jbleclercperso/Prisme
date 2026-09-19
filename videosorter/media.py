@@ -574,10 +574,12 @@ class PreviewManager(QObject):
 
     def tune_for(self, root) -> None:
         """Adapte le nombre d'extractions simultanées au support de stockage."""
-        # Une extraction attend le reseau bien plus qu'elle n'occupe le
-        # processeur : on en lance seize de front la ou une seule tiendrait la
-        # ligne occupee a ne rien faire.
-        workers = 16 if is_network_path(root) else self.local_workers
+        # Huit, et pas davantage. Une extraction attend le reseau plus qu'elle
+        # n'occupe le processeur, mais au-dela le partage se met a pietiner :
+        # mesure sur le NAS, 1,49 s par image a huit de front, 1,58 a quatre, et
+        # 3,31 a seize — deux fois pire. Le debit d'un partage ne s'additionne
+        # pas indefiniment, il s'ecroule.
+        workers = 8 if is_network_path(root) else self.local_workers
         if workers != self.pool.maxThreadCount():
             self.pool.setMaxThreadCount(workers)
 
