@@ -51,14 +51,13 @@ DEFAULTS = {
     "use_scan_cache": True,      # reutiliser l analyse precedente
     "sort_mode": "random",       # random | duration_desc | size_asc | …
     "content": "folders",        # conserve pour compatibilite
-    "view": "edit",              # conserve pour compatibilite
-    "tab": "edit",               # onglet : folders | videos | edit | tags
+    "view": "browse",            # conserve pour compatibilite
+    "tab": "folders",            # onglet : folders | videos | tags
     "tag_family": "mine",        # mots-cles affiches : mine | top
     "tree_action": "send",       # clic dans l arborescence : send | go
     "tags": [],                  # mots-cles, un par ligne
     "board_columns": 5,          # cartes par rangee en vue planche
-    "expand_parents": False,     # traverser les dossiers prefixes « + »
-    "schema": 2,                 # version des reglages, pour les migrations
+    "expand_parents": True,      # traverser les dossiers prefixes « + »
 }
 
 
@@ -80,20 +79,6 @@ class Config:
                 if key in DEFAULTS:
                     self.data[key] = value
         self._migrate_reserved_keys()
-        self._migrate_parent_folders()
-
-    def _migrate_parent_folders(self) -> None:
-        """Les dossiers de tete ne se trient plus : ils sont les destinations.
-
-        Les traverser les melait a ce qui reste a ranger. Une configuration
-        ecrite avant ce choix demandait encore la traversee, et l ancienne liste
-        serait revenue sans qu on sache pourquoi.
-        """
-        if self.data.get("schema", 1) >= 2:
-            return
-        self.data["expand_parents"] = False
-        self.data["schema"] = 2
-        self.save()
 
     def _migrate_reserved_keys(self) -> None:
         """Deplace les destinations posees sur une touche devenue la notation.

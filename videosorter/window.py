@@ -17,7 +17,7 @@ from .board import COLUMN_CHOICES, BoardView
 from .actions import ActionError, HistoryEntry
 from .config import Config
 from .header import (
-    CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, TAB_EDIT, TAB_FOLDERS,
+    CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, TAB_FOLDERS,
     TAB_TAGS, TAB_VIDEOS, TABS, VIEW_BROWSE, VIEW_EDIT, Breadcrumb, Chips,
     ControlBar, Segmented,
     build_overflow,
@@ -123,6 +123,8 @@ class MainWindow(QMainWindow):
         self.index = 0                 # index dans self.items
         # Un seul onglet dit ou l'on est : dossiers, videos, ou edition.
         self.tab = cfg["tab"] if cfg["tab"] in TABS else TAB_FOLDERS
+        # On arrive toujours sur les vignettes : l'edition se choisit.
+        self._editing = False
         # L'onglet d'edition ne dit pas ce qu'on regarde : on garde a part la
         # collection en cours, dossiers ou videos, pour la retrouver en sortant.
         self.content = (CONTENT_VIDEOS if self.tab == TAB_VIDEOS else
@@ -263,7 +265,6 @@ class MainWindow(QMainWindow):
         self.tabs = Segmented("", [
             (TAB_FOLDERS, "Dossiers", "Chaque dossier comme une carte"),
             (TAB_VIDEOS, "Vidéos", "Toutes les vidéos en vrac, au hasard"),
-            (TAB_EDIT, "Édition", "Un élément à la fois, à ranger ou écarter"),
             (TAB_TAGS, "Mots-clés", "Les vidéos réunies par les mots de leurs noms"),
         ], sort_page)
         self.tabs.chosen.connect(self.set_tab)
@@ -527,6 +528,14 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 0)
         self.progress.setVisible(not self.items)
 
+        if INDEX.rebuilt and not getattr(self, "_told_rebuild", False):
+            # Sans ce mot, un index abime se traduisait par « c'est lent », sans
+            # que rien ne dise que la memoire venait d'etre remise a zero.
+            self._told_rebuild = True
+            self.show_banner(
+                "L'index etait abime : il a ete refait. Cette analyse-ci sera "
+                "complete, les suivantes seront immediates.", "#3a3322")
+
         self.scanning = True
         self._scan_started = time.monotonic()
         self._scan_done, self._scan_total, self._scan_name = 0, 0, ""
@@ -551,7 +560,7 @@ class MainWindow(QMainWindow):
         if self.browsing:
             self.refresh_board()
         elif self.items:
-            target = self._first_to_sort() if self.tab == TAB_EDIT else 0
+            target = 0
             if restore_id:
                 for position, item in enumerate(self.items):
                     if item.item_id == restore_id:
@@ -1342,16 +1351,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     @property
     def browsing(self) -> bool:
-        """Vrai quand on parcourt plusieurs éléments, faux quand on en édite un."""
-        return self.tab != TAB_EDIT
+        """Vrai quand on parcourt des vignettes, faux quand on en edite une.
+
+        C'etait auparavant un onglet, ce qui posait l'edition a cote des trois
+        collections alors qu'elle en est l'etage du dessous : on y entre en
+        cliquant une vignette, on en sort par Echap, et l'onglet ne bouge pas.
+        """
+        return not self._editing
 
     @browsing.setter
     def browsing(self, value: bool) -> None:
-        if not value:
-            self.tab = TAB_EDIT
-        else:
-            self.tab = (TAB_VIDEOS if self.content == CONTENT_VIDEOS
-                        else TAB_FOLDERS)
+        self._editing = not value
 
     @property
     def view(self) -> str:
@@ -1427,13 +1437,18 @@ class MainWindow(QMainWindow):
         d'où qu'elle vienne, mène toujours à la même fiche, avec ses
         destinations et sa note. Seule la façon de présenter l'ensemble change.
         """
-        if tab not in TABS or tab == self.tab:
+        if tab not in TABS:
+            return
+        # Recliquer l'onglet ou l'on est ramene chez soi : a la racine, sur les
+        # vignettes. C'est le geste qu'on fait quand on s'est perdu en
+        # descendant, et il ne faisait rien.
+        if (tab == self.tab and self.browsing and not self.levels):
             return
         self.tab = tab
-        if tab == TAB_VIDEOS:
-            self.content = CONTENT_VIDEOS
-        elif tab != TAB_EDIT:
-            self.content = CONTENT_FOLDERS
+        self.content = (CONTENT_VIDEOS if tab == TAB_VIDEOS
+                        else CONTENT_FOLDERS)
+        # Changer de collection ramene aux vignettes.
+        self.browsing = True
         self.cfg["tab"] = tab
         self.cfg["content"] = self.content
         self.cfg["view"] = self.view
@@ -1480,8 +1495,7 @@ class MainWindow(QMainWindow):
         if self.browsing:
             self.refresh_board()
         elif self.items:
-            self.show_item(self._first_to_sort()
-                           if tab == TAB_EDIT and reposition else self.index)
+            self.show_item(self.index)
         self.setFocus()
 
     def set_tag_family(self, family: str) -> None:
@@ -1507,12 +1521,13 @@ class MainWindow(QMainWindow):
         return min(self.index, len(self.items) - 1)
 
     def set_view(self, view: str, reposition: bool = True) -> None:
-        """Conservé pour les raccourcis : parcourir, ou éditer."""
+        """Parcourir les vignettes, ou editer l'element ou l'on se trouve."""
         if view == self.view:
             return
-        self.set_tab(TAB_EDIT if view == VIEW_EDIT else
-                     (TAB_VIDEOS if self.content == CONTENT_VIDEOS
-                      else TAB_FOLDERS), reposition)
+        if view == VIEW_EDIT:
+            self.on_board_open(self.index)
+        else:
+            self.show_board_at(self.index)
 
     def set_content(self, content: str) -> None:
         """Regarder les dossiers, ou les vidéos qu'ils contiennent."""
@@ -1600,21 +1615,31 @@ class MainWindow(QMainWindow):
         return -1
 
     def on_board_open(self, position: int) -> None:
-        """Un clic descend d'un étage : dans le dossier, ou dans la vidéo.
+        """Un clic sur une vignette descend a l'etage du dessous : sa fiche.
 
-        Le même geste partout, quel que soit l'onglet — un dossier s'ouvre sur
-        ses vidéos, un mot-clé sur les siennes, une vidéo sur elle-même. Elle
-        renvoyait auparavant à la fiche d'édition, ce qui changeait de vue au
-        lieu de descendre.
+        Le meme geste partout, quel que soit l'onglet. On y note, on y range, on
+        y passe — et chaque decision avance a l'element suivant de la meme liste.
+        `Echap` remonte aux vignettes, a l'endroit qu'on avait quitte.
         """
         if not (0 <= position < len(self.items)):
             return
         self.index = position
         item = self.items[position]
-        if item.kind == MODE_FOLDERS:
-            self.enter_current()
-        else:
-            self.play_in_app(str(item.path))
+        self.browsing = False
+        self._apply_selectors()
+        self.viewer.setCurrentWidget(
+            self.grid if item.kind == MODE_FOLDERS else self.single)
+        self.show_item(position)
+
+    def show_board_at(self, position: int) -> None:
+        """Retour aux vignettes, sur celle qu'on venait d'ouvrir."""
+        self.browsing = True
+        self._release_media()
+        self.refresh_board()
+        if 0 <= position < len(self.items):
+            self.board.scroll_to(position)
+        self._apply_selectors()
+        self.setFocus()
 
     def on_board_rate(self, position: int, stars: int) -> None:
         if 0 <= position < len(self.items):
@@ -2193,6 +2218,10 @@ class MainWindow(QMainWindow):
         if key == Qt.Key_Left:
             return self.show_item(self.index - 1)
         if key == Qt.Key_Escape:
+            if not self.browsing:
+                # On edite : on remonte aux vignettes avant de quitter le niveau.
+                self.show_board_at(self.index)
+                return
             if self.go_up():
                 return
             self.stop_scan()
@@ -2264,6 +2293,13 @@ class MainWindow(QMainWindow):
         # Tout ce que la relecture a appris est deja ecrit : il ne reste qu'a
         # refermer. C'est l'inverse de l'ancien cache, qui n'ecrivait qu'a la
         # fin d'une analyse complete et perdait tout des qu'on fermait avant.
+        # Une relecture abandonnee ecrit encore : fermer la connexion sous elle
+        # laissait un fichier a moitie ecrit, que le lancement suivant trouvait
+        # illisible — et l'on reanalysait tout, chaque fois, sans le savoir.
+        for thread in getattr(self, "_dying", []):
+            thread.stop()
+            thread.wait(4000)
+        self._dying = []
         INDEX.prune()
         INDEX.close()
         self.cfg["window"] = {"w": self.width(), "h": self.height()}

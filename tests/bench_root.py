@@ -39,6 +39,8 @@ def main() -> int:
         return 1
     print(f"Racine  : {root}")
     print(f"Support : {'partage reseau' if is_network_path(root) else 'disque local'}")
+    print(f"Index   : {INDEX.health()}, {INDEX.count_folders()} dossiers connus, "
+          f"{INDEX.size_on_disk() // 1024} Ko")
 
     start = time.perf_counter()
     known = cached_items(root, MODE_FOLDERS, False)

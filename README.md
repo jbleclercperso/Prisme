@@ -71,7 +71,7 @@ déjà vu est instantané.
 | clic, ou `F` | Descend d'un étage : dans le dossier, ou dans la vidéo |
 | `Ctrl+Z` | Annuler la dernière action |
 | `Ctrl+F` | Aller au champ de filtre |
-| `Ctrl+P` | Basculer entre la fiche unique et la planche |
+| `Ctrl+P` | Basculer entre les vignettes et la fiche |
 | `Ctrl+H` | Se placer sur un élément au hasard |
 | `Ctrl+←/→` | Page d'aperçus précédente / suivante |
 | `Ctrl+B` | Ouvrir la corbeille de session |
@@ -84,7 +84,7 @@ déjà vu est instantané.
 | `Ctrl+O` | Ouvrir l'élément courant dans l'explorateur |
 | `Ctrl+D` | Ouvrir la configuration des destinations |
 | `Entrée` | Pause / reprise (mode fichier) |
-| `Échap` | Remonter d'un niveau, ou quitter le tri si l'on est à la racine |
+| `Échap` | Revenir aux vignettes, puis remonter d'un niveau |
 
 Chaque vignette de la barre du bas est aussi **un bouton** : un clic déclenche
 exactement la même action que sa touche, et enchaîne sur l'élément suivant. Le
@@ -117,7 +117,10 @@ la modification passe inaperçue — **`Ctrl+R` force une relecture complète**
 quand vous avez remanié une arborescence à la main.
 
 Tout ce qui est appris est écrit **au fil de l'eau**, dans
-`%LOCALAPPDATA%\VideoSorter\index.db`. C'est la différence avec le cache
+`%LOCALAPPDATA%\VideoSorter\index.db`. Le fichier est **vérifié à l'ouverture**
+et refait s'il est abîmé, avec un bandeau qui le dit : un index illisible ne se
+signalait pas, chaque lecture répondait simplement « rien de connu », et l'on
+réanalysait tout à chaque lancement sans qu'aucun message ne l'explique. C'est la différence avec le cache
 précédent, un fichier JSON relu et réécrit en entier, donc sauvegardé une seule
 fois, à la toute fin d'une analyse complète : fermer la fenêtre ou entrer dans
 un dossier avant ce moment jetait tout, et chaque lancement repayait le parcours
@@ -155,13 +158,22 @@ où l'on se trouve : en changer **ramène à la racine du tri**.
 
 | Onglet | Ce qu'il montre |
 |---|---|
-| **Dossiers** | Tous les dossiers de la racine, en planche. Les dossiers de tête `+` en sont exclus : ce sont les destinations, pas ce qu'on trie. |
-| **Vidéos** | Toutes les vidéos de l'arborescence, à plat, **en ordre aléatoire** — sans quoi les mêmes reviendraient toujours en tête. |
-| **Édition** | Un élément à la fois, à partir du **premier dossier à trier**. |
+| **Dossiers** | Tous les dossiers, en vignettes. Un dossier de tête `+` ne s'y trie pas lui-même — c'est une destination — mais **ce qu'il contient, oui** : ses sous-dossiers y figurent, et ses vidéos posées en vrac forment une entrée `+ Beach (sans dossier)`. |
+| **Vidéos** | Toutes les vidéos, à plat, **en ordre aléatoire** — sans quoi les mêmes reviendraient toujours en tête. |
 | **Mots-clés** | Les vidéos réunies en catégories d'après les mots de leurs noms. |
 
-Entrer dans un dossier ne change plus l'onglet ouvert : seul un clic sur un
-onglet en change.
+**L'édition n'est pas un quatrième onglet, c'est l'étage du dessous.** On y entre
+en cliquant une vignette, et l'on s'y trouve sur *cet* élément : on note, on
+range, on passe — et chaque décision avance au suivant de la même liste, sans
+jamais remonter. `Échap` ramène aux vignettes, exactement là où on les avait
+quittées.
+
+Les vignettes vont par **pages de 40**, avec leur compte et leurs flèches dans
+la barre du haut (`Ctrl+←/→`).
+
+Recliquer l'onglet où l'on se trouve **ramène à la racine** : c'est le geste
+qu'on fait après être descendu trop loin. Entrer dans un dossier, en revanche,
+ne change pas l'onglet ouvert.
 
 ## Mots-clés
 

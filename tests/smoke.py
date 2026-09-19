@@ -22,7 +22,7 @@ shutil.rmtree(base, ignore_errors=True)
 root = base / "root"
 for folder, names in {
     "+ Set": ["deja range"],
-    "+ Beach": [],
+    "+ Beach": ["vrac beach z.mp4"],
     "Vacances beach 2019": ["beach sunset a.mp4", "beach party b.mp4"],
     "Soiree beach": ["BEACH night c.mp4", "road trip d.mp4"],
     "Divers": ["road movie e.mp4"],
@@ -42,7 +42,7 @@ from videosorter import config as vs_config           # noqa: E402
 from videosorter import media as vs_media             # noqa: E402
 from videosorter.config import Config                 # noqa: E402
 from videosorter.index import INDEX                   # noqa: E402
-from videosorter.header import TAB_EDIT, TAB_FOLDERS, TAB_TAGS, TAB_VIDEOS  # noqa: E402
+from videosorter.header import TAB_FOLDERS, TAB_TAGS, TAB_VIDEOS  # noqa: E402
 from videosorter.scan import MODE_FLAT, MODE_FOLDERS  # noqa: E402
 from videosorter.window import MainWindow             # noqa: E402
 
@@ -85,14 +85,18 @@ print("\n[1] Premier inventaire")
 window.start_root(root, MODE_FOLDERS)
 settle()
 names = sorted(i.name for i in window.all_items)
-check(not any(n.startswith("+") for n in names),
-      f"les dossiers de tete sont ecartes de la liste ({names})")
-check(len(names) == 3, f"les trois dossiers a trier sont la ({names})")
+check(not any(n == "+ Set" or n == "+ Beach" for n in names),
+      f"les dossiers de tete ne se trient pas eux-memes ({names})")
+check("deja range" in names,
+      f"mais ce qu'ils contiennent, oui ({names})")
+check(any("sans dossier" in n for n in names),
+      f"et leurs videos en vrac ont leur propre entree ({names})")
 
 print("\n[2] Relancement : rien a relire")
 patches = []
 window.start_root(root, MODE_FOLDERS)
-check(len(window.all_items) == 3,
+shown_before = len(names)
+check(len(window.all_items) == shown_before,
       f"la liste est deja la, avant le disque ({len(window.all_items)})")
 window.scan_thread.patch.connect(lambda a, r, g: patches.append((len(a), len(r), len(g))))
 settle()
@@ -101,14 +105,12 @@ check(window.scan_thread.rescanned == 0,
       f"aucun dossier reparcouru ({window.scan_thread.rescanned})")
 
 print("\n[3] Les onglets repartent de la racine")
-window.set_tab(TAB_EDIT)
-settle()
 window.enter_current()
 settle()
-check(window.root != root, f"on est descendu dans un dossier ({window.root.name})")
+check(window.root != root, f"on peut descendre dans un dossier ({window.root.name})")
 window.set_tab(TAB_FOLDERS)
 settle()
-check(window.root == root, f"l onglet Dossiers ramene a la racine ({window.root})")
+check(window.root == root, f"recliquer l onglet ramene a la racine ({window.root})")
 check(window.mode == MODE_FOLDERS, "et en mode dossiers")
 
 window.set_tab(TAB_VIDEOS)
@@ -121,10 +123,10 @@ check(window.sort_mode == "random", "et dans un ordre aleatoire")
 check(window.tree.action == "go",
       f"l arborescence passe en « aller dans » ({window.tree.action})")
 
-window.set_tab(TAB_EDIT)
+window.set_tab(TAB_FOLDERS)
 settle()
 check(window.tree.action == "send",
-      f"et revient a « envoyer vers » en edition ({window.tree.action})")
+      f"et revient a « envoyer vers » sur les dossiers ({window.tree.action})")
 
 print("\n[4] Mots-cles : des categories, pas des doublons")
 window.set_tag_family("top")
@@ -137,7 +139,7 @@ check(len(seen) == len(set(seen)),
       f"chaque video n apparait que dans une seule ({len(seen)} pour "
       f"{len(set(seen))} distinctes)")
 
-window.set_tab(TAB_EDIT)
+window.set_tab(TAB_FOLDERS)
 settle()
 check("Analyser" in window.scan_button.text(),
       "au repos, le bouton propose d analyser (" + window.scan_button.text() + ")")
@@ -172,17 +174,20 @@ check(card.duration_chip.isVisible() and "vidéo" in card.duration_chip.text(),
       "la pastille d un dossier compte ses videos ("
       + card.duration_chip.text() + ")")
 
-opened = []
-window.play_in_app = lambda path, start_s=0.0: opened.append(path)
-window.on_board_open(0)
-settle()
-check(window.root != root, "un clic sur un dossier entre dedans ("
-      + window.root.name + ")")
-window.on_board_open(0)
-check(bool(opened), "et un clic sur une video l ouvre (" + str(opened[:1]) + ")")
+check(window.browsing, "on arrive sur les vignettes")
+window.on_board_open(1)
+check(not window.browsing and window.index == 1,
+      "un clic ouvre la fiche de cette vignette (index " + str(window.index) + ")")
+from PySide6.QtCore import Qt                                 # noqa: E402
+from PySide6.QtTest import QTest                              # noqa: E402
+QTest.keyClick(window, Qt.Key_Escape)
+pump(0.3)
+check(window.browsing and window.index == 1,
+      "Echap remonte aux vignettes, la ou l on etait (index "
+      + str(window.index) + ")")
 
-window.set_tab(TAB_FOLDERS)
-settle()
+from videosorter.board import PAGE_SIZE                        # noqa: E402
+check(PAGE_SIZE == 40, "les vignettes vont par pages de " + str(PAGE_SIZE))
 
 print()
 print("[7] Arborescence : les destinations seulement")

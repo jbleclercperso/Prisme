@@ -90,6 +90,9 @@ class Index:
         self.lock = threading.RLock()
         self.db: sqlite3.Connection | None = None
         self.pending = 0
+        # Vrai quand le fichier a du etre refait : la collection sera
+        # reanalysee une fois, et l'application doit pouvoir le dire.
+        self.rebuilt = False
         self.last_commit = time.monotonic()
         # Les sondages ffprobe tiennent en memoire : ils sont consultes des
         # dizaines de milliers de fois par tri (durees, resolutions, filtres) et
@@ -110,10 +113,60 @@ class Index:
             self.db.executescript(SCHEMA)
             self.db.commit()
         except sqlite3.Error:
-            self.db = None
-            return
+            # Meme un fichier qu'on n'arrive pas a ouvrir se refait : c'est un
+            # cache, rien d'irremplacable n'y dort.
+            self._rebuild()
+            if self.db is None:
+                return
+        if not self._sound():
+            # Un index abime ne se signale pas : chaque lecture rend « rien de
+            # connu », l'application reanalyse tout, et recommence au lancement
+            # suivant — indefiniment, sans qu'un seul message ne l'explique.
+            # Mieux vaut le refaire une fois et le dire.
+            self._rebuild()
+            if self.db is None:
+                return
         self._load_probes()
         self._migrate_json()
+
+    def _sound(self) -> bool:
+        """Verifie que le fichier est lisible, et pas seulement ouvrable."""
+        if self.db is None:
+            return False
+        try:
+            row = self.db.execute("PRAGMA quick_check(1)").fetchone()
+            if not row or row[0] != "ok":
+                return False
+            # `quick_check` ne relit pas forcement chaque table : on en touche
+            # une, c'est la ou l'abime s'etait loge.
+            self.db.execute("SELECT COUNT(*) FROM folders").fetchone()
+            return True
+        except sqlite3.Error:
+            return False
+
+    def _rebuild(self) -> None:
+        """Repart d'un index vide, apres avoir efface celui qui est abime."""
+        try:
+            if self.db is not None:
+                self.db.close()
+        except sqlite3.Error:
+            pass
+        self.db = None
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                Path(str(self.path) + suffix).unlink()
+            except OSError:
+                pass
+        try:
+            self.db = sqlite3.connect(self.path, check_same_thread=False,
+                                      timeout=10.0)
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=NORMAL")
+            self.db.executescript(SCHEMA)
+            self.db.commit()
+            self.rebuilt = True
+        except sqlite3.Error:
+            self.db = None
 
     def _load_probes(self) -> None:
         if self.db is None:
@@ -177,6 +230,10 @@ class Index:
                 return
             try:
                 self.db.commit()
+            except sqlite3.DatabaseError:
+                # Le fichier est abime : on le refait plutot que de continuer a
+                # ecrire dans un index dont plus rien ne ressortira.
+                self._rebuild()
             except sqlite3.Error:
                 pass
             self.pending = 0
@@ -451,6 +508,14 @@ class Index:
         self._load_probes()
         if migrate:
             self._migrate_json()
+
+    def health(self) -> str:
+        """Un mot sur l'etat de l'index, pour le dire a qui regarde."""
+        if self.db is None:
+            return "indisponible"
+        if self.rebuilt:
+            return "refait (il etait abime)"
+        return "ok"
 
     def count_folders(self) -> int:
         if self.db is None:

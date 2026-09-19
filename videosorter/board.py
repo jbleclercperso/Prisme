@@ -27,7 +27,7 @@ CARD_GAP = 10
 MIN_CARD_WIDTH = 150
 # Une carte coute cher a construire : six cents d'un coup prenaient plusieurs
 # secondes. On n'en batit qu'une page, et l'on tourne les pages.
-PAGE_SIZE = 60
+PAGE_SIZE = 40
 
 
 class BoardCard(QFrame):
