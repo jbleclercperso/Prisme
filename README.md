@@ -98,38 +98,85 @@ elle ne déborde jamais.
 
 ## Vitesse de l'analyse
 
-Une collection ne change presque pas d'un lancement à l'autre : l'application
-garde le résultat de chaque dossier et ne refait que ce qui a bougé.
+Une collection ne change presque pas d'un lancement à l'autre. L'application
+part donc de ce qu'elle savait, et ne relit le disque qu'ensuite, en tâche de
+fond.
 
-Ce qui déclenche une réanalyse : la date de modification du dossier ou de l'un
-de ses sous-dossiers directs. Windows la met à jour dès qu'une entrée y est
-ajoutée, retirée ou renommée, ce qui couvre tout changement aux deux premiers
-niveaux. Plus profond, la modification passe inaperçue — **`Ctrl+R` force une
-relecture complète** quand vous avez remanié une arborescence à la main.
+**À l'ouverture d'une racine déjà vue, rien n'est demandé au disque** : la liste
+est à l'écran tout de suite, telle qu'au dernier passage. Une relecture démarre
+derrière, en priorité basse, compare les dates, et ne publie que les
+différences — un dossier qui n'a pas bougé ne coûte ni parcours, ni signal, ni
+repeinte. Sur une collection stable, elle ne publie strictement rien.
 
-Au démarrage, un bandeau indique combien de dossiers ont été relus depuis
-l'analyse précédente et combien ont dû être réanalysés.
+Le premier inventaire, lui, parcourt les dossiers **huit de front** : il attend
+le réseau, pas le processeur.
 
-Le cache vit dans `%LOCALAPPDATA%\VideoSorter\scan-cache.json`, se limite aux
-30 000 dossiers les plus récemment consultés, et `use_scan_cache: false` dans la
-configuration le désactive.
+Ce qui déclenche une réanalyse : la date de modification du dossier. Windows la
+met à jour dès qu'une entrée y est ajoutée, retirée ou renommée. Plus profond,
+la modification passe inaperçue — **`Ctrl+R` force une relecture complète**
+quand vous avez remanié une arborescence à la main.
+
+Tout ce qui est appris est écrit **au fil de l'eau**, dans
+`%LOCALAPPDATA%\VideoSorter\index.db`. C'est la différence avec le cache
+précédent, un fichier JSON relu et réécrit en entier, donc sauvegardé une seule
+fois, à la toute fin d'une analyse complète : fermer la fenêtre ou entrer dans
+un dossier avant ce moment jetait tout, et chaque lancement repayait le parcours
+entier. Ici, une analyse interrompue garde ce qu'elle a appris, et la
+composition de la racine est notée avant même la vérification.
+
+L'index retient aussi les sondages ffprobe, repris de l'ancien cache au premier
+lancement. `use_scan_cache: false` le désactive entièrement.
 
 ## Vue planche
 
-`Ctrl+P`, ou le bouton **Planche**. Les éléments passent en cartes : image,
-nom, nombre de vidéos, taille, durée, note. Survoler une carte la lit en boucle,
-cliquer l'ouvre.
+`Ctrl+P`, ou le bouton **Planche**. Les éléments passent en cartes. Sous chaque
+image, **une seule ligne discrète**, la même que sous un aperçu : la durée en
+pastille en haut à droite, puis `1080p · nom du fichier` pour une vidéo,
+`12 vidéos · nom du dossier` pour un dossier. Survoler une carte la lit en
+boucle, cliquer l'ouvre.
 
 Ce n'est pas un second logiciel mais une autre présentation du même contenu :
-même racine, même filtre, même arborescence, mêmes touches de destination. Deux
-choses seulement changent — la densité, vingt éléments au lieu d'un, et
-l'intention, puisqu'**un clic dans l'arborescence ouvre le dossier au lieu d'y
-envoyer l'élément**. Les sous-dossiers deviennent des catégories sans rien de
-plus : ouvrir une carte réaffiche une planche.
+même racine, même filtre, même arborescence, mêmes touches de destination.
 
-**Au hasard** (`Ctrl+H`) se place sur un élément non encore traité, dans l'une
-ou l'autre vue. Un **sélecteur de densité** choisit de 2 à 8 cartes par rangée :
-moins de colonnes, donc des cartes plus grandes.
+## Les quatre onglets
+
+Un onglet est un point de vue sur **toute** la collection, jamais sur l'endroit
+où l'on se trouve : en changer **ramène à la racine du tri**.
+
+| Onglet | Ce qu'il montre |
+|---|---|
+| **Dossiers** | Tous les dossiers de la racine, en planche. Les dossiers de tête `+` en sont exclus : ce sont les destinations, pas ce qu'on trie. |
+| **Vidéos** | Toutes les vidéos de l'arborescence, à plat, **en ordre aléatoire** — sans quoi les mêmes reviendraient toujours en tête. |
+| **Édition** | Un élément à la fois, à partir du **premier dossier à trier**. |
+| **Mots-clés** | Les vidéos réunies en catégories d'après les mots de leurs noms. |
+
+Entrer dans un dossier ne change plus l'onglet ouvert : seul un clic sur un
+onglet en change.
+
+## Mots-clés
+
+Les mots qui reviennent le plus dans vos noms de fichiers deviennent des
+catégories, sans rien saisir (*Mots fréquents*) — ou bien les vôtres
+(*Mes mots-clés*, `Ctrl+D` puis *Mots-clés automatiques…*).
+
+**Une vidéo ne va que dans une seule catégorie** : celle du mot qui la décrit le
+mieux, le plus fréquent de ceux que son nom porte. Sans cela les mots fréquents
+se recouvraient presque entièrement, et l'on ouvrait dix catégories pour y
+retrouver les dix mêmes vidéos. Les catégories sortent de la plus fournie à la
+plus rare.
+
+La comparaison ignore casse et accents : `Été`, `ete` et `ETE` tombent dans la
+même.
+
+## Deux hasards
+
+Deux boutons, côte à côte dans l'entête, parce que ce sont deux portées
+différentes :
+
+- **⚄ Aléatoire** (`Ctrl+H`) pioche dans **toute la collection** analysée ;
+- **⚄ Ici** pioche dans le **seul élément affiché**.
+
+Un **sélecteur de densité** choisit de 2 à 8 cartes par rangée.
 
 Les filtres chiffrés accompagnent la planche : durée *plus longue que* / *plus
 courte que*, résolution *au moins* / *au plus*, note *au moins*. La durée d'un
@@ -186,16 +233,22 @@ ils restent visibles en permanence dans la barre.
 
 ## Mode arborescence
 
-`Ctrl+T` (ou le bouton *Arborescence*) affiche à gauche l'arbre de vos dossiers
-de destination, volontairement discret, pendant que le lecteur garde la droite.
+`Ctrl+T` (ou le bouton *Arborescence*) affiche à gauche l'arbre de vos
+destinations, pendant que le lecteur garde la droite.
 
-**Un clic sur un dossier y envoie l'élément courant, sans confirmation**, et
-l'élément suivant s'affiche. Utile quand les destinations sont trop nombreuses
-ou trop imbriquées pour tenir sur des touches.
+**Seuls les dossiers de tête — ceux préfixés `+` — y figurent** : ce sont les
+seules destinations. Montrer toute l'arborescence obligeait à les chercher
+parmi des centaines, et invitait à la faute.
+
+Un clic fait l'une de deux choses opposées : **y envoyer l'élément courant**,
+sans confirmation, ou **s'y rendre**. Chaque geste porte donc sa couleur — ambre
+pour *envoyer vers*, qui déplace des fichiers, bleu pour *aller dans*, qui ne
+touche à rien — sur le cadre du panneau, son bouton, les icônes de dossier et le
+survol. Le panneau prend le geste de l'onglet ouvert : on range en **Édition**,
+on se promène en **Vidéos**. Le bouton en haut bascule à tout moment.
 
 Le lien *changer…* choisit la racine de l'arbre ; par défaut c'est le dossier
-parent de la racine triée. Les niveaux ne sont lus que lorsqu'on les déplie,
-une arborescence profonde ne coûte donc rien.
+parent de la racine triée. Les niveaux ne sont lus que lorsqu'on les déplie.
 
 ## Destinations
 
@@ -257,7 +310,7 @@ quelques réglages : `preview_seconds` (durée de la boucle au survol),
 `thumb_count` (nombre d'aperçus), `thumb_width` (finesse des vignettes),
 `delete_mode`, `scroll_seconds` (pas de la molette), `tree_root`,
 `filter_include`, `filter_exclude`, `skip_hidden`, `use_scan_cache`.
-Le cache de vignettes est à côté, dans `thumbs\`.
+L'index est à côté, dans `index.db`, et le cache de vignettes dans `thumbs\`.
 
 ## Tests
 
@@ -303,8 +356,8 @@ Vérifie la corbeille Windows réelle et exporte une capture de la fenêtre.
 |---|---|
 | `main.py` | Démarrage |
 | `videosorter/config.py` | Configuration persistante, emplacements |
-| `videosorter/scan.py` | Analyse de la racine, statistiques des dossiers |
-| `videosorter/scan_cache.py` | Mémoire des analyses précédentes |
+| `videosorter/scan.py` | Inventaire de la racine, et sa relecture en tâche de fond |
+| `videosorter/index.py` | Index persistant : ce qu'on sait déjà du disque |
 | `videosorter/board.py` | Vue planche : les éléments en cartes |
 | `videosorter/ratings.py` | Notes de 0 à 5 étoiles |
 | `videosorter/trash.py` | Corbeille de session |
