@@ -96,14 +96,12 @@ class BoardCard(QFrame):
         self._pixmap = None
         self.image.setPixmap(QPixmap())
         self.image.setText("…")
-        # Une icone dit d un coup d oeil si c est un dossier ou une video.
-        mark = "📁" if item.kind == MODE_FOLDERS else "🎬"
-        self.name.setText(f"{mark}  {elide(item.name, 28)}")
+        self.name.setText(elide(item.name, 34))
         self.name.setToolTip(str(item.path))
+        # Tout tient sur une ligne : le nom au-dessus, puis ce qu'on veut savoir
+        # d'un dossier — combien de videos, et quelle place il prend.
         if item.kind == MODE_FOLDERS:
             pieces = [f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}"]
-            if item.subdir_count:
-                pieces.append(f"{item.subdir_count} dossier(s)")
         else:
             pieces = []
         self.meta.setText("   ·   ".join(pieces))

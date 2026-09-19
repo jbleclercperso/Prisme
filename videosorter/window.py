@@ -191,18 +191,30 @@ class MainWindow(QMainWindow):
         header_row.setSpacing(10)
         self.crumbs = Breadcrumb(sort_page)
         self.crumbs.jumped.connect(self.jump_to)
-        header_row.addWidget(self.crumbs, 1)
+        # Le fil d'Ariane prend ce qu'il lui faut, les reglages le reste :
+        # l'inverse les comprimait dans une colonne ou ils se repliaient
+        # sur quatre rangees.
+        self.crumbs.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        header_row.addWidget(self.crumbs, 0)
 
         self.pending_label = QLabel("", sort_page)
         self.pending_label.setObjectName("pending")
         self.pending_label.hide()
         header_row.addWidget(self.pending_label)
 
-        self.random_button = QPushButton("⚄ Partout", sort_page)
+        self.random_button = QPushButton("⚄ Au hasard", sort_page)
         self.random_button.setToolTip("Une vidéo au hasard, partout   (Ctrl+H)")
         self.random_button.setFocusPolicy(Qt.NoFocus)
         self.random_button.clicked.connect(self.pick_random)
-        header_row.addWidget(self.random_button)
+        self.random_button.hide()
+
+        # L'arborescence se montrait et se cachait depuis un menu : un reglage
+        # qu'on bascule sans arret n'a rien a faire derriere trois clics.
+        self.tree_button = QPushButton("Arborescence", sort_page)
+        self.tree_button.setCheckable(True)
+        self.tree_button.setToolTip("Afficher le panneau des dossiers   (Ctrl+T)")
+        self.tree_button.setFocusPolicy(Qt.NoFocus)
+        self.tree_button.clicked.connect(lambda checked: self.toggle_tree(checked))
 
         self.mute_button = QPushButton("🔇", sort_page)
         self.mute_button.setFixedWidth(42)
@@ -225,8 +237,6 @@ class MainWindow(QMainWindow):
             ("Changer de racine…", self.choose_root),
         ])
         self.more_button.setMenu(self.overflow)
-        header_row.addWidget(self.more_button)
-        layout.addLayout(header_row)
 
         selectors = QHBoxLayout()
         selectors.setContentsMargins(0, 0, 0, 0)
@@ -253,6 +263,12 @@ class MainWindow(QMainWindow):
         self.enter_button.setFocusPolicy(Qt.NoFocus)
         self.enter_button.clicked.connect(self.enter_current)
         selectors.addWidget(self.enter_button)
+        selectors.addStretch(1)
+        selectors.addWidget(self.tree_button)
+        selectors.addWidget(self.mute_button)
+        selectors.addWidget(self.more_button)
+        layout.addLayout(selectors)
+        layout.addLayout(header_row)
 
         self.controls = ControlBar(COLUMN_CHOICES, sort_page)
         self.controls.changed.connect(self.on_controls_changed)
@@ -265,17 +281,18 @@ class MainWindow(QMainWindow):
         self.controls.set_terms(self.cfg["filter_include"], self.cfg["filter_exclude"])
         self.controls.set_sort(self.cfg["sort_mode"] or "random")
         self.controls.set_columns(self.cfg["board_columns"])
-        # Onglets et reglages sur la meme rangee : deux lignes distinctes
-        # coutaient une rangee de vignettes pour rien.
-        selectors.addWidget(self.controls, 1)
-        layout.addLayout(selectors)
+        header_row.addWidget(self.controls, 1)
         self.tabs.set_value(self.tab)
         self.tag_chips.set_value(self.tag_family)
         self.controls.set_browsing(self.browsing)
 
         self.progress = QProgressBar(sort_page)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(4)
+        # Une barre muette de quatre pixels ne disait pas s'il restait dix
+        # dossiers ou six cents : sur un partage reseau, l'attente se compte en
+        # minutes et l'on veut savoir ou elle en est.
+        self.progress.setTextVisible(True)
+        self.progress.setFormat("%v / %m analysés")
+        self.progress.setFixedHeight(16)
         layout.addWidget(self.progress)
 
         header = QFrame(sort_page)
@@ -458,6 +475,7 @@ class MainWindow(QMainWindow):
         self.item_title.setText("Analyse en cours…")
         self.item_subtitle.setText("")
         self.progress.setRange(0, 0)
+        self.progress.show()
         self.stack.setCurrentIndex(PAGE_SORT)
         self.setFocus()
 
@@ -720,6 +738,7 @@ class MainWindow(QMainWindow):
 
     def on_scan_finished(self, mode: str, total: int) -> None:
         self.scanning = False
+        self.progress.hide()
         if mode == MODE_FOLDERS:
             self._plain_items = [i for i in self.all_items if not i.is_tag]
             self._plain_root = self.root
@@ -1391,6 +1410,7 @@ class MainWindow(QMainWindow):
         self.tree.setVisible(show)
         self.cfg["tree_visible"] = show
         self.cfg.save()
+        self.tree_button.setChecked(show)
         self.setFocus()
 
     def on_tree_folder(self, path: str) -> None:
