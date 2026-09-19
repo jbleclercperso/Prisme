@@ -1513,6 +1513,40 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
               for p in window.wall.panes),
           "quitter le mur arrête ses lecteurs")
 
+    print("\n[54] Le fil d'Ariane ramène d'un seul clic")
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    origin = str(window.root)
+
+    position = next(i for i, it in enumerate(window.items)
+                    if it.kind == MODE_FOLDERS and Path(it.path).is_dir()
+                    and not it.loose_only)
+    window.show_item(position)
+    window.enter_current()
+    wait_for(app, lambda: not window.scanning and str(window.root) != origin, 60)
+    check(str(window.root) != origin, "on est descendu d'un niveau")
+    check(window.crumbs.layout_.count() >= 3,
+          f"le fil montre la descente ({window.crumbs.layout_.count()} pièces)")
+
+    # Le detour : changer d'onglet vidait la pile des niveaux, et le fil ne
+    # savait plus d'ou l'on venait. Un seul clic doit quand meme ramener.
+    window.set_tab(TAB_VIDEOS)
+    pump(app, 0.5)
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.5)
+    window.start_root(Path(origin) / window.items[0].path.name
+                      if False else Path(origin), MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 60)
+
+    window.show_item(position)
+    window.enter_current()
+    wait_for(app, lambda: not window.scanning and str(window.root) != origin, 60)
+    window.levels = []          # comme apres un changement d'onglet
+    window.jump_to(origin)
+    ok = wait_for(app, lambda: not window.scanning and str(window.root) == origin, 60)
+    check(ok, "un seul clic ramène à la racine, même la pile vidée")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

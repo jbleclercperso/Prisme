@@ -143,6 +143,9 @@ class MainWindow(QMainWindow):
         self._backfill_started = 0.0
         self._plain_items: list = []
         self._plain_root = None
+        # La racine que l on a choisie : le fil d Ariane en part toujours,
+        # quels que soient les onglets traverses depuis.
+        self.origin = Path(cfg["root"]) if cfg["root"] else None
         self.tags: list = list(cfg["tags"])
         self.mode = MODE_FOLDERS
         self.root: Path | None = None
@@ -591,6 +594,8 @@ class MainWindow(QMainWindow):
             del self.visited[:-40]
         if reset_levels:
             self.levels = []
+            # Choisir une racine, c'est poser l'origine du fil d'Ariane.
+            self.origin = Path(root)
         self._restore_id = restore_id
         self.root = Path(root)
         # Un mode impose doit reconduire le selecteur, sinon l'entete annonce
@@ -636,8 +641,10 @@ class MainWindow(QMainWindow):
         self.cfg.save()
         self.welcome.set_recent(self.cfg["recent_roots"])
 
-        top = Path(self.levels[0]["root"]) if self.levels else self.root
-        self.crumbs.set_path(top, self.root)
+        # Le fil part de la racine choisie, et non du premier niveau empile :
+        # changer d'onglet vidait la pile, et le fil se reduisait alors au seul
+        # dossier courant — on ne pouvait plus remonter.
+        self.crumbs.set_path(self._origin_for(self.root), self.root)
         self._apply_selectors()
         self.commands.rebuild(self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer"))
         # En planche, la vue reste la planche : basculer sur la fiche le temps
@@ -812,6 +819,7 @@ class MainWindow(QMainWindow):
         self.backfill.done.connect(self.on_backfill_done)
         self._backfill_started = time.monotonic()
         self.backfill.start()
+        self._name_backfill_action()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.progress.setFormat("recensement des vidéos…")
@@ -833,11 +841,15 @@ class MainWindow(QMainWindow):
         busy = self.preview.busy()
         self.activity_label.setText(f"⋯ {busy} aperçu(s)" if busy else "")
 
-    def _name_backfill_action(self) -> None:
-        """Rappelle, dans le menu, quand la preparation a ete menee a terme."""
-        done = self.cfg["thumbs_last_run"]
-        label = ("Préparer toutes les vignettes"
-                 + (f"   (dernière : {done})" if done else "   (jamais faite)"))
+    def _name_backfill_action(self, seen: int = -1, total: int = 0) -> None:
+        """Dit, dans le menu, ou en est la preparation — ou quand elle a fini."""
+        if self.backfill is not None:
+            label = (f"Arrêter la préparation   ({seen} / {total})"
+                     if seen >= 0 else "Arrêter la préparation")
+        else:
+            done = self.cfg["thumbs_last_run"]
+            label = ("Préparer toutes les vignettes"
+                     + (f"   (dernière : {done})" if done else "   (jamais faite)"))
         for action in self.overflow.actions():
             if action.text().startswith("Préparer toutes les vignettes"):
                 action.setText(label)
@@ -861,6 +873,7 @@ class MainWindow(QMainWindow):
         self.progress.show()
 
     def on_backfill_progress(self, made: int, kept: int, total: int) -> None:
+        self._name_backfill_action(made + kept, total)
         if self.scanning:
             return
         seen = made + kept
@@ -884,10 +897,11 @@ class MainWindow(QMainWindow):
             self.cfg["thumbs_last_run"] = datetime.now().strftime("%d/%m/%Y à %H:%M")
             self.cfg.save()
             self._name_backfill_action()
+        self._name_backfill_action()
         fin = "terminée" if complete else "interrompue"
         self.show_banner(
             f"Préparation {fin} : {made} vignette(s) fabriquée(s), "
-            f"{kept} déjà présente(s). Elle reprendra où elle s'est arrêtée.",
+            f"{kept} déjà présente(s). Compte rendu : {ThumbBackfill.LOG}",
             "#22303f",
         )
 
@@ -2036,15 +2050,48 @@ class MainWindow(QMainWindow):
         self.random_here_button.setVisible(
             item is not None and bool(item.videos) and not self.browsing)
 
+    def _origin_for(self, current):
+        """Le plus haut dossier dont `current` descend : la racine du fil."""
+        if current is None:
+            return None
+        candidates = [Path(level["root"]) for level in self.levels]
+        if self.origin is not None:
+            candidates.append(self.origin)
+        for candidate in candidates:
+            try:
+                Path(current).relative_to(candidate)
+            except ValueError:
+                continue
+            return candidate
+        return current
+
     def jump_to(self, path: str) -> None:
-        """Le fil d'Ariane ramène directement au dossier cliqué."""
+        """Le fil d'Ariane ramène directement au dossier cliqué.
+
+        Il dépilait les niveaux traversés jusqu'à retrouver la cible — et ne
+        trouvait rien quand la pile avait été vidée entre-temps, par exemple en
+        changeant d'onglet. Il fallait alors cliquer plusieurs fois, ou bien le
+        clic ne faisait rien du tout. On ne se sert donc plus de la pile pour
+        savoir où aller : le chemin cliqué suffit, et la pile est simplement
+        ramenée à ce qui reste au-dessus de lui.
+        """
         target = Path(path)
         if self.root is not None and target == self.root:
             return
-        while self.levels and Path(self.levels[-1]["root"]) != target:
-            self.levels.pop()
-        if self.levels and Path(self.levels[-1]["root"]) == target:
-            self.levels.pop()
+        if not target.is_dir():
+            self.show_banner(f"Introuvable : {target}", "#3a2226")
+            return
+        kept = []
+        for level in self.levels:
+            above = Path(level["root"])
+            if above == target:
+                break
+            try:
+                target.relative_to(above)
+            except ValueError:
+                continue
+            kept.append(level)
+        self.levels = kept
         self.start_root(target, self.mode_for_content(), reset_levels=False)
 
     def toggle_board(self, visible: bool | None = None,

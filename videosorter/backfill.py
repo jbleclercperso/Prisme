@@ -21,6 +21,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from .config import APP_DIR
 from .media import build_preview_plan, extract_thumb, thumb_path
 from .scan import walk_videos
 
@@ -38,6 +39,11 @@ class ThumbBackfill(QThread):
     done = Signal(int, int, bool)         # fabriquees, deja presentes, termine
 
     MADE, KEPT, FAILED = "made", "kept", "failed"
+
+    # Un compte rendu ecrit a cote du cache : quand l interface laisse un
+    # doute, ce fichier tranche. On peut l ouvrir pendant que le parcours
+    # tourne et voir les lignes s ajouter.
+    LOG = APP_DIR / "preparation.log"
 
     def __init__(self, root: Path, width: int, skip_hidden: bool = True,
                  parent=None):
@@ -75,6 +81,14 @@ class ThumbBackfill(QThread):
             pass
         return self.MADE if extract_thumb(path, ts, self.width) else self.FAILED
 
+    def _log(self, line: str) -> None:
+        try:
+            APP_DIR.mkdir(parents=True, exist_ok=True)
+            with self.LOG.open("a", encoding="utf-8") as out:
+                out.write(f"{time.strftime('%d/%m %H:%M:%S')}  {line}\n")
+        except OSError:
+            pass
+
     def run(self) -> None:
         # Le recensement seul prend plusieurs minutes sur un partage reseau. Sans
         # nouvelle pendant ce temps, on croit que rien ne se passe : il annonce
@@ -85,6 +99,7 @@ class ThumbBackfill(QThread):
             return self.done.emit(0, 0, False)
         self.total = len(videos)
         self.counted.emit(self.total)
+        self._log(f"debut — {self.total} video(s) recensee(s) sous {self.root}")
 
         last = 0.0
         with ThreadPoolExecutor(max_workers=WORKERS) as pool:
@@ -98,12 +113,19 @@ class ThumbBackfill(QThread):
                 else:
                     self.failed += 1
                 # Une annonce par video repeindrait l'interface cent mille fois.
+                seen = self.made + self.kept + self.failed
+                if seen % 500 == 0:
+                    self._log(f"{seen}/{self.total} — {self.made} fabriquee(s), "
+                              f"{self.kept} deja la, {self.failed} ratee(s)")
                 now = time.monotonic()
                 if now - last >= 0.25:
                     self.progress.emit(self.made, self.kept + self.failed,
                                        self.total)
                     last = now
         self.progress.emit(self.made, self.kept, self.total)
+        self._log(f"fin — {self.made} fabriquee(s), {self.kept} deja la, "
+                  f"{self.failed} ratee(s)"
+                  + ("" if not self._stop else " (interrompu)"))
         self.done.emit(self.made, self.kept, not self._stop)
 
     def _collect(self) -> list:
