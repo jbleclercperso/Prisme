@@ -207,6 +207,24 @@ class Breadcrumb(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._top: Path | None = None
 
+    def append_leaf(self, text: str) -> None:
+        """Ajoute un dernier segment qui ne correspond a aucun dossier.
+
+        Un mot-cle n'existe pas sur le disque : sans cela, y entrer laissait le
+        fil d'Ariane sur la racine, et l'on ne savait plus ou l'on etait.
+        """
+        if self.layout_.count():
+            # Le ressort final, pose par set_path, doit rester en queue.
+            item = self.layout_.takeAt(self.layout_.count() - 1)
+            separator = QLabel("›", self)
+            separator.setObjectName("crumbSep")
+            self.layout_.addWidget(separator)
+            label = QLabel(text, self)
+            label.setObjectName("crumb")
+            label.setProperty("last", "true")
+            self.layout_.addWidget(label)
+            self.layout_.addItem(item)
+
     def set_path(self, top, current) -> None:
         """Affiche la chaîne de `top` à `current`, chaque segment cliquable."""
         while self.layout_.count():

@@ -11,9 +11,9 @@ from PySide6.QtCore import QObject, QThread, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSpinBox,
-    QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+    QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
 from .websearch import SearchFilters, VideoResult, run_search
@@ -25,7 +25,7 @@ RESOLUTION_CHOICES = [
 
 COL_THUMB, COL_TITLE, COL_DURATION, COL_RES, COL_SOURCE, COL_LINK = range(6)
 
-BING_KEY_URL = "https://portal.azure.com/#create/Microsoft.BingSearch"
+SERPAPI_KEY_URL = "https://serpapi.com/users/sign_up"
 
 
 class _SearchWorker(QObject):
@@ -72,11 +72,12 @@ class WebSearchDialog(QDialog):
 
         intro = QLabel(
             "Cherche des videos sur des sites de niche (forums, sites "
-            "communautaires…), pas sur les grandes plateformes : une "
-            "recherche web donne des sites de depart, puis chacun est "
-            "explore a la recherche de fiches video correspondant aux "
-            "filtres. Aucun telechargement automatique — chaque resultat "
-            "reste un lien a ouvrir soi-meme.",
+            "communautaires…), pas sur les grandes plateformes. Les sites de "
+            "confiance sont explores directement, sans quota ni limite ; "
+            "SerpAPI ne sert qu'a decouvrir de nouveaux sites a partir de "
+            "mots-cles (250 recherches gratuites par mois). Aucun "
+            "telechargement automatique — chaque resultat reste un lien a "
+            "ouvrir soi-meme.",
             self,
         )
         intro.setWordWrap(True)
@@ -88,7 +89,30 @@ class WebSearchDialog(QDialog):
         self.keywords.setPlaceholderText("ex. course de cote 1987 auvergne")
         self.keywords.returnPressed.connect(self.start_search)
         keywords_row.addWidget(self.keywords, 1)
+        self.strict_keywords = QCheckBox("Tous les mots-cles (plus strict)", self)
+        self.strict_keywords.setToolTip(
+            "Coche : chaque mot doit apparaitre. Decoche : un seul suffit, "
+            "au prix de resultats moins precis."
+        )
+        self.strict_keywords.setChecked(True)
+        keywords_row.addWidget(self.strict_keywords)
         layout.addLayout(keywords_row)
+
+        domains_row = QHBoxLayout()
+        domains_row.addWidget(QLabel("Sites de confiance :", self))
+        self.known_domains = QLineEdit(self)
+        self.known_domains.setPlaceholderText(
+            "ex. forum-exemple.net collection-exemple.org — explores directement, sans quota"
+        )
+        self.known_domains.textChanged.connect(self._on_domains_changed)
+        domains_row.addWidget(self.known_domains, 1)
+        self.discover_new_sites = QCheckBox("Decouvrir aussi de nouveaux sites (SerpAPI)", self)
+        self.discover_new_sites.setToolTip(
+            "Consomme le quota gratuit (250 recherches/mois). Les sites de "
+            "confiance ci-contre, eux, n'en consomment jamais."
+        )
+        domains_row.addWidget(self.discover_new_sites)
+        layout.addLayout(domains_row)
 
         filters_row = QHBoxLayout()
         filters_row.addWidget(QLabel("Duree min. (min) :", self))
@@ -106,15 +130,24 @@ class WebSearchDialog(QDialog):
         self.max_sites = QSpinBox(self)
         self.max_sites.setRange(1, 50)
         filters_row.addWidget(self.max_sites)
+
+        filters_row.addWidget(QLabel("Resultats max. :", self))
+        self.max_results = QSpinBox(self)
+        self.max_results.setRange(1, 200)
+        self.max_results.setToolTip(
+            "La recherche s'arrete des que ce nombre de resultats est atteint : "
+            "mieux vaut peu et pertinent que beaucoup et bruyant."
+        )
+        filters_row.addWidget(self.max_results)
         filters_row.addStretch(1)
         layout.addLayout(filters_row)
 
         key_row = QHBoxLayout()
-        key_row.addWidget(QLabel("Cle API Bing :", self))
+        key_row.addWidget(QLabel("Cle API SerpAPI :", self))
         self.api_key = QLineEdit(self)
-        self.api_key.setPlaceholderText("colle ici ta cle Azure « Bing Search »")
+        self.api_key.setPlaceholderText("colle ici ta cle SerpAPI (gratuite, 250 recherches/mois)")
         key_row.addWidget(self.api_key, 1)
-        howto = QLabel(f'<a href="{BING_KEY_URL}">Obtenir une cle gratuite</a>', self)
+        howto = QLabel(f'<a href="{SERPAPI_KEY_URL}">Obtenir une cle gratuite</a>', self)
         howto.setOpenExternalLinks(True)
         key_row.addWidget(howto)
         layout.addLayout(key_row)
@@ -162,10 +195,28 @@ class WebSearchDialog(QDialog):
         self._load_settings()
 
     # -- reglages persistes ----------------------------------------------
+    def _on_domains_changed(self, text: str) -> None:
+        """Sans domaine de confiance, SerpAPI est la seule source possible :
+        la case se coche et se verrouille plutot que de risquer une recherche
+        qui ne trouve aucun site."""
+        if text.strip():
+            self.discover_new_sites.setEnabled(True)
+        else:
+            self.discover_new_sites.setChecked(True)
+            self.discover_new_sites.setEnabled(False)
+
     def _load_settings(self) -> None:
         self.api_key.setText(self.cfg.get("web_search_api_key", ""))
         self.min_duration.setValue(int(self.cfg.get("web_search_min_duration_min", 0) or 0))
         self.max_sites.setValue(int(self.cfg.get("web_search_max_sites", 15) or 15))
+        self.max_results.setValue(int(self.cfg.get("web_search_max_results", 30) or 30))
+        self.strict_keywords.setChecked(bool(self.cfg.get("web_search_strict_keywords", True)))
+        self.known_domains.setText(self.cfg.get("web_search_known_domains", ""))
+        if self.known_domains.text().strip():
+            self.discover_new_sites.setChecked(bool(self.cfg.get("web_search_discover_new_sites", False)))
+        # setText() n'emet textChanged que si la valeur change : un champ deja
+        # vide au demarrage ne declencherait jamais la synchronisation.
+        self._on_domains_changed(self.known_domains.text())
         want_height = int(self.cfg.get("web_search_min_height", 0) or 0)
         for index, (_, height) in enumerate(RESOLUTION_CHOICES):
             if height == want_height:
@@ -176,6 +227,10 @@ class WebSearchDialog(QDialog):
         self.cfg["web_search_api_key"] = self.api_key.text().strip()
         self.cfg["web_search_min_duration_min"] = self.min_duration.value()
         self.cfg["web_search_max_sites"] = self.max_sites.value()
+        self.cfg["web_search_max_results"] = self.max_results.value()
+        self.cfg["web_search_strict_keywords"] = self.strict_keywords.isChecked()
+        self.cfg["web_search_known_domains"] = self.known_domains.text().strip()
+        self.cfg["web_search_discover_new_sites"] = self.discover_new_sites.isChecked()
         self.cfg["web_search_min_height"] = RESOLUTION_CHOICES[self.min_resolution.currentIndex()][1]
         self.cfg.save()
 
@@ -184,17 +239,29 @@ class WebSearchDialog(QDialog):
         if self._thread is not None:
             return
         keywords = self.keywords.text().strip()
-        if not keywords:
-            self._log("Indiquez au moins un mot-cle.")
+        domains = self.known_domains.text().strip()
+        if not keywords and not domains:
+            self._log(
+                "Indiquez des mots-cles, des sites de confiance, ou les deux."
+            )
             return
         self._save_settings()
         self.table.setRowCount(0)
         self.log.clear()
+        if self.discover_new_sites.isChecked() and not keywords:
+            self._log(
+                "« Decouvrir de nouveaux sites » est coche mais aucun mot-cle "
+                "n'est indique : cette partie sera ignoree."
+            )
         filters = SearchFilters(
             keywords=keywords,
             min_duration_s=self.min_duration.value() * 60,
             min_height=RESOLUTION_CHOICES[self.min_resolution.currentIndex()][1],
             max_sites=self.max_sites.value(),
+            max_total_results=self.max_results.value(),
+            require_all_keywords=self.strict_keywords.isChecked(),
+            known_domains=domains,
+            discover_new_sites=self.discover_new_sites.isChecked(),
         )
         self._worker = _SearchWorker(self.api_key.text().strip(), filters)
         self._thread = QThread(self)

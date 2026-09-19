@@ -58,13 +58,18 @@ DEFAULTS = {
     "tab": "folders",            # onglet : folders | videos | tags
     "tag_family": "mine",        # mots-cles affiches : mine | top
     "tree_action": "send",       # clic dans l arborescence : send | go
-    "tags": [],                  # mots-cles, un par ligne
+    "tags": [],
+    "thumbs_last_run": "",       # date de la derniere preparation menee a terme                  # mots-cles, un par ligne
     "board_columns": 5,          # cartes par rangee en vue planche
     "expand_parents": True,      # traverser les dossiers prefixes « + »
-    "web_search_api_key": "",           # cle Bing Web Search (Azure, quota gratuit)
+    "web_search_api_key": "",           # cle SerpAPI (gratuite, 250 recherches/mois)
     "web_search_min_duration_min": 0,   # filtre de la recherche web, en minutes
     "web_search_min_height": 0,         # filtre de la recherche web, en pixels
     "web_search_max_sites": 15,         # nombre de sites explores par recherche
+    "web_search_max_results": 30,       # plafond de resultats, pour rester qualitatif
+    "web_search_strict_keywords": True, # tous les mots-cles requis, pas un seul
+    "web_search_known_domains": "",     # domaines de confiance, pour restreindre la recherche
+    "web_search_discover_new_sites": False,  # completer par SerpAPI (quota limite)
 }
 
 

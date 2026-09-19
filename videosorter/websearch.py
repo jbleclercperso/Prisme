@@ -2,10 +2,17 @@
 
 L'idee n'est pas de « scanner tout Internet » — personne ne reproduit un moteur
 de recherche a l'echelle d'une appli perso. On s'appuie a la place sur un
-moteur de recherche officiel (Bing Web Search API, gratuite jusqu'a un certain
-quota) pour obtenir des pages de depart a partir des mots-cles, puis on
-explore chacun de ces sites — accueil, categories, fiches — a la recherche de
-videos qui correspondent aux filtres (mots-cles, duree, resolution).
+service de recherche officiel (SerpAPI, gratuit jusqu'a 250 requetes par mois,
+sans carte bancaire) pour obtenir des pages de depart a partir des mots-cles,
+puis on explore chacun de ces sites — accueil, categories, fiches — a la
+recherche de videos qui correspondent aux filtres (mots-cles, duree,
+resolution).
+
+Pourquoi pas Bing Web Search : Microsoft a retire cette API le 11 aout 2025
+(plus aucune nouvelle cle ne peut etre creee depuis fevrier 2025). Google a de
+son cote ferme son quota gratuit « tout le web » aux nouveaux comptes, et Brave
+exige desormais une carte bancaire des l'inscription. SerpAPI reste, a ce jour,
+le seul service avec un vrai quota gratuit sans engagement.
 
 Regles de politesse, non negociables :
 - le fichier robots.txt de chaque site est respecte ;
@@ -78,22 +85,54 @@ def parse_iso8601_duration(value: str) -> int | None:
 
 @dataclass
 class SearchFilters:
-    """Ce que l'utilisateur cherche : mots-cles et seuils de duree/resolution."""
+    """Ce que l'utilisateur cherche : mots-cles et seuils de duree/resolution.
+
+    Par defaut, la recherche vise la precision plutot que le volume : tous les
+    mots-cles doivent se retrouver dans le titre ou la description (pas
+    seulement un seul), et le nombre total de resultats est plafonne — comme
+    le ferait un site d'agregation qui prefere une liste courte et fiable a
+    un inventaire exhaustif mais bruyant.
+    """
 
     keywords: str = ""
     min_duration_s: int = 0
     min_height: int = 0
     max_sites: int = 15
     max_pages_per_site: int = 8
+    max_total_results: int = 30
+    require_all_keywords: bool = True
+    known_domains: str = ""  # domaines de confiance, separes par des espaces/virgules
+    discover_new_sites: bool = True  # completer par une recherche SerpAPI (quota limite)
 
     def keyword_terms(self) -> list[str]:
         return [t for t in normalize(self.keywords).split() if t]
+
+    def domain_list(self) -> list[str]:
+        """Noms de domaine nus, qu'on ait colle « exemple.com », une adresse
+        complete (« https://exemple.com/videos ») ou un melange des deux —
+        sinon un « https:// » ajoute par-dessus un autre cassait l'URL et
+        confondait tous les sites en un seul (vu en pratique : 57 sites
+        colles en URLs completes ecrases en une seule entree invalide)."""
+        raw = re.split(r"[,\s]+", self.known_domains.strip())
+        domains: list[str] = []
+        for token in raw:
+            token = token.strip()
+            if not token:
+                continue
+            if "://" in token:
+                token = urlparse(token).netloc or token.split("://", 1)[-1]
+            token = token.split("/", 1)[0].lower()
+            if token:
+                domains.append(token)
+        return domains
 
     def matches_text(self, *texts: str) -> bool:
         terms = self.keyword_terms()
         if not terms:
             return True
         haystack = normalize(" ".join(t for t in texts if t))
+        if self.require_all_keywords:
+            return all(term in haystack for term in terms)
         return any(term in haystack for term in terms)
 
     def matches_duration(self, duration_s: int | None) -> bool:
@@ -294,6 +333,30 @@ def find_links(html_text: str, page_url: str) -> list[str]:
 # Exploration d'un site : accueil -> categories -> fiches
 # ---------------------------------------------------------------------------
 
+@dataclass
+class CrawlStats:
+    """Ce qui s'est passe pendant l'exploration d'un site, pour comprendre un
+    « 0 resultat » : bloque, injoignable, ou lu sans rien y reconnaitre — ce
+    sont trois problemes differents avec des remedes differents."""
+
+    blocked_robots: int = 0
+    fetch_failed: int = 0
+    pages_read: int = 0
+    candidates_found: int = 0
+    candidates_matched: int = 0
+
+    def summary(self) -> str:
+        if self.blocked_robots and not self.pages_read:
+            return f"{self.blocked_robots} page(s) bloquee(s) par robots.txt"
+        if self.fetch_failed and not self.pages_read:
+            return f"{self.fetch_failed} page(s) injoignable(s)"
+        if self.pages_read and not self.candidates_found:
+            return f"{self.pages_read} page(s) lue(s), aucune video reconnue dedans (lecteur en JavaScript ?)"
+        if self.candidates_found and not self.candidates_matched:
+            return f"{self.candidates_found} video(s) vue(s), aucune ne passe les filtres"
+        return f"{self.pages_read} page(s) lue(s), {self.candidates_found} video(s) vue(s)"
+
+
 class SiteCrawler:
     """Explore un site a partir d'une page de depart, a la recherche de
     videos qui correspondent aux filtres.
@@ -309,6 +372,7 @@ class SiteCrawler:
         self.session.headers["User-Agent"] = USER_AGENT
         self._robots_cache: dict[str, robotparser.RobotFileParser] = {}
         self._last_request: dict[str, float] = {}
+        self.last_stats = CrawlStats()
 
     def _robots_for(self, url: str) -> robotparser.RobotFileParser:
         domain = urlparse(url).netloc
@@ -341,17 +405,28 @@ class SiteCrawler:
     def fetch(self, url: str) -> str | None:
         """Le HTML de la page, ou None si le robot n'a pas le droit d'y
         aller, si ce n'est pas du HTML, ou si la reponse est trop lourde."""
+        html_text, _reason = self._fetch_with_reason(url)
+        return html_text
+
+    def _fetch_with_reason(self, url: str) -> tuple[str | None, str]:
+        """Comme :meth:`fetch`, mais dit aussi pourquoi ca a echoue — utile
+        pour distinguer un site qui bloque le robot d'un site qui repond mais
+        ne montre rien d'exploitable dans le HTML brut (lecteur charge en
+        JavaScript, le cas le plus frequent sur les sites de video)."""
         if not self.allowed(url):
-            return None
+            return None, "robots"
         self._throttle(urlparse(url).netloc)
         try:
             resp = self.session.get(url, timeout=REQUEST_TIMEOUT, stream=True)
         except requests.RequestException:
-            return None
+            return None, "erreur"
         content_type = resp.headers.get("Content-Type", "")
         if "text/html" not in content_type and "application/xhtml" not in content_type:
             resp.close()
-            return None
+            return None, "non-html"
+        if not resp.ok:
+            resp.close()
+            return None, f"http-{resp.status_code}"
         chunks: list[bytes] = []
         total = 0
         try:
@@ -363,12 +438,20 @@ class SiteCrawler:
         finally:
             resp.close()
         try:
-            return b"".join(chunks).decode(resp.encoding or "utf-8", errors="ignore")
+            return b"".join(chunks).decode(resp.encoding or "utf-8", errors="ignore"), "ok"
         except LookupError:
-            return b"".join(chunks).decode("utf-8", errors="ignore")
+            return b"".join(chunks).decode("utf-8", errors="ignore"), "ok"
 
     def explore(self, start_url: str, filters: SearchFilters, should_stop=lambda: False):
-        """Genere les :class:`VideoResult` trouves, en largeur d'abord."""
+        """Genere les :class:`VideoResult` trouves, en largeur d'abord.
+
+        Remplit ``self.last_stats`` au fil de l'eau : de quoi dire, quand une
+        recherche ne trouve rien, si c'est parce que les pages sont bloquees,
+        injoignables, ou lues sans qu'aucune video n'y soit reconnue — trois
+        causes tres differentes qu'un simple « 0 resultat » ne distingue pas.
+        """
+        stats = CrawlStats()
+        self.last_stats = stats
         visited: set[str] = set()
         queue: list[tuple[str, int]] = [(start_url, 0)]
         pages_fetched = 0
@@ -378,17 +461,24 @@ class SiteCrawler:
             if url in visited:
                 continue
             visited.add(url)
-            html_text = self.fetch(url)
+            html_text, reason = self._fetch_with_reason(url)
             pages_fetched += 1
-            if not html_text:
+            if reason == "robots":
+                stats.blocked_robots += 1
                 continue
+            if not html_text:
+                stats.fetch_failed += 1
+                continue
+            stats.pages_read += 1
             candidates = extract_meta_videos(html_text, url) + find_direct_video_links(html_text, url)
+            stats.candidates_found += len(candidates)
             for video in candidates:
                 if (
                     filters.matches_text(video.title, video.snippet)
                     and filters.matches_duration(video.duration_s)
                     and filters.matches_height(video.height)
                 ):
+                    stats.candidates_matched += 1
                     yield video
             if depth < MAX_CRAWL_DEPTH:
                 for link in find_links(html_text, url)[:MAX_LINKS_PER_PAGE]:
@@ -411,53 +501,72 @@ class SeedResult:
     snippet: str = ""
 
 
-def bing_search(api_key: str, query: str, max_results: int = 15) -> list[SeedResult]:
-    """Interroge Bing Web Search (cle Azure gratuite jusqu'a un petit quota).
+def build_query(keywords: str, domains: list[str]) -> str:
+    """Ajoute une restriction ``site:`` quand des domaines de confiance sont
+    donnes — c'est la difference entre chercher partout et chercher dans les
+    quelques sites qu'on sait deja pertinents."""
+    if not domains:
+        return keywords
+    site_clause = " OR ".join(f"site:{domain}" for domain in domains)
+    return f"{keywords} ({site_clause})"
+
+
+def serpapi_search(
+    api_key: str, query: str, max_results: int = 15, domains: list[str] | None = None,
+) -> list[SeedResult]:
+    """Interroge SerpAPI (cle gratuite, 250 requetes/mois, sans carte bancaire).
 
     On ne scrape jamais directement une page de resultats d'un moteur : c'est
     contraire a ses conditions d'utilisation et ca declenche vite un blocage
-    anti-robot. L'API officielle est le seul chemin retenu ici.
+    anti-robot. SerpAPI est un service tiers dont c'est le metier — il gere
+    lui-meme cette question — d'ou son choix ici plutot qu'un scraping maison.
     """
     if not api_key:
         raise SearchBackendError(
-            "Aucune cle API Bing renseignee. Voir le lien « Obtenir une cle "
-            "gratuite » dans cette boite de dialogue."
+            "Aucune cle API SerpAPI renseignee. Voir le lien « Obtenir une "
+            "cle gratuite » dans cette boite de dialogue."
         )
+    full_query = build_query(query, domains or [])
     seeds: list[SeedResult] = []
-    offset = 0
+    start = 0
     session = requests.Session()
-    while len(seeds) < max_results and offset < 100:
+    while len(seeds) < max_results and start < 100:
         try:
             resp = session.get(
-                "https://api.bing.microsoft.com/v7.0/search",
-                headers={"Ocp-Apim-Subscription-Key": api_key},
+                "https://serpapi.com/search.json",
                 params={
-                    "q": query,
-                    "count": min(50, max_results - len(seeds)),
-                    "offset": offset,
-                    "mkt": "fr-FR",
+                    "engine": "google",
+                    "q": full_query,
+                    "api_key": api_key,
+                    "start": start,
+                    "num": 10,
+                    "hl": "fr",
+                    "gl": "fr",
                 },
                 timeout=REQUEST_TIMEOUT,
             )
         except requests.RequestException as exc:
             raise SearchBackendError(f"Recherche impossible : {exc}") from exc
         if resp.status_code == 401:
-            raise SearchBackendError("Cle API Bing refusee (401) : verifiez qu'elle est correcte.")
-        if resp.status_code == 403:
-            raise SearchBackendError("Acces refuse par Bing (403) : quota sans doute depasse.")
+            raise SearchBackendError("Cle API SerpAPI refusee (401) : verifiez qu'elle est correcte.")
+        if resp.status_code == 429:
+            raise SearchBackendError("Quota SerpAPI depasse pour ce mois (429).")
         if not resp.ok:
-            raise SearchBackendError(f"Bing a repondu {resp.status_code}.")
+            raise SearchBackendError(f"SerpAPI a repondu {resp.status_code}.")
         data = resp.json()
-        pages = (data.get("webPages") or {}).get("value") or []
+        error = data.get("error")
+        if error:
+            raise SearchBackendError(f"SerpAPI : {error}")
+        pages = data.get("organic_results") or []
         if not pages:
             break
         for page in pages:
             seeds.append(SeedResult(
-                url=page.get("url", ""),
-                title=page.get("name", ""),
+                url=page.get("link", ""),
+                title=page.get("title", ""),
                 snippet=page.get("snippet", ""),
             ))
-        offset += len(pages)
+        start += len(pages)
     return seeds[:max_results]
 
 
@@ -472,22 +581,49 @@ def run_search(
     on_status=lambda text: None,
     on_result=lambda video: None,
 ) -> None:
-    """Cherche des pages de depart puis explore chacune.
+    """Trouve des pages de depart puis explore chacune.
+
+    Deux sources de sites de depart, qu'on peut combiner :
+    - les domaines de confiance donnes par l'utilisateur : on va dessus
+      directement, sans passer par un moteur de recherche — donc sans le
+      moindre cout de quota, et sans limite sur le nombre de sites ;
+    - une recherche SerpAPI a partir des mots-cles, pour decouvrir de
+      nouveaux sites — seule cette partie est bornee par le quota gratuit.
 
     Communique par callbacks plutot que par valeur de retour : c'est pense
     pour tourner dans un fil separe pendant que l'interface reste reactive.
     """
-    on_status(f"Recherche « {filters.keywords} »…")
-    try:
-        seeds = bing_search(api_key, filters.keywords, filters.max_sites)
-    except SearchBackendError as exc:
-        on_status(str(exc))
+    domains = filters.domain_list()
+    seeds: list[SeedResult] = [SeedResult(url=f"https://{domain}/") for domain in domains]
+    if domains:
+        on_status(f"{len(domains)} site(s) de confiance, exploration directe (sans quota).")
+
+    if filters.discover_new_sites and filters.keywords:
+        on_status(f"Recherche SerpAPI « {filters.keywords} »…")
+        try:
+            discovered = serpapi_search(api_key, filters.keywords, filters.max_sites, domains)
+            seeds.extend(discovered)
+            on_status(f"{len(discovered)} site(s) decouvert(s) via SerpAPI.")
+        except SearchBackendError as exc:
+            on_status(str(exc))
+            if not seeds:
+                return
+    elif not domains:
+        on_status(
+            "Aucun site de confiance et aucune decouverte demandee : rien a explorer."
+        )
         return
-    on_status(f"{len(seeds)} site(s) a explorer.")
+
     crawler = SiteCrawler()
     seen_domains: set[str] = set()
+    total = 0
+    cap = max(1, filters.max_total_results)
+
+    def stop_or_capped() -> bool:
+        return should_stop() or total >= cap
+
     for seed in seeds:
-        if should_stop():
+        if stop_or_capped():
             break
         domain = urlparse(seed.url).netloc
         if not domain or domain in seen_domains:
@@ -495,8 +631,13 @@ def run_search(
         seen_domains.add(domain)
         on_status(f"Exploration de {domain}…")
         found = 0
-        for video in crawler.explore(seed.url, filters, should_stop=should_stop):
+        for video in crawler.explore(seed.url, filters, should_stop=stop_or_capped):
             found += 1
+            total += 1
             on_result(video)
-        on_status(f"{domain} : {found} resultat(s).")
+            if total >= cap:
+                break
+        on_status(f"{domain} : {found} resultat(s) — {crawler.last_stats.summary()}.")
+    if total >= cap:
+        on_status(f"Plafond de {cap} resultats atteint.")
     on_status("Recherche arretee." if should_stop() else "Recherche terminee.")

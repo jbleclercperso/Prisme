@@ -12,9 +12,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import videosorter.websearch as ws  # noqa: E402
 from videosorter.websearch import (  # noqa: E402
-    SearchFilters, extract_meta_videos, find_direct_video_links, find_links,
-    parse_iso8601_duration,
+    SearchFilters, build_query, extract_meta_videos, find_direct_video_links,
+    find_links, parse_iso8601_duration,
 )
 
 FAILURES: list = []
@@ -105,10 +106,75 @@ def main() -> int:
     check(filters.matches_height(720), "resolution suffisante acceptee")
     check(not filters.matches_height(360), "resolution insuffisante rejetee")
 
-    print("\n[6] Duree ISO 8601")
+    print("\n[6] Correspondance stricte (par defaut) vs souple")
+    strict = SearchFilters(keywords="course cote auvergne")
+    check(strict.require_all_keywords, "stricte par defaut")
+    check(not strict.matches_text("Course de cote en Bretagne", ""), "un mot manquant rejete en strict")
+    check(strict.matches_text("La course de cote d'Auvergne 1987", ""), "les trois mots presents acceptes")
+    souple = SearchFilters(keywords="course cote auvergne", require_all_keywords=False)
+    check(souple.matches_text("Course de cote en Bretagne", ""), "un seul mot suffit en souple")
+
+    print("\n[7] Domaines de confiance")
+    check(build_query("course de cote", []) == "course de cote", "requete inchangee sans domaine")
+    query = build_query("course de cote", ["forum-exemple.net", "archives-exemple.org"])
+    check("site:forum-exemple.net" in query and "site:archives-exemple.org" in query, "les deux domaines restreignent la requete")
+    check(SearchFilters(known_domains="a.net, b.org  c.net").domain_list() == ["a.net", "b.org", "c.net"], "liste de domaines eclatee sur virgules/espaces")
+
+    # Bug vecu : des URLs completes collees plutot que des domaines nus
+    # produisaient toutes le meme "https:" une fois qu'on rajoutait un second
+    # https:// par-dessus — 57 sites ecrases en une seule entree invalide.
+    full_urls = "https://forum-exemple.net/videos https://archives-exemple.org/tag/x"
+    domains = SearchFilters(known_domains=full_urls).domain_list()
+    check(domains == ["forum-exemple.net", "archives-exemple.org"], "URLs completes ramenees a des domaines nus")
+    check(all(build_query("x", [d]) and "https:" not in d for d in domains), "aucun domaine ne garde un schema")
+    from urllib.parse import urlparse as _urlparse
+    seed_netlocs = {_urlparse(f"https://{d}/").netloc for d in domains}
+    check(len(seed_netlocs) == 2, "les sites de depart restent distincts (pas ecrases en un seul)")
+
+    print("\n[8] Duree ISO 8601")
     check(parse_iso8601_duration("PT1H2M3S") == 3723, "heures + minutes + secondes")
     check(parse_iso8601_duration("PT45S") == 45, "secondes seules")
     check(parse_iso8601_duration("n'importe quoi") is None, "chaine invalide -> None")
+
+    print("\n[9] Diagnostic d'exploration (CrawlStats)")
+    blocked = ws.CrawlStats(blocked_robots=5)
+    check("robots.txt" in blocked.summary(), "signale un blocage robots.txt")
+    unreachable = ws.CrawlStats(fetch_failed=3)
+    check("injoignable" in unreachable.summary(), "signale des pages injoignables")
+    no_video = ws.CrawlStats(pages_read=4, candidates_found=0)
+    check("JavaScript" in no_video.summary(), "signale des pages lues sans aucune video reconnue")
+    filtered_out = ws.CrawlStats(pages_read=4, candidates_found=6, candidates_matched=0)
+    check("passe les filtres" in filtered_out.summary(), "signale des videos vues mais filtrees")
+
+    print("\n[10] run_search : sites de confiance vs decouverte SerpAPI")
+    calls = []
+
+    def fake_serpapi(api_key, query, max_results=15, domains=None):
+        calls.append((query, tuple(domains or ())))
+        return []
+
+    class FakeCrawler:
+        def __init__(self):
+            self.last_stats = ws.CrawlStats()
+
+        def explore(self, start_url, filters, should_stop=lambda: False):
+            return iter([])
+
+    real_serpapi, real_crawler = ws.serpapi_search, ws.SiteCrawler
+    ws.serpapi_search, ws.SiteCrawler = fake_serpapi, FakeCrawler
+    try:
+        statuses = []
+        only_domains = SearchFilters(known_domains="exemple.net", discover_new_sites=False)
+        ws.run_search("cle", only_domains, on_status=statuses.append)
+        check(not calls, "site de confiance seul : SerpAPI jamais appele")
+        check(any("exemple.net" in s for s in statuses), "le statut mentionne le site direct")
+
+        calls.clear()
+        only_keywords = SearchFilters(keywords="course cote", known_domains="")
+        ws.run_search("cle", only_keywords, on_status=lambda s: None)
+        check(len(calls) == 1, "sans site connu : SerpAPI appele une seule fois")
+    finally:
+        ws.serpapi_search, ws.SiteCrawler = real_serpapi, real_crawler
 
     print(f"\n{'TOUT PASSE' if not FAILURES else f'{len(FAILURES)} ECHEC(S)'}")
     return 1 if FAILURES else 0

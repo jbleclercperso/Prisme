@@ -302,6 +302,35 @@ def detect_mode(root: Path, skip_hidden: bool = True) -> str:
     return MODE_FILES
 
 
+def walk_videos(root: Path, skip_hidden: bool = True):
+    """Rend les vidéos de l'arborescence une par une, sans rien accumuler.
+
+    La version qui rend une liste doit tout parcourir avant de rendre la main :
+    sur une collection de cent mille fichiers, c'est plusieurs minutes pendant
+    lesquelles l'appelant ne peut rien annoncer.
+    """
+    stack = [str(root)]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if not (skip_hidden and _is_hidden(entry)):
+                        stack.append(entry.path)
+                    continue
+                if skip_hidden and _is_hidden(entry):
+                    continue
+            except OSError:
+                continue
+            dot = entry.name.rfind(".")
+            if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
+                yield Path(entry.path)
+
+
 def list_all_videos(root: Path, skip_hidden: bool = True, limit: int = 50000,
                     stamps: dict | None = None) -> list:
     """Toutes les vidéos de l'arborescence, à plat, quel que soit leur dossier.

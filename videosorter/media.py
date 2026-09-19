@@ -112,7 +112,11 @@ PROBE_LIMITS = ["-probesize", "2M", "-analyzeduration", "2M"]
 # ffmpeg y rejoint presque toujours la meme image-cle qu'a zero, donc sans rien
 # faire venir de plus. `preview_start` dans la configuration deplace ce curseur
 # — 0 pour le plus rapide, davantage pour des images plus parlantes.
-BLIND_START = 2.0
+# Instant de l image tiree sans rien savoir de la video. A deux secondes on
+# tombait encore sur un logo, un noir d ouverture ou un carton de titre : dix
+# secondes, c est deja le sujet. Les videos plus courtes retombent sur leur
+# premiere image, la seconde tentative d extraction s en charge.
+BLIND_START = 10.0
 
 
 def _stamp_of(path: Path) -> str:
@@ -534,6 +538,10 @@ class PreviewManager(QObject):
         self.jobs.append(job)
         if len(self.jobs) > 120:
             self.jobs = self.jobs[-60:]
+
+    def busy(self) -> int:
+        """Nombre d'extractions en cours, pour pouvoir le dire a l'ecran."""
+        return self.pool.activeThreadCount()
 
     def cancel_all(self) -> None:
         for job in self.jobs:

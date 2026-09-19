@@ -138,6 +138,7 @@ class MainWindow(QMainWindow):
         # d'onglet ne doit jamais relire le disque pour la retrouver.
         # Parcours de pre-fabrication des vignettes, quand il tourne.
         self.backfill = None
+        self._backfill_started = 0.0
         self._plain_items: list = []
         self._plain_root = None
         self.tags: list = list(cfg["tags"])
@@ -279,6 +280,7 @@ class MainWindow(QMainWindow):
             ("Changer de racine…", self.choose_root),
         ])
         self.more_button.setMenu(self.overflow)
+        self._name_backfill_action()
 
         selectors = QHBoxLayout()
         selectors.setContentsMargins(0, 0, 0, 0)
@@ -296,8 +298,17 @@ class MainWindow(QMainWindow):
             ("top", "Mots fréquents", "Les mots qui reviennent le plus dans vos noms"),
         ], sort_page)
         self.tag_chips.chosen.connect(self.set_tag_family)
+        # Le seul endroit ou l'on pense a ses mots-cles est celui ou on les
+        # regarde : les faire chercher dans un menu n'avait pas de sens.
+        self.tags_button = QPushButton("＋ Mes mots-clés…", sort_page)
+        self.tags_button.setToolTip(
+            "Un mot par ligne. Chacun réunit les vidéos dont le nom le porte.")
+        self.tags_button.setFocusPolicy(Qt.NoFocus)
+        self.tags_button.clicked.connect(self.edit_tags)
+        self.tags_button.hide()
         self.tag_chips.hide()
         selectors.addWidget(self.tag_chips)
+        selectors.addWidget(self.tags_button)
 
         selectors.addWidget(self.up_button)
         selectors.addStretch(1)
@@ -445,6 +456,14 @@ class MainWindow(QMainWindow):
         self.done_page.rescan.clicked.connect(self.refresh_root)
         self.done_page.change.clicked.connect(self.choose_root)
         self.stack.addWidget(self.done_page)
+
+        # Rien ne disait que des apercus etaient en fabrication : devant une
+        # planche qui ne se remplit pas, on ne sait pas s'il faut attendre ou
+        # si quelque chose est bloque. Cette barre repond a la question.
+        self.activity_timer = QTimer(self)
+        self.activity_timer.setInterval(400)
+        self.activity_timer.timeout.connect(self._show_activity)
+        self.activity_timer.start()
 
         self.banner_timer = QTimer(self)
         self.banner_timer.setSingleShot(True)
@@ -696,14 +715,51 @@ class MainWindow(QMainWindow):
         top = Path(self.levels[0]["root"]) if self.levels else self.root
         self.backfill = ThumbBackfill(top, self.cfg["thumb_width"],
                                       self.cfg["skip_hidden"], self)
+        self.backfill.counting.connect(self.on_backfill_counting)
         self.backfill.counted.connect(self.on_backfill_counted)
         self.backfill.progress.connect(self.on_backfill_progress)
         self.backfill.done.connect(self.on_backfill_done)
+        self._backfill_started = time.monotonic()
         self.backfill.start()
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("recensement des vidéos…")
+        self.progress.show()
         self.show_banner(
             f"Préparation des vignettes de {top} — recensement des vidéos…",
             "#22303f",
         )
+
+    def _show_activity(self) -> None:
+        """Annonce le travail en cours, sans voler la place a l'analyse."""
+        if self.scanning or self.backfill is not None:
+            return
+        busy = self.preview.busy()
+        if busy:
+            self.progress.setRange(0, 0)
+            self.progress.setFormat(f"aperçus : {busy} en cours…")
+            self.progress.show()
+        elif self.progress.isVisible() and self.progress.maximum() == 0:
+            # On ne masque que notre propre annonce : une barre chiffree
+            # appartient a l'analyse ou a la preparation.
+            self.progress.hide()
+
+    def _name_backfill_action(self) -> None:
+        """Rappelle, dans le menu, quand la preparation a ete menee a terme."""
+        done = self.cfg["thumbs_last_run"]
+        label = ("Préparer toutes les vignettes"
+                 + (f"   (dernière : {done})" if done else "   (jamais faite)"))
+        for action in self.overflow.actions():
+            if action.text().startswith("Préparer toutes les vignettes"):
+                action.setText(label)
+                return
+
+    def on_backfill_counting(self, found: int) -> None:
+        """Le recensement dure : il dit ce qu'il trouve en chemin."""
+        if self.scanning:
+            return
+        self.progress.setRange(0, 0)
+        self.progress.setFormat(f"recensement : {found} vidéo(s) trouvée(s)…")
+        self.progress.show()
 
     def on_backfill_counted(self, total: int) -> None:
         if self.scanning:
@@ -716,14 +772,27 @@ class MainWindow(QMainWindow):
     def on_backfill_progress(self, made: int, kept: int, total: int) -> None:
         if self.scanning:
             return
+        seen = made + kept
         self.progress.setRange(0, max(1, total))
-        self.progress.setValue(made + kept)
+        self.progress.setValue(seen)
+        # Une barre qui avance sans dire combien de temps il reste n'apprend
+        # rien qu'on ne voie deja : c'est la fin qu'on veut connaitre.
+        elapsed = time.monotonic() - self._backfill_started
+        if seen > 20 and elapsed > 5:
+            left = (total - seen) * elapsed / seen
+            self.progress.setFormat(
+                f"vignettes : %v / %m — {human_duration(left)} restant")
+        self.progress.show()
 
     def on_backfill_done(self, made: int, kept: int, complete: bool) -> None:
         self.backfill = None
         if not self.scanning:
             self.progress.hide()
             self.progress.setFormat("%v / %m analysés")
+        if complete:
+            self.cfg["thumbs_last_run"] = datetime.now().strftime("%d/%m/%Y à %H:%M")
+            self.cfg.save()
+            self._name_backfill_action()
         fin = "terminée" if complete else "interrompue"
         self.show_banner(
             f"Préparation {fin} : {made} vignette(s) fabriquée(s), "
@@ -823,6 +892,9 @@ class MainWindow(QMainWindow):
         self.crumbs.set_path(
             Path(self.levels[0]["root"]) if self.levels else self.root, self.root
         )
+        # Un mot-cle n'est pas un dossier : sans ce rappel, le fil d'Ariane
+        # restait sur la racine et l'on ne savait plus ce qu'on regardait.
+        self.crumbs.append_leaf(item.name)
         self.show_banner(
             f"{len(self.items)} vidéo(s) portant « {item.path.name} »", "#22303f"
         )
@@ -1777,6 +1849,7 @@ class MainWindow(QMainWindow):
         self.tabs.set_value(self.tab)
         self.tag_chips.set_value(self.tag_family)
         self.tag_chips.setVisible(self.tab == TAB_TAGS)
+        self.tags_button.setVisible(self.tab == TAB_TAGS)
         self.controls.set_browsing(self.browsing)
         # La fiche ne dit rien qu'on ne lise deja ailleurs quand on parcourt.
         self.item_card.setVisible(not self.browsing)

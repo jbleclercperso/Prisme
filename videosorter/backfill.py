@@ -22,7 +22,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from .media import build_preview_plan, extract_thumb, thumb_path
-from .scan import list_all_videos
+from .scan import walk_videos
 
 # Quatre extractions de front, quand l'affichage en utilise huit. Ce parcours
 # n'est pas presse : ce qu'on regarde doit passer devant lui.
@@ -33,6 +33,7 @@ class ThumbBackfill(QThread):
     """Parcourt la collection et fabrique la vignette manquante de chaque video."""
 
     progress = Signal(int, int, int)      # faites, deja presentes, total
+    counting = Signal(int)                # videos recensees jusqu ici
     counted = Signal(int)                 # total, une fois le recensement fini
     done = Signal(int, int, bool)         # fabriquees, deja presentes, termine
 
@@ -75,9 +76,11 @@ class ThumbBackfill(QThread):
         return self.MADE if extract_thumb(path, ts, self.width) else self.FAILED
 
     def run(self) -> None:
-        # La limite par defaut vise l'affichage d'une liste ; ici on les veut
-        # toutes, c'est tout l'objet du parcours.
-        videos = list_all_videos(self.root, self.skip_hidden, limit=5_000_000)
+        # Le recensement seul prend plusieurs minutes sur un partage reseau. Sans
+        # nouvelle pendant ce temps, on croit que rien ne se passe : il annonce
+        # donc ce qu'il trouve au fur et a mesure.
+        self.counting.emit(0)
+        videos = self._collect()
         if self._stop:
             return self.done.emit(0, 0, False)
         self.total = len(videos)
@@ -102,6 +105,20 @@ class ThumbBackfill(QThread):
                     last = now
         self.progress.emit(self.made, self.kept, self.total)
         self.done.emit(self.made, self.kept, not self._stop)
+
+    def _collect(self) -> list:
+        """Recense les videos en disant ou il en est."""
+        found: list = []
+        last = 0.0
+        for video in walk_videos(self.root, self.skip_hidden):
+            if self._stop:
+                break
+            found.append(video)
+            now = time.monotonic()
+            if now - last >= 0.4:
+                self.counting.emit(len(found))
+                last = now
+        return found
 
     def _guarded(self, video):
         if self._stop:
