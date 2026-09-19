@@ -1387,6 +1387,36 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(ready.exists(),
           "la vignette préparée est bien celle que la planche réclame")
 
+    print("\n[51] Lecteur de côté")
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.toggle_board(True)
+    pump(app, 0.4)
+    check(window.aside.isHidden(), "le lecteur de côté se tient à l'écart")
+
+    position = next(i for i, it in enumerate(window.items) if it.videos)
+    window.open_aside(position)
+    pump(app, 0.6)
+    check(not window.aside.isHidden(), "un clic droit l'ouvre à droite")
+    check(window.browsing, "et la planche reste affichée")
+    check(window.viewer.currentWidget() is window.board,
+          "on n'a pas quitté les vignettes")
+    check(window.aside_title.text() == window.items[position].name,
+          f"il annonce ce qu'il lit ({window.aside_title.text()})")
+
+    following = next((i for i in range(position + 1, len(window.items))
+                      if window.items[i].videos), -1)
+    if following >= 0:
+        window.aside_step(1)
+        pump(app, 0.4)
+        check(window.aside_index == following,
+              "« suivante » passe à la vignette d'après")
+
+    window.close_aside()
+    pump(app, 0.3)
+    check(window.aside.isHidden(), "et il se referme")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

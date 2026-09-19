@@ -35,6 +35,7 @@ class BoardCard(QFrame):
     """Un élément de la planche : image, nom, chiffres, note."""
 
     opened = Signal(int)
+    asided = Signal(int)
     rated = Signal(int, int)
     played = Signal(int)
     picked = Signal(int, bool)
@@ -229,6 +230,10 @@ class BoardCard(QFrame):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.opened.emit(self.index)
+        elif event.button() == Qt.RightButton:
+            # Le clic droit regarde sans quitter : la video s'ouvre a cote, et
+            # la planche reste sous la main.
+            self.asided.emit(self.index)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton and self.video:
@@ -239,6 +244,7 @@ class BoardView(QWidget):
     """Grille défilante de cartes, avec lecture au survol."""
 
     openRequested = Signal(int)
+    asideRequested = Signal(int)
     pickedChanged = Signal(int)
     rateRequested = Signal(int, int)
     previewNeeded = Signal(int)
@@ -350,6 +356,7 @@ class BoardView(QWidget):
         while len(self.cards) < count:
             card = BoardCard(len(self.cards), self.canvas)
             card.opened.connect(self.openRequested)
+            card.asided.connect(self.asideRequested)
             card.picked.connect(self._on_picked)
             card.rated.connect(self.rateRequested)
             card.played.connect(self._play_full)

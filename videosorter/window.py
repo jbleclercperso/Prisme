@@ -439,6 +439,7 @@ class MainWindow(QMainWindow):
             self.cfg["preview_seconds"], self.cfg["board_columns"], self.viewer
         )
         self.board.openRequested.connect(self.on_board_open)
+        self.board.asideRequested.connect(self.open_aside)
         self.board.pickedChanged.connect(self.on_picked_changed)
         self.board.rateRequested.connect(self.on_board_rate)
         self.board.previewNeeded.connect(self.on_board_preview)
@@ -448,6 +449,38 @@ class MainWindow(QMainWindow):
         self.viewer.addWidget(self.single)
         self.viewer.addWidget(self.board)
         middle.addWidget(self.viewer, 1)
+
+        # Le lecteur de cote : on y envoie une video d'un clic droit, et la
+        # planche continue de vivre a gauche — on peut changer de page, cocher,
+        # ranger, pendant que la video se lit.
+        self.aside = QWidget(sort_page)
+        aside_box = QVBoxLayout(self.aside)
+        aside_box.setContentsMargins(0, 0, 0, 0)
+        aside_box.setSpacing(6)
+        aside_bar = QHBoxLayout()
+        aside_bar.setContentsMargins(0, 0, 0, 0)
+        self.aside_title = QLabel("", self.aside)
+        self.aside_title.setObjectName("parentPath")
+        self.aside_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        aside_bar.addWidget(self.aside_title, 1)
+        for text, tip, slot in (
+            ("◂", "Précédente", lambda: self.aside_step(-1)),
+            ("▸", "Suivante", lambda: self.aside_step(1)),
+            ("✕", "Fermer le lecteur", self.close_aside),
+        ):
+            button = QPushButton(text, self.aside)
+            button.setFixedWidth(30)
+            button.setToolTip(tip)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.clicked.connect(slot)
+            aside_bar.addWidget(button)
+        aside_box.addLayout(aside_bar)
+        self.aside_player = SinglePlayer(
+            self.cfg["thumb_count"], self.cfg["scroll_seconds"], self.aside)
+        aside_box.addWidget(self.aside_player, 1)
+        self.aside.hide()
+        self.aside_index = -1
+        middle.addWidget(self.aside, 1)
         layout.addLayout(middle, 1)
 
         self.stars = StarStrip(22, sort_page)
@@ -1478,6 +1511,13 @@ class MainWindow(QMainWindow):
 
     def on_plan_ready(self, key: str, plan: list) -> None:
         self.plans[key] = plan
+        if key.startswith("aside@"):
+            if plan and not self.aside.isHidden():
+                self.aside_player.set_plan(plan)
+                for slot, entry in enumerate(plan):
+                    self.preview.request_thumb(key, slot, entry[0], entry[1],
+                                               urgent=False)
+            return
         if key.startswith("board@"):
             position = self._board_position_of(key)
             if position >= 0 and plan:
@@ -1520,6 +1560,10 @@ class MainWindow(QMainWindow):
             self.grid.set_info(slot, duration, height)
 
     def on_thumb_ready(self, key: str, slot: int, path: str) -> None:
+        if key.startswith("aside@"):
+            if not self.aside.isHidden():
+                self.aside_player.set_thumb(slot, path)
+            return
         if key.startswith("board@"):
             position = self._board_position_of(key)
             if position >= 0:
@@ -1962,6 +2006,45 @@ class MainWindow(QMainWindow):
             if item.item_id == item_id:
                 return position
         return -1
+
+    # ------------------------------------------------------------------
+    # Le lecteur de cote
+    # ------------------------------------------------------------------
+    def open_aside(self, position: int) -> None:
+        """Ouvre a droite la video de cette carte, sans quitter la planche."""
+        if not (0 <= position < len(self.items)):
+            return
+        item = self.items[position]
+        if not item.videos:
+            return
+        self.aside_index = position
+        video = str(item.videos[0])
+        self.aside_title.setText(item.name)
+        self.aside_title.setToolTip(str(item.path))
+        self.aside.show()
+        self.aside_player.set_muted(self.cfg["muted"])
+        self.aside_player.set_item(video)
+        key = f"aside@{item.item_id}"
+        self.preview.request_plan(
+            key, item.videos, self.cfg["thumb_count"], page=0,
+            one_per_video=item.kind == MODE_FOLDERS,
+        )
+
+    def aside_step(self, step: int) -> None:
+        """Passe a la vignette voisine, dans l'ordre de la planche."""
+        if self.aside_index < 0:
+            return
+        target = self.aside_index + step
+        while 0 <= target < len(self.items) and not self.items[target].videos:
+            target += step
+        if 0 <= target < len(self.items):
+            self.open_aside(target)
+
+    def close_aside(self) -> None:
+        self.aside_player.stop()
+        self.aside.hide()
+        self.aside_index = -1
+        self.setFocus()
 
     def on_picked_changed(self, count: int) -> None:
         self.picked_bar.setVisible(bool(count))
