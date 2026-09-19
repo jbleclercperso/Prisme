@@ -45,6 +45,13 @@ QLabel#boardImage { background: #0b0d10; border-radius: 6px; color: #59616d; }
 QLabel#boardName { font-size: 14px; font-weight: 600; color: #e6e8ea; }
 /* Les deux portees du hasard : la collection entiere, ou l element affiche.
    Elles se distinguent a la couleur, pour qu on sache ce qu on declenche. */
+/* L'etat de l'analyse, en toutes lettres : au repos on peut la lancer,
+   en marche elle compte, et un clic l'arrete. */
+QPushButton#scanState { background: transparent; border: 1px solid #39414d;
+                        border-radius: 6px; padding: 5px 11px; color: #9aa4b2; }
+QPushButton#scanState:hover { color: #ffffff; border-color: #5a6575; }
+QPushButton#scanState[running="true"] { background: #1d3a5c; border-color: #2f6fed;
+                                        color: #cfe0ff; font-weight: 600; }
 QPushButton#random { background: #8c3b52; border: 0; border-radius: 6px;
                      padding: 6px 12px; color: #ffe9ef; font-weight: 600; }
 QPushButton#random:hover { background: #a7455f; }

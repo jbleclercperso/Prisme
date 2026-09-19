@@ -124,6 +124,12 @@ un dossier avant ce moment jetait tout, et chaque lancement repayait le parcours
 entier. Ici, une analyse interrompue garde ce qu'elle a appris, et la
 composition de la racine est notée avant même la vérification.
 
+Le bouton **⟲ Analyser**, dans l'entête, dit à tout moment où l'on en est :
+au repos il propose de relire, en marche il compte (`⟳ 461 / 649`) et son
+infobulle nomme le dossier en cours — une longue lecture réseau ne se confond
+donc plus avec un blocage. Un clic pendant l'analyse l'arrête, sans rien perdre
+de ce qui a été lu. À la fin, un bandeau annonce la durée et ce qui a changé.
+
 L'index retient aussi les sondages ffprobe, repris de l'ancien cache au premier
 lancement. `use_scan_cache: false` le désactive entièrement.
 
@@ -313,6 +319,14 @@ quelques réglages : `preview_seconds` (durée de la boucle au survol),
 L'index est à côté, dans `index.db`, et le cache de vignettes dans `thumbs\`.
 
 ## Tests
+
+```bash
+python tests/smoke.py
+```
+
+Quelques secondes, sur une arborescence minuscule de fichiers vides : inventaire,
+index, onglets, mots-clés, arborescence et état de l'analyse. C'est le test à
+lancer après une modification.
 
 ```bash
 python tests/test_app.py

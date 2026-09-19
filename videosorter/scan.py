@@ -552,7 +552,7 @@ def cached_items(root: Path, mode: str, expand: bool = False) -> list:
 class RefreshThread(QThread):
     """Relit le disque en tache de fond et ne publie que ce qui a change."""
 
-    progress = Signal(int, int)            # verifies, total
+    progress = Signal(int, int, str)       # verifies, total, en cours
     # ajoutes [Item], remplaces [Item], retires [item_id]
     patch = Signal(list, list, list)
     finished_scan = Signal(str, int)       # mode, total
@@ -609,7 +609,7 @@ class RefreshThread(QThread):
 
     def run(self) -> None:
         import time as _time
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         from .index import INDEX
 
@@ -684,7 +684,7 @@ class RefreshThread(QThread):
                                  self._signature_of(path, key, mode, stamps)))
 
         done = total - len(todo)
-        self.progress.emit(done, total)
+        self.progress.emit(done, total, "")
 
         def work(entry):
             path, _key, _sig = entry
@@ -711,9 +711,24 @@ class RefreshThread(QThread):
         stopped = False
         if todo:
             pool = ThreadPoolExecutor(max_workers=self._workers())
+            # Chacun est publie des qu'il est pret, et non dans l'ordre de la
+            # liste. `pool.map` rendait ses resultats en rang : un seul dossier
+            # lourd — une arborescence de milliers de fichiers sur le reseau —
+            # retenait derriere lui tous ceux, deja termines, qui le suivaient.
+            # L'avancement restait cloue sur le meme chiffre plusieurs minutes,
+            # alors que huit parcours tournaient.
+            pending = {pool.submit(work, entry): entry for entry in todo}
             try:
-                for entry, item in zip(todo, pool.map(work, todo)):
-                    if self._stop or item is None:
+                for future in as_completed(pending):
+                    if self._stop:
+                        stopped = True
+                        break
+                    entry = pending[future]
+                    try:
+                        item = future.result()
+                    except Exception:
+                        item = None
+                    if item is None:
                         stopped = True
                         break
                     key, sig = entry[1], entry[2]
@@ -732,10 +747,12 @@ class RefreshThread(QThread):
 
                     # L'avancement est annonce au rythme de l'oeil, pas du
                     # disque : un signal par element repeignait la barre six
-                    # cents fois.
+                    # cents fois. Le nom qui l'accompagne dit *sur quoi* on
+                    # attend — sans lui, une longue lecture ne se distingue pas
+                    # d'un blocage.
                     now = _time.monotonic()
                     if now - last_progress >= 0.10 or done == total:
-                        self.progress.emit(done, total)
+                        self.progress.emit(done, total, item.path.name)
                         last_progress = now
                     # Le premier element part seul : on veut pouvoir trier tout
                     # de suite, sans attendre que le paquet se remplisse.
@@ -750,10 +767,11 @@ class RefreshThread(QThread):
         if stopped or self._stop:
             # L'index garde ce qui a ete appris avant l'arret : c'est tout
             # l'interet d'ecrire au fil de l'eau plutot qu'a la fin.
+            flush()
             INDEX.commit(force=True)
             return
 
         flush()
         INDEX.commit(force=True)
-        self.progress.emit(total, total)
+        self.progress.emit(total, total, "")
         self.finished_scan.emit(mode, total)

@@ -1,6 +1,7 @@
 """Fenêtre principale : enchaînement des éléments et exécution des actions."""
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -206,6 +207,12 @@ class MainWindow(QMainWindow):
         # Deux portees, deux boutons. Le general pioche dans toute la
         # collection ; le local, dans le seul element affiche. Ils etaient
         # confondus derriere un raccourci, et l un des deux se cherchait.
+        self.scan_button = QPushButton("⟲  Analyser", sort_page)
+        self.scan_button.setObjectName("scanState")
+        self.scan_button.setProperty("running", "false")
+        self.scan_button.setFocusPolicy(Qt.NoFocus)
+        self.scan_button.clicked.connect(self.toggle_scan)
+
         self.random_button = QPushButton("⚄  Aléatoire", sort_page)
         self.random_button.setObjectName("random")
         self.random_button.setToolTip("Une vidéo au hasard, dans toute la "
@@ -276,6 +283,7 @@ class MainWindow(QMainWindow):
         self.enter_button.clicked.connect(self.enter_current)
         selectors.addWidget(self.enter_button)
         selectors.addStretch(1)
+        selectors.addWidget(self.scan_button)
         selectors.addWidget(self.random_button)
         selectors.addWidget(self.random_here_button)
         selectors.addWidget(self.tree_button)
@@ -520,6 +528,9 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(not self.items)
 
         self.scanning = True
+        self._scan_started = time.monotonic()
+        self._scan_done, self._scan_total, self._scan_name = 0, 0, ""
+        self._refresh_scan_button()
         self.scan_thread = RefreshThread(
             self.root, self.mode, self.cfg["skip_hidden"],
             self.cfg["use_scan_cache"], self.cfg["expand_parents"],
@@ -556,11 +567,32 @@ class MainWindow(QMainWindow):
         self.update_counter()
 
     def stop_scan(self) -> None:
-        if self.scan_thread is not None:
-            self.scan_thread.stop()
-            self.scan_thread.wait(3000)
-            self.scan_thread = None
+        """Abandonne la relecture en cours, et la fait taire immediatement.
+
+        Un fil bloque sur une longue lecture reseau ne s'arrete pas sur commande :
+        il finit d'abord ce qu'il attend. On le coupait de la parole trois
+        secondes, puis on l'oubliait — mais ses signaux restaient branches, et il
+        continuait a repeindre l'avancement de l'analyse suivante. D'ou une barre
+        qui semblait tourner en boucle sans jamais aboutir.
+        """
+        thread = self.scan_thread
+        self.scan_thread = None
         self.scanning = False
+        if thread is None:
+            return
+        for signal in (thread.progress, thread.patch, thread.finished_scan):
+            try:
+                signal.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+        thread.stop()
+        if not thread.wait(400):
+            # Il se terminera de lui-meme ; on le garde en vie le temps qu'il le
+            # fasse, sans quoi Qt detruirait un QThread encore en marche.
+            self._dying = [t for t in getattr(self, "_dying", []) if t.isRunning()]
+            self._dying.append(thread)
+        self._scan_started = 0.0
+        self._refresh_scan_button()
 
     # ------------------------------------------------------------------
     # Corbeille de session
@@ -712,11 +744,57 @@ class MainWindow(QMainWindow):
         )
         return True
 
-    def on_scan_progress(self, done: int, total: int) -> None:
+    def on_scan_progress(self, done: int, total: int, name: str = "") -> None:
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(done)
+        self._scan_done, self._scan_total, self._scan_name = done, total, name
+        self._refresh_scan_button()
         if not self.items:
-            self.item_subtitle.setText(f"Analyse {done}/{total}…")
+            self.item_subtitle.setText(
+                f"Analyse {done}/{total} — {name}" if name
+                else f"Analyse {done}/{total}…")
+
+    def _refresh_scan_button(self) -> None:
+        """Dit sans ambiguite si une analyse tourne, et ou elle en est.
+
+        C'etait la vraie plainte : on ne savait pas distinguer une application
+        lente d'une analyse en cours. Le bouton porte donc l'etat, et le nom du
+        dossier en cours montre que quelque chose avance meme quand le chiffre
+        met du temps a changer.
+        """
+        if not hasattr(self, "scan_button"):
+            return
+        if not self.scanning:
+            self.scan_button.setText("⟲  Analyser")
+            self.scan_button.setProperty("running", "false")
+            self.scan_button.setToolTip(
+                "Relire le disque et mettre à jour ce qui a changé   (Ctrl+R "
+                "pour tout relire sans se fier aux dates)")
+        else:
+            total = getattr(self, "_scan_total", 0)
+            done = getattr(self, "_scan_done", 0)
+            self.scan_button.setText(f"⟳  {done} / {total}" if total
+                                     else "⟳  Analyse…")
+            self.scan_button.setProperty("running", "true")
+            name = getattr(self, "_scan_name", "")
+            self.scan_button.setToolTip(
+                (f"En cours : {name}\n" if name else "")
+                + "Cliquer pour arrêter l'analyse")
+        self.scan_button.style().unpolish(self.scan_button)
+        self.scan_button.style().polish(self.scan_button)
+
+    def toggle_scan(self) -> None:
+        """Le bouton lance l'analyse, ou l'arrête si elle tourne."""
+        if self.scanning:
+            self.stop_scan()
+            self.progress.hide()
+            self.show_banner("Analyse interrompue. Ce qui a été lu est gardé.",
+                             "#3a3322")
+            self.update_counter()
+            return
+        if self.root is not None:
+            self.start_root(self.root, self.mode, reset_levels=False,
+                            restore_id=self.current.item_id if self.current else "")
 
     def on_patch(self, added: list, replaced: list, removed: list) -> None:
         """Applique ce que la relecture a trouvé de différent, et rien d'autre.
@@ -869,17 +947,22 @@ class MainWindow(QMainWindow):
     def on_scan_finished(self, mode: str, total: int) -> None:
         self.scanning = False
         self.progress.hide()
+        self._refresh_scan_button()
+        elapsed = time.monotonic() - (getattr(self, "_scan_started", 0.0) or
+                                      time.monotonic())
         if mode == MODE_FOLDERS:
             self._plain_items = [i for i in self.all_items if not i.is_tag]
             self._plain_root = self.root
         self._add_tag_items()
         self._show_counts()
         thread = self.scan_thread
-        if thread is not None and thread.rescanned:
+        if thread is not None:
+            # Une analyse qui se termine doit le dire, meme quand elle n'a rien
+            # trouve a changer : sans quoi on ne sait pas si elle tourne encore.
             self.show_banner(
-                f"{thread.rescanned} élément(s) mis à jour, "
-                f"{thread.reused} inchangé(s).   Ctrl+R pour tout revérifier.",
-                "#22303f",
+                f"✓ Analyse terminée en {elapsed:.0f} s — {total} élément(s), "
+                f"{thread.rescanned} mis à jour, {thread.reused} inchangé(s).",
+                "#1f3326" if not thread.rescanned else "#22303f",
             )
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(total)
@@ -1309,8 +1392,19 @@ class MainWindow(QMainWindow):
         return True
 
     def show_videos_tab(self) -> None:
-        """Bascule sur les vidéos à partir de ce qui est déjà en mémoire."""
+        """Toutes les vidéos de la racine, sans relire le disque.
+
+        Les parcourir pour de bon signifiait traverser toute l'arborescence du
+        partage avant d'afficher quoi que ce soit — plusieurs minutes, pendant
+        lesquelles l'onglet annonçait « rien à afficher ». Or l'index porte déjà
+        la liste des vidéos de chaque dossier : leur réunion est la même réponse,
+        obtenue en mémoire.
+        """
         videos = self._videos_from_items()
+        if not videos:
+            known = cached_items(self.root, MODE_FOLDERS,
+                                 self.cfg["expand_parents"])
+            videos = [video for item in known for video in item.videos]
         if not videos:
             self.start_root(self.root, MODE_FLAT, reset_levels=False)
             return
@@ -1362,6 +1456,18 @@ class MainWindow(QMainWindow):
             self.sort_mode = "random"
             self.cfg["sort_mode"] = "random"
             self.controls.set_sort("random")
+            self.stop_scan()
+            self.progress.hide()
+            self.levels = []
+            self.root = top
+            self.crumbs.set_path(top, top)
+            self.show_videos_tab()
+            if self.browsing:
+                self.refresh_board()
+            elif self.items:
+                self.show_item(0)
+            self.setFocus()
+            return
         if top != self.root or self.mode != mode or tab == TAB_TAGS:
             self.levels = []
             self.start_root(top, mode, reset_levels=True)
