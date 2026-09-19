@@ -353,6 +353,15 @@ python tests/test_network.py
 Vérifie la reconnaissance d'un stockage réseau et le parallélisme qui en découle.
 
 ```bash
+python tests/bench_root.py X:```
+
+Sépare, **sur votre vraie racine**, les trois temps d'une ouverture : ce que
+l'index restitue sans toucher au disque, l'inventaire de la racine, la
+vérification des dates, puis le coût du parcours récursif mesuré sur un
+échantillon. C'est ce qui répond à « est-ce l'application ou le disque ». Rien
+n'est écrit.
+
+```bash
 python tests/bench_scan.py
 ```
 
