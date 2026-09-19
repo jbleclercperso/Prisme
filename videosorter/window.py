@@ -143,6 +143,10 @@ class MainWindow(QMainWindow):
         self._backfill_started = 0.0
         self._plain_items: list = []
         self._plain_root = None
+        # Deux facons de regarder la fiche : la planche contact d'un dossier, et
+        # le cinema d'une video.
+        self.contact = False
+        self.cinema = False
         # La racine que l on a choisie : le fil d Ariane en part toujours,
         # quels que soient les onglets traverses depuis.
         self.origin = Path(cfg["root"]) if cfg["root"] else None
@@ -385,11 +389,32 @@ class MainWindow(QMainWindow):
         # « Entrer » se lit au bout de la ligne qui decrit le dossier — poids,
         # nombre de videos, date — la ou l'on vient de decider qu'il fallait y
         # descendre. Il etait perdu dans la rangee des onglets, loin de son objet.
+        # Deux facons de regarder l'element courant, la ou on le regarde. Ce ne
+        # sont pas des onglets : on ne change pas de collection, on change de
+        # focale sur ce qu'on a deja sous les yeux.
+        self.contact_button = QPushButton("▦ Planche contact", header)
+        self.contact_button.setCheckable(True)
+        self.contact_button.setToolTip(
+            "Une ligne par vidéo, cinq instants par ligne   (Ctrl+L)")
+        self.contact_button.setFocusPolicy(Qt.NoFocus)
+        self.contact_button.clicked.connect(self.toggle_contact)
+        self.contact_button.hide()
+
+        self.cinema_button = QPushButton("⛶ Cinéma", header)
+        self.cinema_button.setCheckable(True)
+        self.cinema_button.setToolTip(
+            "L'image seule, sans rien autour   (Ctrl+J)")
+        self.cinema_button.setFocusPolicy(Qt.NoFocus)
+        self.cinema_button.clicked.connect(self.toggle_cinema)
+        self.cinema_button.hide()
+
         self.enter_button = QPushButton("Entrer dans le dossier  ▸", header)
         self.enter_button.setObjectName("enter")
         self.enter_button.setToolTip("Trier le contenu de ce dossier   (Ctrl+↓)")
         self.enter_button.setFocusPolicy(Qt.NoFocus)
         self.enter_button.clicked.connect(self.enter_current)
+        header_layout.addWidget(self.contact_button, 0)
+        header_layout.addWidget(self.cinema_button, 0)
         header_layout.addWidget(self.enter_button, 0)
         # En planche, ce bloc repetait le fil d'Ariane et une phrase d'aide, sur
         # trois lignes, au detriment d'une rangee entiere de vignettes.
@@ -451,6 +476,7 @@ class MainWindow(QMainWindow):
         self.single = SinglePlayer(
             self.cfg["thumb_count"], self.cfg["scroll_seconds"], self.viewer
         )
+        self.single.finished.connect(self.on_video_finished)
         self.board = BoardView(
             self.cfg["preview_seconds"], self.cfg["board_columns"], self.viewer
         )
@@ -1542,7 +1568,9 @@ class MainWindow(QMainWindow):
             self.preview.request_plan(
                 key, item.videos, count,
                 page=page, one_per_video=item.kind == MODE_FOLDERS,
-                urgent=current, blind=item.kind == MODE_FOLDERS,
+                urgent=current,
+                blind=item.kind == MODE_FOLDERS and not self.contact,
+                contact=self.contact and item.kind == MODE_FOLDERS,
             )
             return
         if current:
@@ -2038,6 +2066,15 @@ class MainWindow(QMainWindow):
         # La fiche ne dit rien qu'on ne lise deja ailleurs quand on parcourt.
         self.item_card.setVisible(not self.browsing)
         item = self.current
+        item = self.current
+        self.contact_button.setVisible(
+            not self.browsing and item is not None
+            and item.kind == MODE_FOLDERS and not item.locked)
+        self.contact_button.setChecked(self.contact)
+        self.cinema_button.setVisible(
+            not self.browsing and item is not None
+            and item.kind != MODE_FOLDERS)
+        self.cinema_button.setChecked(self.cinema)
         self.enter_button.setVisible(
             not self.browsing and item is not None
             and item.kind == MODE_FOLDERS and not item.locked
@@ -2195,6 +2232,50 @@ class MainWindow(QMainWindow):
         self.aside.hide()
         self.aside_index = -1
         self.setFocus()
+
+    def toggle_contact(self, on: bool | None = None) -> None:
+        """Bascule la fiche d'un dossier en planche contact.
+
+        Dix vignettes disent quelles vidéos sont là ; une planche contact dit ce
+        qu'elles racontent. Ce n'est pas la même question, et c'est pourquoi ce
+        n'est pas un onglet mais une bascule, posée là où l'on regarde.
+        """
+        self.contact = (not self.contact) if on is None else bool(on)
+        self.contact_button.setChecked(self.contact)
+        item = self.current
+        if item is None or item.kind != MODE_FOLDERS:
+            return
+        self.plans.pop(self._plan_key(item, self.page_of(item)), None)
+        self.grid.set_item(self._plan_key(item, self.page_of(item)),
+                           "planche contact…" if self.contact else "…")
+        self._request_previews(item, current=True)
+        self.setFocus()
+
+    def toggle_cinema(self, on: bool | None = None) -> None:
+        """Ne laisse que l'image : tout le reste s'efface le temps de regarder."""
+        self.cinema = (not self.cinema) if on is None else bool(on)
+        self.cinema_button.setChecked(self.cinema)
+        for widget in (self.crumbs, self.tabs, self.controls, self.commands,
+                       self.item_card, self.progress, self.stars):
+            widget.setVisible(not self.cinema)
+        if self.cinema:
+            self.tree.hide()
+        self.setFocus()
+
+    def on_video_finished(self) -> None:
+        """La vidéo est allée à son terme : on passe à la suivante.
+
+        Elle repartait en boucle. Quand on trie, revoir indéfiniment ce qu'on
+        vient de voir est exactement ce qu'on ne veut pas — la fin d'une vidéo
+        est une décision prise, même quand on n'a rien décidé.
+        """
+        item = self.current
+        if self.browsing or item is None or item.kind == MODE_FOLDERS:
+            return
+        if self.index + 1 < len(self.items):
+            self.show_item(self.index + 1)
+        else:
+            self.show_banner("Dernière vidéo de la liste", "#2a2f38")
 
     def on_picked_changed(self, count: int) -> None:
         self.picked_bar.setVisible(bool(count))
@@ -2829,14 +2910,32 @@ class MainWindow(QMainWindow):
             actions.reveal(target)
 
     def edit_tags(self) -> None:
-        """Saisit les mots-clés qui deviendront des dossiers virtuels."""
+        """Saisit les mots-clés qui deviendront des dossiers virtuels.
+
+        Un mot par ligne ; les dossiers se refont aussitôt, sans relire le
+        disque — ce qu'il faut pour savoir en changeant un mot s'il attrape ce
+        qu'on visait.
+        """
         dialog = TagsDialog(self.tags, self)
-        if dialog.exec() == dialog.DialogCode.Accepted:
-            self.tags = dialog.result_tags()
-            self.cfg["tags"] = self.tags
-            self.cfg.save()
-            if self.root is not None:
-                self.start_root(self.root, reset_levels=False)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return self.setFocus()
+        self.tags = dialog.result_tags()
+        self.cfg["tags"] = self.tags
+        self.tag_family = "mine"
+        self.cfg["tag_family"] = "mine"
+        self.cfg.save()
+        self.tag_chips.set_value("mine")
+        if self.root is None:
+            return self.setFocus()
+        if self.tab == TAB_TAGS and self.mode == MODE_FOLDERS:
+            self._add_tag_items()
+            self.refresh_board()
+            found = [i for i in self.all_items if i.is_tag]
+            self.show_banner(
+                f"{len(found)} mot(s)-clé(s) sur {len(self.tags)} ont trouvé "
+                f"des vidéos", "#22303f")
+        else:
+            self.set_tab(TAB_TAGS)
         self.setFocus()
 
     def edit_destinations(self) -> None:
@@ -2881,6 +2980,10 @@ class MainWindow(QMainWindow):
                 return self.act_undo()
             if key == Qt.Key_T:
                 return self.toggle_tree()
+            if key == Qt.Key_L:
+                return self.toggle_contact()
+            if key == Qt.Key_J:
+                return self.toggle_cinema()
             if key == Qt.Key_M:
                 return self.toggle_mute()
             if key == Qt.Key_O:

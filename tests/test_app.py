@@ -1547,6 +1547,73 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     ok = wait_for(app, lambda: not window.scanning and str(window.root) == origin, 60)
     check(ok, "un seul clic ramène à la racine, même la pile vidée")
 
+    print("\n[55] Planche contact, cinéma et enchaînement")
+    from videosorter.media import CONTACT_PER_VIDEO, CONTACT_ROWS, build_contact_plan
+
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    position = next(i for i, it in enumerate(window.items)
+                    if it.kind == MODE_FOLDERS and len(it.videos) >= 2)
+    window.toggle_board(False)
+    window.show_item(position)
+    pump(app, 0.5)
+
+    check(not window.contact_button.isHidden(),
+          "un dossier propose sa planche contact")
+    check(window.cinema_button.isHidden(),
+          "et pas le cinéma, qui ne vaut que pour une vidéo")
+
+    folder = window.items[position]
+    plan = build_contact_plan(folder.videos)
+    rows = min(CONTACT_ROWS, len(folder.videos))
+    check(len(plan) == rows * CONTACT_PER_VIDEO,
+          f"la planche fait {rows} ligne(s) de {CONTACT_PER_VIDEO} ({len(plan)})")
+    first = [entry[0] for entry in plan[:CONTACT_PER_VIDEO]]
+    check(len(set(first)) == 1, "une seule vidéo par ligne")
+    moments = [round(entry[1], 2) for entry in plan[:CONTACT_PER_VIDEO]]
+    check(len(set(moments)) == CONTACT_PER_VIDEO or plan[0][2] <= 2,
+          f"des instants échelonnés en son sein ({moments})")
+
+    window.toggle_contact(True)
+    pump(app, 0.4)
+    check(window.contact, "la bascule tient")
+    check(window.contact_button.isChecked(), "et le bouton le montre")
+    window.toggle_contact(False)
+    pump(app, 0.3)
+    check(not window.contact, "et se relâche")
+
+    # Le cinema efface tout ce qui n'est pas l'image.
+    flat_position = next((i for i, it in enumerate(window.items)
+                          if it.kind != MODE_FOLDERS), -1)
+    window.start_root(flat, MODE_FILES)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.toggle_board(False)
+    window.show_item(0)
+    pump(app, 0.4)
+    check(not window.cinema_button.isHidden(), "une vidéo propose le cinéma")
+    window.toggle_cinema(True)
+    pump(app, 0.3)
+    check(window.commands.isHidden() and window.controls.isHidden(),
+          "le cinéma efface les barres")
+    window.toggle_cinema(False)
+    pump(app, 0.3)
+    check(not window.commands.isHidden(), "et les rend")
+
+    # La fin d'une video mene a la suivante, elle ne reboucle pas. Il faut une
+    # liste qui en comporte plusieurs : le dossier plat a ete vide par les
+    # etapes precedentes.
+    window.start_root(root, MODE_FLAT)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.toggle_board(False)
+    window.show_item(0)
+    pump(app, 0.4)
+    before = window.index
+    window.on_video_finished()
+    pump(app, 0.4)
+    check(window.index == before + 1,
+          f"la vidéo finie mène à la suivante ({before} → {window.index})")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

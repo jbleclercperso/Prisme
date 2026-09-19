@@ -308,8 +308,10 @@ class PreviewGrid(QWidget):
         self.grid_layout = QGridLayout(self)
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
         self.grid_layout.setSpacing(8)
+        # Assez de cases pour la planche contact — quatre videos de cinq
+        # instants — meme si l'affichage ordinaire n'en montre que dix.
         self.tiles: list = []
-        for slot in range(count):
+        for slot in range(max(count, 20)):
             tile = PreviewTile(slot, self)
             self.grid_layout.addWidget(tile, slot // GRID_COLUMNS, slot % GRID_COLUMNS)
             self.tiles.append(tile)
@@ -600,6 +602,11 @@ class PreviewGrid(QWidget):
 class SinglePlayer(QWidget):
     """Mode fichier : la vidéo courante est lue en grand, avec une pellicule."""
 
+    # Emis quand la video arrive a son terme. La boucle avait du sens tant que
+    # le lecteur servait a examiner un fichier ; quand il sert a trier, revoir
+    # indefiniment ce qu'on vient de voir est exactement ce qu'on ne veut pas.
+    finished = Signal()
+
     # Cinq reperes suffisent a se reperer dans une video : un cinquieme, deux
     # cinquiemes, et ainsi de suite. Dix prenaient deux fois plus de place pour
     # une precision dont on ne fait rien — on survole pour chercher, on ne
@@ -612,6 +619,7 @@ class SinglePlayer(QWidget):
         # se deplacer dans une video, pas a en faire le tour.
         self.count = self.STRIP_COUNT
         self.scroll_seconds = scroll_seconds
+        self.loop = False
         # Posee a droite plutot qu'en dessous : une bande horizontale volait au
         # lecteur quatre-vingt-dix pixels sur toute la largeur, alors que la
         # place perdue sur le cote ne coute rien a une video large.
@@ -728,8 +736,15 @@ class SinglePlayer(QWidget):
 
     def _on_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self.player.setPosition(0)
-            self.player.play()
+            if self.loop:
+                self.player.setPosition(0)
+                self.player.play()
+                return
+            self.finished.emit()
+
+    def set_loop(self, loop: bool) -> None:
+        """En boucle, ou bien on passe a la suivante une fois la fin atteinte."""
+        self.loop = loop
 
     RAIL_HEIGHT = 8
 
