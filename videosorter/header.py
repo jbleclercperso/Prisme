@@ -317,18 +317,36 @@ class ControlBar(QWidget):
         self.random_here.setToolTip("Une vidéo au hasard parmi celles d'ici")
         row.addWidget(self.random_here)
 
-        self.columns_caption = _caption("par rangée")
+        # La densite se regle comme on regle un zoom : deux boutons et le
+        # chiffre entre eux. Une liste deroulante et son etiquette « par rangee »
+        # occupaient quatre fois la place pour le meme reglage, et il fallait
+        # l'ouvrir pour savoir ou l'on en etait.
+        self.columns_choices = list(columns_choices)
+        self.wider = _button("−", lambda: self._step_columns(-1))
+        self.tighter = _button("+", lambda: self._step_columns(1))
+        self.columns_label = QLabel("", self)
+        self.columns_label.setObjectName("counter")
+        self.columns_label.setAlignment(Qt.AlignCenter)
+        self.columns_label.setFixedWidth(22)
+        for widget, tip in ((self.wider, "Des vignettes plus grandes"),
+                            (self.tighter, "Des vignettes plus petites")):
+            widget.setFixedWidth(26)
+            widget.setToolTip(tip)
+        # Conserve pour les appels existants, sans occuper l'ecran.
         self.columns = _combo([(n, str(n)) for n in columns_choices])
-        self.columns.setFixedWidth(52)
-        row.addWidget(self.columns)
-        row.addWidget(self.columns_caption)
+        self.columns.hide()
+        self.columns_caption = self.columns_label
+        row.addWidget(self.wider)
+        row.addWidget(self.columns_label)
+        row.addWidget(self.tighter)
 
+        # Une seule etiquette dit ou l'on en est, et les fleches l'encadrent.
         self.count = QLabel("", self)
         self.count.setObjectName("counter")
         self.previous = _button("◂", self.previousPage.emit)
         self.next = _button("▸", self.nextPage.emit)
-        self.previous.setFixedWidth(30)
-        self.next.setFixedWidth(30)
+        self.previous.setFixedWidth(26)
+        self.next.setFixedWidth(26)
         row.addWidget(self.previous)
         row.addWidget(self.count)
         row.addWidget(self.next)
@@ -364,22 +382,40 @@ class ControlBar(QWidget):
     def set_sort(self, mode: str) -> None:
         self.sorts.set_value(mode)
 
+    def _step_columns(self, step: int) -> None:
+        """Une vignette plus grande, ou plus petite, d'un cran."""
+        current = int(self.columns.currentData() or self.columns_choices[0])
+        try:
+            index = self.columns_choices.index(current)
+        except ValueError:
+            index = 0
+        index = max(0, min(len(self.columns_choices) - 1, index + step))
+        chosen = self.columns_choices[index]
+        if chosen == current:
+            return
+        self.set_columns(chosen)
+        self.columnsChanged.emit(chosen)
+
     def set_columns(self, columns: int) -> None:
         index = self.columns.findData(columns)
         if index >= 0:
             self.columns.blockSignals(True)
             self.columns.setCurrentIndex(index)
             self.columns.blockSignals(False)
+        self.columns_label.setText(str(columns))
+        self.wider.setEnabled(columns > self.columns_choices[0])
+        self.tighter.setEnabled(columns < self.columns_choices[-1])
 
     def set_page(self, text: str, has_previous: bool, has_next: bool) -> None:
         self.count.setText(text)
+        self.count.setVisible(bool(text))
         self.previous.setEnabled(has_previous)
         self.next.setEnabled(has_next)
 
     def set_browsing(self, browsing: bool) -> None:
-        """Le nombre par rangée et la pagination ne valent qu'en parcours."""
-        for widget in (self.columns, self.columns_caption, self.previous,
-                       self.next):
+        """La densité et la pagination ne valent qu'en parcours."""
+        for widget in (self.wider, self.columns_label, self.tighter,
+                       self.previous, self.next):
             widget.setVisible(browsing)
 
     def reset(self) -> None:

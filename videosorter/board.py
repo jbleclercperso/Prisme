@@ -326,6 +326,11 @@ class BoardView(QWidget):
         self.scroll.verticalScrollBar().valueChanged.connect(
             lambda _v: self.visible_timer.start()
         )
+        # Arriver en bas fait passer a la page suivante. C'est le geste qu'on
+        # fait naturellement, et il evite d'aller chercher une fleche a l'autre
+        # bout de l'ecran pour continuer.
+        self.scroll.verticalScrollBar().valueChanged.connect(self._maybe_next_page)
+        self._at_end = False
 
         # Les cartes gardaient la largeur calculee au premier affichage :
         # agrandir la fenetre laissait une bande vide a droite, la retrecir les
@@ -436,6 +441,19 @@ class BoardView(QWidget):
         for card in self.cards:
             card.set_picked(False)
         self.pickedChanged.emit(0)
+
+    def _maybe_next_page(self, value: int) -> None:
+        bar = self.scroll.verticalScrollBar()
+        if bar.maximum() <= 0:
+            return
+        at_end = value >= bar.maximum() - 4
+        # Une seule fois par arrivee en bas : sans ce verrou, le moindre
+        # tremblement de molette avalerait plusieurs pages d'affilee.
+        if at_end and not self._at_end and self.page < self.total_pages() - 1:
+            self._at_end = True
+            self.set_page(self.page + 1)
+            return
+        self._at_end = at_end
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

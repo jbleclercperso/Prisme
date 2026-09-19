@@ -1614,6 +1614,59 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(window.index == before + 1,
           f"la vidéo finie mène à la suivante ({before} → {window.index})")
 
+    print("\n[56] Densité et pagination")
+    filters = window.controls
+    check(filters.columns.isHidden(),
+          "la liste déroulante « par rangée » a quitté l'écran")
+
+    window.set_board_columns(5)
+    filters.set_columns(5)
+    check(filters.columns_label.text() == "5",
+          f"le chiffre se lit sans rien ouvrir ({filters.columns_label.text()})")
+
+    steps = []
+    filters.columnsChanged.connect(steps.append)
+    filters.tighter.click()
+    check(steps and steps[-1] > 5,
+          f"« + » resserre les vignettes ({steps[-1] if steps else None})")
+    filters.wider.click()
+    filters.wider.click()
+    check(steps[-1] < 5, f"« − » les agrandit ({steps[-1]})")
+    check(filters.columns_label.text() == str(steps[-1]),
+          "et le chiffre suit")
+
+    # Aux extremites, les boutons se desactivent plutot que de ne rien faire.
+    filters.set_columns(filters.columns_choices[0])
+    check(not filters.wider.isEnabled(), "au plus grand, « − » se désactive")
+    filters.set_columns(filters.columns_choices[-1])
+    check(not filters.tighter.isEnabled(), "au plus petit, « + » aussi")
+    filters.set_columns(window.cfg["board_columns"])
+
+    # Arriver en bas de la planche passe a la page suivante.
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(tri, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.toggle_board(True)
+    pump(app, 0.4)
+    board = window.board
+    board.items = list(window.items) * 40          # de quoi faire des pages
+    board.set_page(0)
+    pump(app, 0.3)
+    check(board.total_pages() > 1, "assez d'éléments pour paginer")
+    # Hors écran, la zone de défilement n'a pas de hauteur reelle et sa barre
+    # reste a zero : on eprouve donc la regle elle-meme, en lui annoncant qu'on
+    # est arrive au bout.
+    bar = board.scroll.verticalScrollBar()
+    bar.setRange(0, 100)
+    board._at_end = False
+    board._maybe_next_page(100)
+    pump(app, 0.3)
+    check(board.page == 1,
+          f"arriver en bas mène à la page suivante ({board.page})")
+    board._maybe_next_page(100)
+    check(board.page == 1,
+          "et l'on n'en avale pas deux pour un seul arrêt en bas")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,
