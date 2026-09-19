@@ -68,7 +68,7 @@ déjà vu est instantané.
 | **molette** | Avance ou recule dans la vidéo survolée |
 | **clic gauche maintenu + molette** | Zoome sur l'image, centré là où pointe la souris (×1 à ×6) — `Ctrl+molette` fait de même |
 | **clic droit** | Ramène l'image à sa taille normale |
-| `F` ou double-clic | Ouvre la vidéo en grand, dans l'application |
+| clic, ou `F` | Descend d'un étage : dans le dossier, ou dans la vidéo |
 | `Ctrl+Z` | Annuler la dernière action |
 | `Ctrl+F` | Aller au champ de filtre |
 | `Ctrl+P` | Basculer entre la fiche unique et la planche |
@@ -136,10 +136,14 @@ lancement. `use_scan_cache: false` le désactive entièrement.
 ## Vue planche
 
 `Ctrl+P`, ou le bouton **Planche**. Les éléments passent en cartes. Sous chaque
-image, **une seule ligne discrète**, la même que sous un aperçu : la durée en
-pastille en haut à droite, puis `1080p · nom du fichier` pour une vidéo,
-`12 vidéos · nom du dossier` pour un dossier. Survoler une carte la lit en
-boucle, cliquer l'ouvre.
+image, **une seule ligne discrète**, la même que sous un aperçu :
+`1080p · nom du fichier` pour une vidéo, le seul nom pour un dossier.
+
+La pastille en haut à droite porte la durée d'une vidéo, et **le nombre de
+vidéos d'un dossier** — elle y affichait la durée de l'unique vidéo dont l'image
+sert de vignette, ce qui ne disait rien du dossier.
+
+Survoler une carte la lit en boucle, cliquer descend dedans.
 
 Ce n'est pas un second logiciel mais une autre présentation du même contenu :
 même racine, même filtre, même arborescence, mêmes touches de destination.
@@ -164,6 +168,13 @@ onglet en change.
 Les mots qui reviennent le plus dans vos noms de fichiers deviennent des
 catégories, sans rien saisir (*Mots fréquents*) — ou bien les vôtres
 (*Mes mots-clés*, `Ctrl+D` puis *Mots-clés automatiques…*).
+
+Un mot-clé fréquent est **un seul mot**. Les noms de fichiers collent souvent
+leurs mots (`BigTitsAsianGirl`) : ils sont coupés aux majuscules et aux
+chiffres, sans quoi la catégorie était une phrase entière. Les mots de grammaire
+des deux langues, et le jargon de fichier (`1080p`, `x264`, `web`…), sont
+écartés. Pour chercher une expression de deux ou trois mots, on la saisit dans
+**ses propres mots-clés**, où la recherche se fait par sous-chaîne.
 
 **Une vidéo ne va que dans une seule catégorie** : celle du mot qui la décrit le
 mieux, le plus fréquent de ceux que son nom porte. Sans cela les mots fréquents
@@ -197,8 +208,9 @@ niveau dans l'arborescence.
 
 ## Lire en grand
 
-Un double-clic sur un aperçu ou une carte, ou la touche `F`, ouvre la vidéo dans
-un **lecteur intégré** qui recouvre la page : image en grand, temps restant,
+**Un clic descend d'un étage**, le même geste partout : sur un dossier il
+l'ouvre sur ses vidéos, sur un mot-clé sur les siennes, sur une vidéo — carte ou
+aperçu — il la lance dans le **lecteur intégré**. La touche `F` fait de même qui recouvre la page : image en grand, temps restant,
 avancement, zoom. `Échap` ou un nouveau double-clic referme.
 
 Rien n'est confié au lecteur du système : on reste dans le tri, et le fichier
