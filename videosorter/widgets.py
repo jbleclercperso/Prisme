@@ -80,6 +80,10 @@ QFrame#tile { background: #0e1013; border: 1px solid #262c35; border-radius: 8px
 QFrame#tile[hovered="true"] { border: 1px solid #4c8dff; }
 QLabel#tileBadge { background: rgba(0,0,0,0.65); color: #dfe4ea; border-radius: 4px;
                    padding: 1px 5px; font-size: 11px; }
+QCheckBox#cardPick::indicator { width: 18px; height: 18px;
+                                border: 1px solid #6b7684; border-radius: 4px;
+                                background: rgba(8, 10, 13, 0.75); }
+QCheckBox#cardPick::indicator:checked { background: #2f6fed; border-color: #2f6fed; }
 QLabel#tileDuration { background: rgba(0,0,0,0.78); color: #ffffff;
                      border-radius: 5px; padding: 2px 8px;
                      font-size: 13px; font-weight: 700; }

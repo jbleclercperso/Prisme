@@ -14,6 +14,7 @@ from PySide6.QtGui import QCursor, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFrame, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -36,6 +37,7 @@ class BoardCard(QFrame):
     opened = Signal(int)
     rated = Signal(int, int)
     played = Signal(int)
+    picked = Signal(int, bool)
 
     def __init__(self, index: int, parent=None):
         super().__init__(parent)
@@ -72,6 +74,18 @@ class BoardCard(QFrame):
         self.duration_chip = QLabel("", self)
         self.duration_chip.setObjectName("tileDuration")
         self.duration_chip.hide()
+
+        # Elle ne se montre qu'au survol, ou si elle est cochee : une case par
+        # vignette, visible en permanence, ferait un damier avant de faire une
+        # planche.
+        self.pick = QCheckBox(self)
+        self.pick.setObjectName("cardPick")
+        self.pick.setCursor(Qt.PointingHandCursor)
+        self.pick.setFocusPolicy(Qt.NoFocus)
+        self.pick.move(14, 14)
+        self.pick.hide()
+        self.pick.toggled.connect(
+            lambda on: self.picked.emit(self.index, bool(on)))
 
         # Sans cela, un clic tombant sur l'image ou le texte n'atteindrait pas
         # la carte : seules ses marges auraient repondu.
@@ -124,6 +138,7 @@ class BoardCard(QFrame):
         self._resolution = ""
         self.image.setPixmap(QPixmap())
         self.image.setText("…")
+        self.set_picked(False)
         self.meta.setText(self._line())
         count = (f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}\n"
                  if item.kind == MODE_FOLDERS else "")
@@ -192,6 +207,18 @@ class BoardCard(QFrame):
         self.setProperty("hovered", "true" if hovered else "false")
         self.style().unpolish(self)
         self.style().polish(self)
+        self.pick.setVisible(hovered or self.pick.isChecked())
+        if self.pick.isVisible():
+            self.pick.raise_()
+
+    def set_picked(self, picked: bool) -> None:
+        """Pose ou retire la coche sans reemettre le signal."""
+        self.pick.blockSignals(True)
+        self.pick.setChecked(picked)
+        self.pick.blockSignals(False)
+        self.pick.setVisible(picked or self.property("hovered") == "true")
+        if self.pick.isVisible():
+            self.pick.raise_()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -212,6 +239,7 @@ class BoardView(QWidget):
     """Grille défilante de cartes, avec lecture au survol."""
 
     openRequested = Signal(int)
+    pickedChanged = Signal(int)
     rateRequested = Signal(int, int)
     previewNeeded = Signal(int)
     playRequested = Signal(str, float)
@@ -281,6 +309,9 @@ class BoardView(QWidget):
         # Les vignettes ne sont fabriquees que pour les cartes reellement a
         # l ecran : en demander soixante d un coup saturait le reseau avant que
         # la premiere rangee ne s affiche.
+        # Identifiants des elements coches : ils survivent au changement de
+        # page, les cartes etant reutilisees d'une page a l'autre.
+        self.picked_ids: set = set()
         self._pending_previews: set = set()
         self.visible_timer = QTimer(self)
         self.visible_timer.setSingleShot(True)
@@ -319,6 +350,7 @@ class BoardView(QWidget):
         while len(self.cards) < count:
             card = BoardCard(len(self.cards), self.canvas)
             card.opened.connect(self.openRequested)
+            card.picked.connect(self._on_picked)
             card.rated.connect(self.rateRequested)
             card.played.connect(self._play_full)
             self.cards.append(card)
@@ -369,11 +401,34 @@ class BoardView(QWidget):
                 needed.append(position)
             else:
                 card.set_state(item.status)
+            # La coche appartient a l'element, pas a la carte : les cartes sont
+            # reutilisees d'une page a l'autre.
+            card.set_picked(item.item_id in self.picked_ids)
             self.grid.addWidget(card, slot // self.columns, slot % self.columns)
             card.show()
         self.pageChanged.emit(first + 1 if self.items else 0, last, len(self.items))
         self._pending_previews = set(needed)
         self.request_visible()
+
+    def _on_picked(self, position: int, picked: bool) -> None:
+        if not (0 <= position < len(self.items)):
+            return
+        item_id = self.items[position].item_id
+        if picked:
+            self.picked_ids.add(item_id)
+        else:
+            self.picked_ids.discard(item_id)
+        self.pickedChanged.emit(len(self.picked_ids))
+
+    def picked_items(self) -> list:
+        """Les elements coches, dans l'ordre ou ils sont affiches."""
+        return [item for item in self.items if item.item_id in self.picked_ids]
+
+    def clear_picked(self) -> None:
+        self.picked_ids.clear()
+        for card in self.cards:
+            card.set_picked(False)
+        self.pickedChanged.emit(0)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

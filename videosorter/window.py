@@ -1,6 +1,7 @@
 """Fenêtre principale : enchaînement des éléments et exécution des actions."""
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +17,7 @@ from . import actions
 from .backfill import ThumbBackfill
 from .board import COLUMN_CHOICES, BoardView
 from .actions import ActionError, HistoryEntry
-from .config import Config
+from .config import APP_DIR, Config
 from .header import (
     CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, TAB_FOLDERS,
     TAB_TAGS, TAB_VIDEOS, TABS, VIEW_BROWSE, VIEW_EDIT, Breadcrumb, Chips,
@@ -379,6 +380,32 @@ class MainWindow(QMainWindow):
         self.item_card = header
         layout.addWidget(header)
 
+        # Elle n'existe que le temps d'une selection : une barre d'actions
+        # permanente occuperait une rangee pour ne rien dire la plupart du temps.
+        self.picked_bar = QWidget(sort_page)
+        picked_row = QHBoxLayout(self.picked_bar)
+        picked_row.setContentsMargins(12, 6, 12, 6)
+        picked_row.setSpacing(8)
+        self.picked_label = QLabel("", self.picked_bar)
+        self.picked_label.setObjectName("pending")
+        picked_row.addWidget(self.picked_label)
+        picked_row.addStretch(1)
+        for text, tip, slot in (
+            ("▶  Tout lire", "Ouvre les vidéos cochées dans le lecteur du système",
+             self.play_picked),
+            ("Déplacer…", "Cliquez ensuite un dossier de l'arborescence",
+             self.move_picked_hint),
+            ("Supprimer", "Écarte les vidéos cochées", self.delete_picked),
+            ("Annuler", "Décoche tout", self.clear_picked),
+        ):
+            button = QPushButton(text, self.picked_bar)
+            button.setToolTip(tip)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.clicked.connect(slot)
+            picked_row.addWidget(button)
+        self.picked_bar.hide()
+        layout.addWidget(self.picked_bar)
+
         self.banner = QLabel("", sort_page)
         self.banner.setObjectName("statusBanner")
         self.banner.setWordWrap(True)
@@ -412,6 +439,7 @@ class MainWindow(QMainWindow):
             self.cfg["preview_seconds"], self.cfg["board_columns"], self.viewer
         )
         self.board.openRequested.connect(self.on_board_open)
+        self.board.pickedChanged.connect(self.on_picked_changed)
         self.board.rateRequested.connect(self.on_board_rate)
         self.board.previewNeeded.connect(self.on_board_preview)
         self.board.playRequested.connect(self.play_in_app)
@@ -1393,7 +1421,13 @@ class MainWindow(QMainWindow):
                 nxt = self.items[self.index + offset]
                 keep.add(self._plan_key(nxt, self.page_of(nxt)))
                 self._request_previews(nxt, current=False)
-        self.preview.cancel_except(keep)
+        # Uniquement hors planche : les vignettes de la planche portent des
+        # cles « board@… » que cet ensemble ne contient jamais, et les annuler
+        # revenait a vider la planche de ses images a chaque fois qu'une fiche
+        # se preparait en coulisse. C'est pourquoi l'onglet Videos restait
+        # desesperement gris.
+        if not self.browsing:
+            self.preview.cancel_except(keep)
 
     # ------------------------------------------------------------------
     # Apercus, par pages de `thumb_count`
@@ -1605,7 +1639,8 @@ class MainWindow(QMainWindow):
 
     def _show_counts(self) -> None:
         """Une seule ligne dit ce qui est montre, ce qui est masque, et ou l'on en est."""
-        hidden = len(self.all_items) - len(self.items)
+        hidden = (sum(1 for i in self.all_items if self._sortable(i))
+                  - len(self.items))
         if self.browsing:
             first, last = self.board._page_bounds()
             shown = f"{first + 1 if self.items else 0}–{last} sur {len(self.items)}"
@@ -1928,6 +1963,86 @@ class MainWindow(QMainWindow):
                 return position
         return -1
 
+    def on_picked_changed(self, count: int) -> None:
+        self.picked_bar.setVisible(bool(count))
+        self.picked_label.setText(
+            f"{count} élément(s) coché(s)" if count else "")
+
+    def clear_picked(self) -> None:
+        self.board.clear_picked()
+        self.setFocus()
+
+    def _picked_videos(self) -> list:
+        """Toutes les vidéos des éléments cochés, dossiers compris."""
+        videos = []
+        seen = set()
+        for item in self.board.picked_items():
+            for video in item.videos:
+                key = str(video)
+                if key not in seen:
+                    seen.add(key)
+                    videos.append(Path(video))
+        return videos
+
+    def play_picked(self) -> None:
+        """Écrit une liste de lecture et la confie au lecteur du système.
+
+        Un fichier .m3u plutôt qu'une ligne de commande vers tel ou tel lecteur :
+        on ne présume pas de celui qui est installé, et celui que l'utilisateur
+        a choisi pour ses vidéos est le bon.
+        """
+        videos = self._picked_videos()
+        if not videos:
+            return
+        playlist = APP_DIR / "selection.m3u"
+        try:
+            APP_DIR.mkdir(parents=True, exist_ok=True)
+            playlist.write_text(
+                "#EXTM3U\n" + "\n".join(str(video) for video in videos),
+                encoding="utf-8",
+            )
+            os.startfile(str(playlist))
+        except OSError as exc:
+            self.show_banner(f"Lecture impossible : {exc}", "#3a2226")
+            return
+        self.show_banner(f"{len(videos)} vidéo(s) envoyée(s) au lecteur", "#22303f")
+
+    def move_picked_hint(self) -> None:
+        """Le deplacement groupe passe par l'arborescence : on l'ouvre."""
+        if not self.tree.isVisible():
+            self.toggle_tree(True)
+        self.tree.set_action("send")
+        self.show_banner(
+            "Cliquez le dossier de destination dans l'arborescence.", "#22303f")
+
+    def delete_picked(self) -> None:
+        for item in list(self.board.picked_items()):
+            position = self._position_of(item)
+            if position >= 0:
+                self.index = position
+                self.act_delete()
+        self.board.clear_picked()
+
+    def move_picked(self, dest: dict) -> int:
+        """Envoie tous les elements coches vers cette destination."""
+        moved = 0
+        for item in list(self.board.picked_items()):
+            position = self._position_of(item)
+            if position < 0:
+                continue
+            self.index = position
+            before = self.stats["moved"]
+            self.act_move(dest)
+            moved += self.stats["moved"] > before
+        self.board.clear_picked()
+        return moved
+
+    def _position_of(self, item) -> int:
+        for position, other in enumerate(self.items):
+            if other.item_id == item.item_id:
+                return position
+        return -1
+
     def on_board_open(self, position: int) -> None:
         """Un clic sur une vignette descend a l'etage du dessous : sa fiche.
 
@@ -2031,6 +2146,16 @@ class MainWindow(QMainWindow):
         self.setFocus()
 
     def on_tree_folder(self, path: str) -> None:
+        # Une selection en cours prime : c'est elle qu'on vient de designer.
+        if self.board.picked_ids and self.tree.action == "send":
+            moved = self.move_picked({"path": path, "label": Path(path).name})
+            self.show_banner(
+                f"{moved} élément(s) envoyé(s) vers « {Path(path).name} »",
+                "#22303f")
+            return
+        return self._on_tree_folder(path)
+
+    def _on_tree_folder(self, path: str) -> None:
         """Le clic envoie l'élément en fiche, et ouvre le dossier en planche.
 
         C'est la seule différence d'intention entre les deux vues : parcourir
@@ -2061,7 +2186,19 @@ class MainWindow(QMainWindow):
     def _terms(text: str) -> list:
         return [term.strip().lower() for term in text.split(",") if term.strip()]
 
+    def _sortable(self, item) -> bool:
+        """Un dossier sans une seule video n'a rien a trier.
+
+        L'afficher revenait a faire chercher, parmi des vignettes grises, celles
+        qui montrent quelque chose. Il ne compte pas non plus comme « filtre » :
+        ce n'est pas l'utilisateur qui l'a ecarte.
+        """
+        return not (item.kind == MODE_FOLDERS and not item.is_tag
+                    and not item.video_count)
+
     def _matches(self, item) -> bool:
+        if not self._sortable(item):
+            return False
         name = item.name.lower()
         rules = self.criteria or {}
         include = self._terms(rules.get("include", self.cfg["filter_include"]))

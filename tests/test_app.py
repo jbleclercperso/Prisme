@@ -380,7 +380,15 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     window.apply_filter("", "")
     pump(app, 0.3)
-    check(len(window.items) == len(window.all_items), "effacer le filtre rend tout")
+    # « Tout », c'est tout ce qui se trie : un dossier sans la moindre vidéo
+    # n'en fait pas partie, il n'y a rien à y décider.
+    sortable = [i for i in window.all_items
+                if i.is_tag or i.kind != MODE_FOLDERS or i.video_count]
+    check(len(window.items) == len(sortable),
+          f"effacer le filtre rend tout ({len(window.items)} sur {len(sortable)})")
+    check(all(i.video_count or i.is_tag or i.kind != MODE_FOLDERS
+              for i in window.items),
+          "et aucun dossier vide ne s'y trouve")
     check("filtrés" not in window.controls.count.text(),
           "et le compteur ne signale plus rien de masqué")
 
@@ -1224,7 +1232,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "aucun dossier virtuel ne s'invite parmi les dossiers réels")
 
     window.set_tab(TAB_TAGS)
-    pump(app, 0.4)
+    wait_for(app, lambda: any(i.is_tag for i in window.all_items), 30)
     tags_found = [i for i in window.all_items if i.is_tag]
     check(len(tags_found) == 2, f"deux dossiers virtuels ({len(tags_found)})")
     check(all(i.is_tag for i in window.all_items),
