@@ -158,6 +158,22 @@ Borner l'analyse d'en-tête de ffmpeg (`-probesize`) a été essayé et **écart
 trois fois plus rapide sur certains fichiers, deux fois plus lent sur d'autres,
 où ffmpeg doit relire après avoir échoué dans la borne.
 
+### Les aperçus se préparent d'avance
+
+C'est le choix qui change tout. Mesuré sur le partage : une page de 40 cartes
+demande **33 s** la première fois, et **0,07 s** la seconde. Seize extractions
+de front n'y vont pas plus vite que huit — la ligne est saturée, pas le
+processeur — donc rien ne peut raccourcir cette première fois **au moment où on
+la regarde**.
+
+Dès que l'analyse se termine, une **récolte** fabrique donc la vignette de
+chaque élément, en arrière-plan, deux extractions à la fois. Elle s'efface dès
+que vous demandez quelque chose, reprend deux secondes plus tard, saute ce qui
+est déjà sur le disque, et reprend où elle s'était arrêtée au lancement suivant.
+Le bouton d'état l'annonce (`◷ aperçus 120 / 649`) et un clic l'arrête.
+
+Une fois passée, la navigation ne coûte plus rien.
+
 Les vignettes obtenues restent sur le disque, indexées par fichier, date et
 instant : revenir sur une page déjà vue est instantané. `thumb_count` (10 par
 défaut) est le levier restant si l'on veut moins d'aperçus par fiche.

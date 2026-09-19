@@ -9,7 +9,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+import time
+
+from PySide6.QtCore import (
+    QObject, QRunnable, QThread, QThreadPool, Signal,
+)
 
 from .config import THUMB_DIR
 from .index import INDEX
@@ -367,6 +371,97 @@ class ThumbJob(QRunnable):
             self.signals.thumb_failed.emit(self.item_id, self.slot)
 
 
+class Harvester(QThread):
+    """Fabrique les vignettes a l'avance, quand personne ne regarde.
+
+    La mesure est sans appel : sur le partage, une vignette coute environ une
+    seconde, et seize extractions de front ne vont pas plus vite que huit — la
+    ligne est saturee, pas le processeur. Une page de quarante cartes demande
+    donc une demi-minute, et rien ne peut la raccourcir **au moment ou on la
+    regarde**.
+
+    Mais une vignette deja fabriquee se relit en deux millisecondes. Tout
+    l'enjeu est donc de les fabriquer avant, une fois, pendant qu'on fait autre
+    chose — et de s'effacer des que quelqu'un demande quelque chose.
+    """
+
+    progress = Signal(int, int)        # faites, a faire
+    finished_harvest = Signal(int)     # fabriquees
+
+    # Deux extractions seulement : la recolte est un travail de fond, elle ne
+    # doit pas prendre la ligne a ce qu'on regarde.
+    WORKERS = 2
+    # Apres une demande au premier plan, on se tait le temps qu'elle aboutisse.
+    QUIET_AFTER_REQUEST = 2.5          # secondes
+
+    def __init__(self, width: int, parent=None):
+        super().__init__(parent)
+        self.width = width
+        self.tasks: list = []          # [(video, ts)]
+        self.made = 0
+        self.busy_until = 0.0
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def hold(self) -> None:
+        """Quelqu'un regarde : on s'ecarte."""
+        self.busy_until = time.monotonic() + self.QUIET_AFTER_REQUEST
+
+    def run(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        total = len(self.tasks)
+        if not total:
+            self.finished_harvest.emit(0)
+            return
+
+        # Ce qui est deja sur le disque ne se refait pas : la recolte reprend
+        # ou elle s'etait arretee, meme apres avoir ferme l'application.
+        todo = []
+        for video, ts in self.tasks:
+            if self._stop:
+                return
+            out = thumb_path(Path(video), ts, self.width)
+            try:
+                if out.exists() and out.stat().st_size > 0:
+                    continue
+            except OSError:
+                pass
+            todo.append((video, ts))
+
+        done = total - len(todo)
+        self.progress.emit(done, total)
+        if not todo:
+            self.finished_harvest.emit(0)
+            return
+
+        def work(task):
+            while not self._stop and time.monotonic() < self.busy_until:
+                time.sleep(0.2)
+            if self._stop:
+                return False
+            return bool(extract_thumb(Path(task[0]), task[1], self.width))
+
+        last = 0.0
+        pool = ThreadPoolExecutor(max_workers=self.WORKERS)
+        try:
+            for made in pool.map(work, todo):
+                if self._stop:
+                    break
+                done += 1
+                self.made += bool(made)
+                now = time.monotonic()
+                if now - last >= 0.5 or done == total:
+                    self.progress.emit(done, total)
+                    last = now
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        if not self._stop:
+            self.finished_harvest.emit(self.made)
+
+
 class PreviewManager(QObject):
     """Orchestre plans et vignettes, en annulant les travaux devenus inutiles."""
 
@@ -387,6 +482,7 @@ class PreviewManager(QObject):
         self.local_workers = max(2, min(4, (os.cpu_count() or 4) // 2))
         self.pool.setMaxThreadCount(self.local_workers)
         self.jobs: list = []
+        self.harvester: Harvester | None = None
 
     def _track(self, job) -> None:
         self.jobs.append(job)
@@ -429,6 +525,8 @@ class PreviewManager(QObject):
 
     def request_thumb(self, item_id: str, slot: int, video: str, ts: float,
                       urgent: bool = True) -> None:
+        if urgent and self.harvester is not None:
+            self.harvester.hold()
         job = ThumbJob(self.signals, item_id, slot, Path(video), ts, self.thumb_width)
         self._track(job)
         self.pool.start(job, self.URGENT if urgent else self.AHEAD)
@@ -451,6 +549,21 @@ class PreviewManager(QObject):
         if workers != self.pool.maxThreadCount():
             self.pool.setMaxThreadCount(workers)
 
+    def start_harvest(self, tasks: list) -> "Harvester":
+        """Lance, ou relance, la fabrication d'avance des vignettes."""
+        self.stop_harvest()
+        self.harvester = Harvester(self.thumb_width, self)
+        self.harvester.tasks = tasks
+        self.harvester.start(QThread.LowestPriority)
+        return self.harvester
+
+    def stop_harvest(self) -> None:
+        if self.harvester is not None:
+            self.harvester.stop()
+            self.harvester.wait(3000)
+            self.harvester = None
+
     def shutdown(self) -> None:
+        self.stop_harvest()
         self.quiesce(2000)
         INDEX.commit(force=True)

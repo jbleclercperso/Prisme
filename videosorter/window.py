@@ -433,6 +433,7 @@ class MainWindow(QMainWindow):
         # relecture qui corrige cinquante dossiers, la refaire a chaque paquet
         # la ferait clignoter sans rien apprendre a personne.
         self._board_dirty = False
+        self._harvest = (0, 0)
         self.board_timer = QTimer(self)
         self.board_timer.setSingleShot(True)
         self.board_timer.setInterval(1000)
@@ -773,6 +774,50 @@ class MainWindow(QMainWindow):
                 f"Analyse {done}/{total} — {name}" if name
                 else f"Analyse {done}/{total}…")
 
+    def start_harvest(self) -> None:
+        """Fabrique d'avance la vignette de chaque élément, une fois pour toutes.
+
+        Sur le partage, une vignette coûte environ une seconde et seize
+        extractions de front ne vont pas plus vite que huit : la ligne est
+        saturée. Une page de quarante cartes demande donc une demi-minute, et
+        **rien ne peut la raccourcir au moment où on la regarde**. Mais une
+        vignette déjà faite se relit en deux millisecondes. On les fabrique donc
+        avant, pendant qu'on fait autre chose, et la récolte s'écarte dès que
+        quelqu'un demande quelque chose.
+        """
+        from .media import BLIND_OFFSETS
+        tasks = []
+        for index, item in enumerate(self.all_items):
+            if item.locked or not item.videos:
+                continue
+            video = str(item.videos[0])
+            if item.kind == MODE_FOLDERS:
+                tasks.append((video, BLIND_OFFSETS[index % len(BLIND_OFFSETS)]))
+            else:
+                info = INDEX.probe(video)
+                duration = (info or {}).get("duration") or 0.0
+                tasks.append((video, min(duration * 0.2, 20.0) if duration > 2
+                              else BLIND_OFFSETS[index % len(BLIND_OFFSETS)]))
+        if not tasks:
+            return
+        harvester = self.preview.start_harvest(tasks)
+        harvester.progress.connect(self.on_harvest_progress)
+        harvester.finished_harvest.connect(self.on_harvest_finished)
+        self._harvest = (0, len(tasks))
+        self._refresh_scan_button()
+
+    def on_harvest_progress(self, done: int, total: int) -> None:
+        self._harvest = (done, total)
+        self._refresh_scan_button()
+
+    def on_harvest_finished(self, made: int) -> None:
+        self._harvest = (0, 0)
+        self._refresh_scan_button()
+        if made:
+            self.show_banner(
+                f"✓ {made} aperçu(s) préparés d'avance. Les revoir est "
+                f"désormais immédiat.", "#1f3326")
+
     def _refresh_scan_button(self) -> None:
         """Dit sans ambiguite si une analyse tourne, et ou elle en est.
 
@@ -783,7 +828,17 @@ class MainWindow(QMainWindow):
         """
         if not hasattr(self, "scan_button"):
             return
-        if not self.scanning:
+        harvest_done, harvest_total = getattr(self, "_harvest", (0, 0))
+        if not self.scanning and harvest_total:
+            # L'analyse est finie, les apercus se preparent encore : il faut le
+            # dire, sinon on croit l'application occupee sans savoir a quoi.
+            self.scan_button.setText(f"◷  aperçus {harvest_done} / {harvest_total}")
+            self.scan_button.setProperty("running", "true")
+            self.scan_button.setToolTip(
+                "Les aperçus se fabriquent d'avance, en arrière-plan.\n"
+                "Ils s'effacent dès que vous regardez quelque chose.\n"
+                "Cliquer pour arrêter.")
+        elif not self.scanning:
             self.scan_button.setText("⟲  Analyser")
             self.scan_button.setProperty("running", "false")
             self.scan_button.setToolTip(
@@ -810,6 +865,13 @@ class MainWindow(QMainWindow):
             self.show_banner("Analyse interrompue. Ce qui a été lu est gardé.",
                              "#3a3322")
             self.update_counter()
+            return
+        if getattr(self, "_harvest", (0, 0))[1]:
+            self.preview.stop_harvest()
+            self._harvest = (0, 0)
+            self._refresh_scan_button()
+            self.show_banner("Préparation des aperçus interrompue. Ceux qui "
+                             "sont faits restent faits.", "#3a3322")
             return
         if self.root is not None:
             self.start_root(self.root, self.mode, reset_levels=False,
@@ -999,6 +1061,7 @@ class MainWindow(QMainWindow):
             )
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(total)
+        self.start_harvest()
         if not self.items:
             self.item_title.setText("Rien à trier")
             self.item_subtitle.setText(

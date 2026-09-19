@@ -191,6 +191,18 @@ check(PAGE_SIZE == 40, "les vignettes vont par pages de " + str(PAGE_SIZE))
 
 print()
 print("[7] Arborescence : les destinations seulement")
+from videosorter.media import Harvester                     # noqa: E402
+check(Harvester.WORKERS <= 2,
+      "la recolte d apercus reste discrete (" + str(Harvester.WORKERS)
+      + " extractions)")
+window.set_tab(TAB_FOLDERS)
+settle()
+window.start_harvest()
+pump(0.4)
+check(window.preview.harvester is not None, "elle demarre apres l analyse")
+window.preview.stop_harvest()
+check(window.preview.harvester is None, "et s arrete sur commande")
+
 window.tree.set_root(str(root))
 pump(0.5)
 model = window.tree.model
