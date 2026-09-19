@@ -203,11 +203,22 @@ class MainWindow(QMainWindow):
         self.pending_label.hide()
         header_row.addWidget(self.pending_label)
 
-        self.random_button = QPushButton("⚄ Au hasard", sort_page)
-        self.random_button.setToolTip("Une vidéo au hasard, partout   (Ctrl+H)")
+        # Deux portees, deux boutons. Le general pioche dans toute la
+        # collection ; le local, dans le seul element affiche. Ils etaient
+        # confondus derriere un raccourci, et l un des deux se cherchait.
+        self.random_button = QPushButton("⚄  Aléatoire", sort_page)
+        self.random_button.setObjectName("random")
+        self.random_button.setToolTip("Une vidéo au hasard, dans toute la "
+                                      "collection   (Ctrl+H)")
         self.random_button.setFocusPolicy(Qt.NoFocus)
         self.random_button.clicked.connect(self.pick_random)
-        self.random_button.hide()
+
+        self.random_here_button = QPushButton("⚄  Ici", sort_page)
+        self.random_here_button.setObjectName("randomHere")
+        self.random_here_button.setToolTip(
+            "Une vidéo au hasard, dans l'élément affiché seulement")
+        self.random_here_button.setFocusPolicy(Qt.NoFocus)
+        self.random_here_button.clicked.connect(self.pick_random_here)
 
         # L'arborescence se montrait et se cachait depuis un menu : un reglage
         # qu'on bascule sans arret n'a rien a faire derriere trois clics.
@@ -265,6 +276,8 @@ class MainWindow(QMainWindow):
         self.enter_button.clicked.connect(self.enter_current)
         selectors.addWidget(self.enter_button)
         selectors.addStretch(1)
+        selectors.addWidget(self.random_button)
+        selectors.addWidget(self.random_here_button)
         selectors.addWidget(self.tree_button)
         selectors.addWidget(self.mute_button)
         selectors.addWidget(self.more_button)
@@ -334,7 +347,7 @@ class MainWindow(QMainWindow):
         self.tree.folderChosen.connect(self.on_tree_folder)
         self.tree.rootChanged.connect(self.on_tree_root_changed)
         self.tree.actionChanged.connect(self.on_tree_action)
-        self.tree.set_action(self.cfg["tree_action"])
+        self.tree.set_action("go" if self.tab == TAB_VIDEOS else "send")
         self.tree.hide()
         middle.addWidget(self.tree)
 
@@ -442,9 +455,11 @@ class MainWindow(QMainWindow):
         if mode:
             self.content = (CONTENT_FOLDERS if mode == MODE_FOLDERS
                             else CONTENT_VIDEOS)
-            if self.browsing:
-                self.tab = (TAB_FOLDERS if self.content == CONTENT_FOLDERS
-                            else TAB_VIDEOS)
+            # L'onglet ne suit plus le mode. Entrer dans un dossier de videos
+            # faisait sauter l'onglet ouvert sur « Videos », et l'onglet
+            # « Mots-cles » revenait a « Dossiers » a chaque analyse : on
+            # changeait de point de vue sans l'avoir demande. Seul un clic sur
+            # un onglet en change desormais.
         self.mode = mode or self.mode_for_content()
         self.all_items = []
         self.items = []
@@ -458,7 +473,8 @@ class MainWindow(QMainWindow):
         # tout le propos : l'ecran se remplit avant que la question « qu'y a-t-il
         # ici » ne parte sur le reseau.
         indexed = self.cfg["use_scan_cache"] and not force
-        known = cached_items(self.root, self.mode) if indexed else []
+        known = (cached_items(self.root, self.mode, self.cfg["expand_parents"])
+                 if indexed else [])
         if not known and self.mode == MODE_FOLDERS and not list_entries(
                 self.root, MODE_FOLDERS, self.cfg["skip_hidden"], False):
             # Racine inconnue et sans sous-dossier : on bascule sur les videos
@@ -468,7 +484,8 @@ class MainWindow(QMainWindow):
             # la change pas.
             self.mode = MODE_FLAT
             self.content = CONTENT_VIDEOS
-            known = cached_items(self.root, self.mode) if indexed else []
+            known = (cached_items(self.root, self.mode, self.cfg["expand_parents"])
+                 if indexed else [])
 
         self.preview.tune_for(self.root)
         self.trash.set_base(self.levels[0]["root"] if self.levels else self.root)
@@ -523,7 +540,7 @@ class MainWindow(QMainWindow):
         if self.browsing:
             self.refresh_board()
         elif self.items:
-            target = 0
+            target = self._first_to_sort() if self.tab == TAB_EDIT else 0
             if restore_id:
                 for position, item in enumerate(self.items):
                     if item.item_id == restore_id:
@@ -1314,7 +1331,6 @@ class MainWindow(QMainWindow):
         """
         if tab not in TABS or tab == self.tab:
             return
-        was = self.tab
         self.tab = tab
         if tab == TAB_VIDEOS:
             self.content = CONTENT_VIDEOS
@@ -1329,16 +1345,27 @@ class MainWindow(QMainWindow):
 
         if self.root is None:
             return
-        if tab == TAB_VIDEOS and was != TAB_VIDEOS:
-            self.show_videos_tab()
-        elif tab in (TAB_FOLDERS, TAB_TAGS) and self.mode != MODE_FOLDERS:
-            if not self.restore_folders():
-                self.start_root(self.root, MODE_FOLDERS, reset_levels=False)
-                return
-            if tab == TAB_TAGS:
-                self._add_tag_items()
-        elif tab == TAB_TAGS or was == TAB_TAGS:
-            self._add_tag_items()
+
+        # L arborescence prend le geste du contexte : en edition on range, et
+        # c est donc « envoyer vers » ; en videos on se promene, et c est
+        # « aller dans ». Se tromper de geste deplace des fichiers.
+        self.tree.set_action("go" if tab == TAB_VIDEOS else "send")
+        self.cfg["tree_action"] = self.tree.action
+
+        # Un onglet est un point de vue sur **toute** la collection, pas sur le
+        # sous-dossier ou l on se trouvait. Rester en place donnait un onglet
+        # « Dossiers » qui montrait trois sous-dossiers au lieu de la racine.
+        top = Path(self.levels[0]["root"]) if self.levels else self.root
+        mode = MODE_FLAT if tab == TAB_VIDEOS else MODE_FOLDERS
+        if tab == TAB_VIDEOS:
+            # Sans quoi les memes vidéos reviennent toujours en tete.
+            self.sort_mode = "random"
+            self.cfg["sort_mode"] = "random"
+            self.controls.set_sort("random")
+        if top != self.root or self.mode != mode or tab == TAB_TAGS:
+            self.levels = []
+            self.start_root(top, mode, reset_levels=True)
+            return
 
         if self.browsing:
             self.refresh_board()
@@ -1400,6 +1427,8 @@ class MainWindow(QMainWindow):
             and item.kind == MODE_FOLDERS and not item.locked
         )
         self.stars.setVisible(not self.browsing)
+        self.random_here_button.setVisible(
+            item is not None and bool(item.videos) and not self.browsing)
 
     def jump_to(self, path: str) -> None:
         """Le fil d'Ariane ramène directement au dossier cliqué."""

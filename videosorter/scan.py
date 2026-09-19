@@ -470,8 +470,14 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
                             pass
     except OSError:
         pass
-    if mode == MODE_FOLDERS and expand_parent_folders:
-        entries = expand_parents(entries, skip_hidden, stamps, cache)
+    if mode == MODE_FOLDERS:
+        if expand_parent_folders:
+            entries = expand_parents(entries, skip_hidden, stamps, cache)
+        else:
+            # Un dossier de tete est une destination, pas quelque chose a trier :
+            # c'est la qu'on range les autres. Le laisser dans la liste revenait
+            # a proposer de ranger le rangement.
+            entries = [path for path in entries if not is_parent_folder(path)]
     return entries
 
 
@@ -522,7 +528,12 @@ def item_id_for(path: Path, mode: str, expand: bool) -> str:
     return str(path)
 
 
-def cached_items(root: Path, mode: str) -> list:
+def listing_key(mode: str, expand: bool) -> str:
+    """Cle de composition : traverser les dossiers de tete donne une autre liste."""
+    return f"{mode}+" if expand and mode == MODE_FOLDERS else mode
+
+
+def cached_items(root: Path, mode: str, expand: bool = False) -> list:
     """Ce qu'on savait de cette racine, sans toucher au disque.
 
     Rend la liste telle qu'elle etait au dernier passage, dans l'ordre. Ce qui a
@@ -531,7 +542,7 @@ def cached_items(root: Path, mode: str) -> list:
     une minute et demie.
     """
     from .index import INDEX
-    ids = INDEX.listing(root, mode)
+    ids = INDEX.listing(root, listing_key(mode, expand))
     if not ids:
         return []
     known = INDEX.folders(ids)
@@ -626,7 +637,7 @@ class RefreshThread(QThread):
             # defaut qu'on corrige : un premier inventaire interrompu aurait
             # garde ses dossiers sans que rien ne sache plus qu'ils forment
             # cette racine, et le lancement suivant serait reparti de zero.
-            INDEX.put_listing(self.root, mode, ids)
+            INDEX.put_listing(self.root, listing_key(mode, self.expand_parents), ids)
 
         # Ce que la liste affichee porte encore alors que le disque ne le porte
         # plus : on le retire avant meme de verifier le reste. Un dossier disparu

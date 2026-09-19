@@ -58,44 +58,64 @@ def matches(term: str, path) -> bool:
 
 
 def build_tag_items(tags: list, videos: list) -> list:
-    """Un élément par mot-clé trouvant au moins une vidéo, dans l'ordre saisi.
+    """Une catégorie par mot-clé, **chaque vidéo n'allant que dans une seule**.
 
-    Les vidéos sans mot-clé ne sont pas perdues : elles restent accessibles par
-    les dossiers ordinaires, et un mot-clé sans correspondance est simplement
-    omis plutôt que d'afficher une carte vide.
+    C'est tout l'écart avec la version précédente, qui rangeait une vidéo dans
+    chacun des mots que son nom contenait : les mots fréquents se recouvraient
+    presque entièrement, et l'on ouvrait dix catégories pour y retrouver les
+    dix mêmes vidéos. Une vidéo va donc au mot qui la décrit le mieux — le plus
+    fréquent de ceux qu'elle porte, le plus long à égalité — et les catégories
+    deviennent des parts, pas des points de vue.
+
+    Elles sortent de la plus fournie à la plus rare : c'est l'ordre dans lequel
+    on veut les parcourir. La comparaison ignore casse et accents, « Été »,
+    « ete » et « ETE » tombent dans la même.
     """
     if not tags or not videos:
         return []
 
-    folded = [(term, fold(term)) for term in tags if term.strip()]
-    buckets: dict = {term: [] for term, _ in folded}
+    folded = []
+    seen = set()
+    for term in tags:
+        needle = fold(term.strip())
+        if not needle or needle in seen:
+            continue
+        seen.add(needle)
+        folded.append((term.strip(), needle))
+    if not folded:
+        return []
+
+    # Premier passage : qui porte quoi. On garde les correspondances plutot que
+    # de refaire le test, un nom etant relu autant de fois qu'il y a de mots.
+    carried: list = []
+    counts: dict = {needle: 0 for _term, needle in folded}
     for video in videos:
         name = fold(Path(video).name)
-        for term, needle in folded:
-            if needle and needle in name:
-                buckets[term].append(Path(video))
+        hits = [needle for _term, needle in folded if needle in name]
+        if not hits:
+            continue
+        carried.append((video, hits))
+        for needle in hits:
+            counts[needle] += 1
 
-    # Une meme video appartient souvent a plusieurs mots : sans ce cache,
-    # cent mots-cles relisaient cent fois la taille de chaque fichier, ce
-    # qui se paie tres cher sur un disque reseau.
-    sizes: dict = {}
+    # Second passage : chacun choisit sa categorie, celle qui rassemble le plus.
+    buckets: dict = {needle: [] for _term, needle in folded}
+    for video, hits in carried:
+        best = max(hits, key=lambda needle: (counts[needle], len(needle)))
+        buckets[best].append(Path(video))
 
-    def size_of(video) -> int:
-        if video not in sizes:
-            try:
-                sizes[video] = video.stat().st_size
-            except OSError:
-                sizes[video] = 0
-        return sizes[video]
-
+    labels = {needle: term for term, needle in folded}
     items = []
-    for term, _needle in folded:
-        found = buckets[term]
+    for needle, found in buckets.items():
         if not found:
             continue
-        item = Item(path=Path(term), kind=MODE_FOLDERS, videos=found,
+        found.sort(key=lambda path: str(path).lower())
+        item = Item(path=Path(labels[needle]), kind=MODE_FOLDERS, videos=found,
                     video_count=len(found), file_count=len(found))
         item.is_tag = True
-        item.size = sum(size_of(video) for video in found)
+        # La taille demanderait un `stat()` par video : sur un millier de
+        # fichiers en reseau, l'ouverture de l'onglet y passait des minutes,
+        # pour un chiffre que la carte n'affiche meme plus.
         items.append(item)
+    items.sort(key=lambda entry: (-entry.video_count, entry.name.lower()))
     return items

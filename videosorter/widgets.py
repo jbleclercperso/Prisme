@@ -43,6 +43,15 @@ QFrame#boardCard[state="écarté"] { border-color: #6d2f38; }
 QFrame#boardCard[state="passé"] { border-color: #4a4f5c; }
 QLabel#boardImage { background: #0b0d10; border-radius: 6px; color: #59616d; }
 QLabel#boardName { font-size: 14px; font-weight: 600; color: #e6e8ea; }
+/* Les deux portees du hasard : la collection entiere, ou l element affiche.
+   Elles se distinguent a la couleur, pour qu on sache ce qu on declenche. */
+QPushButton#random { background: #8c3b52; border: 0; border-radius: 6px;
+                     padding: 6px 12px; color: #ffe9ef; font-weight: 600; }
+QPushButton#random:hover { background: #a7455f; }
+QPushButton#randomHere { background: transparent; border: 1px solid #8c3b52;
+                         border-radius: 6px; padding: 5px 10px; color: #e3a3b4; }
+QPushButton#randomHere:hover { background: rgba(140, 59, 82, 0.28);
+                               color: #ffffff; }
 QLabel#boardMeta { font-size: 12px; color: #8b95a3; }
 QScrollArea#boardScroll { background: transparent; border: 0; }
 QWidget#videoArea { background: #000000; }

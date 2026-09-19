@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .scan import MODE_FOLDERS, human_duration, human_resolution, human_size
-from .widgets import StarStrip, elide
+from .widgets import elide
 
 # Densites proposees : moins de colonnes, donc des cartes plus grandes.
 COLUMN_CHOICES = (2, 3, 4, 5, 6, 7, 8, 9, 10)
@@ -46,6 +46,7 @@ class BoardCard(QFrame):
         self.video: str = ""
         self.ts: float = 0.0
         self.item = None
+        self._resolution = ""
         self._pixmap: QPixmap | None = None
         self.setCursor(Qt.PointingHandCursor)
 
@@ -60,25 +61,13 @@ class BoardCard(QFrame):
         self.image.setText("…")
         layout.addWidget(self.image)
 
-        self.name = QLabel("", self)
-        self.name.setObjectName("boardName")
-        layout.addWidget(self.name)
-
-        # Seconde ligne : ce qui qualifie la video a gauche, la note a droite.
-        bottom = QHBoxLayout()
-        bottom.setContentsMargins(0, 0, 0, 0)
-        bottom.setSpacing(8)
+        # Une seule ligne sous l'image, la meme que sous un apercu : ce qui
+        # qualifie l'element, puis son nom. Les deux lignes d'avant — nom,
+        # puis chiffres et etoiles — doublaient la hauteur du texte pour dire
+        # ce qu'on lit deja sur l'image, et chaque planche en portait vingt.
         self.meta = QLabel("", self)
         self.meta.setObjectName("boardMeta")
-        self.size_label = QLabel("", self)
-        self.size_label.setObjectName("boardMeta")
-        self.stars = StarStrip(16, self)
-        self.stars.rated.connect(lambda value: self.rated.emit(self.index, value))
-        bottom.addWidget(self.meta)
-        bottom.addStretch(1)
-        bottom.addWidget(self.size_label)
-        bottom.addWidget(self.stars)
-        layout.addLayout(bottom)
+        layout.addWidget(self.meta)
 
         self.duration_chip = QLabel("", self)
         self.duration_chip.setObjectName("tileDuration")
@@ -86,29 +75,35 @@ class BoardCard(QFrame):
 
         # Sans cela, un clic tombant sur l'image ou le texte n'atteindrait pas
         # la carte : seules ses marges auraient repondu.
-        for child in (self.image, self.name, self.meta, self.size_label,
-                      self.duration_chip):
+        for child in (self.image, self.meta, self.duration_chip):
             child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def _line(self, lead: str = "") -> str:
+        """« 1080p · nom » pour une video, « 12 vidéos · nom » pour un dossier."""
+        item = self.item
+        if item is None:
+            return ""
+        if item.kind == MODE_FOLDERS:
+            head = f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}"
+        else:
+            head = lead or self._resolution
+        name = elide(item.name, 40)
+        return f"{head}   ·   {name}" if head else name
 
     def set_item(self, item, stars: int) -> None:
         self.item = item
         self.video = ""
         self._pixmap = None
+        self._resolution = ""
         self.image.setPixmap(QPixmap())
         self.image.setText("…")
-        self.name.setText(elide(item.name, 34))
-        self.name.setToolTip(str(item.path))
-        # Tout tient sur une ligne : le nom au-dessus, puis ce qu'on veut savoir
-        # d'un dossier — combien de videos, et quelle place il prend.
-        if item.kind == MODE_FOLDERS:
-            pieces = [f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}"]
-        else:
-            pieces = []
-        self.meta.setText("   ·   ".join(pieces))
-        self.size_label.setText(human_size(item.size))
-        self.stars.set_value(stars)
+        self.meta.setText(self._line())
+        self.meta.setToolTip(f"{item.path}\n{human_size(item.size)}")
         self.duration_chip.hide()
         self.set_state(item.status)
+
+    def set_stars(self, stars: int) -> None:
+        """La note ne s'affiche plus sur la carte : elle se pose sur la fiche."""
 
     def set_state(self, status: str) -> None:
         marks = {"moved": "rangé", "deleted": "écarté", "skipped": "passé"}
@@ -121,12 +116,9 @@ class BoardCard(QFrame):
         self.video = video
         self.ts = ts
         resolution = human_resolution(height)
-        if resolution:
-            current = self.meta.text()
-            if resolution not in current:
-                self.meta.setText(
-                    f"{resolution}   ·   {current}" if current else resolution
-                )
+        if resolution and resolution != self._resolution:
+            self._resolution = resolution
+            self.meta.setText(self._line(resolution))
         if duration:
             self.duration_chip.setText(human_duration(duration))
             self.duration_chip.adjustSize()
@@ -168,10 +160,7 @@ class BoardCard(QFrame):
         self._rescale()
 
     def mouseReleaseEvent(self, event):
-        # La bande d'étoiles gère ses propres clics ; ailleurs, on ouvre.
-        if event.button() == Qt.LeftButton and not self.stars.geometry().contains(
-            event.position().toPoint()
-        ):
+        if event.button() == Qt.LeftButton:
             self.opened.emit(self.index)
 
     def mouseDoubleClickEvent(self, event):
@@ -331,7 +320,6 @@ class BoardView(QWidget):
                 card.set_item(item, self._stars_of(item.path))
                 needed.append(position)
             else:
-                card.stars.set_value(self._stars_of(item.path))
                 card.set_state(item.status)
             self.grid.addWidget(card, slot // self.columns, slot % self.columns)
             card.show()
@@ -415,7 +403,7 @@ class BoardView(QWidget):
     def set_stars(self, position: int, stars: int) -> None:
         card = self._card_for(position)
         if card is not None:
-            card.stars.set_value(stars)
+            card.set_stars(stars)
 
     def set_state(self, position: int, status: str) -> None:
         card = self._card_for(position)

@@ -3,16 +3,64 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QModelIndex, Qt, Signal
+from PySide6.QtCore import QDir, QModelIndex, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
-    QFileDialog, QFileSystemModel, QHBoxLayout, QLabel, QPushButton, QTreeView,
-    QVBoxLayout, QWidget,
+    QFileDialog, QFileIconProvider, QFileSystemModel, QHBoxLayout, QPushButton,
+    QTreeView, QVBoxLayout, QWidget,
 )
+
+# Deux gestes opposes partagent le meme clic : envoyer l'element dans un
+# dossier, ou s'y rendre. Rien ne les distinguait, et se tromper deplace des
+# fichiers. Chacun porte donc sa couleur, sur le cadre, le titre et les icones.
+SEND_COLOR = "#e0922f"     # ambre : on deplace, cela merite un temps d arret
+GO_COLOR = "#4f8bf0"       # bleu : on se deplace, rien n est touche
+
+
+def _folder_icon(color: str) -> QIcon:
+    """Un dossier dessine, a la couleur du geste en cours.
+
+    Celui du systeme etait un dossier jaune de bureau, illisible sur fond
+    sombre et surtout identique dans les deux modes — l icone ne disait rien
+    de ce qu un clic allait faire.
+    """
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    shape = QPainterPath()
+    # L onglet, puis le corps : deux rectangles arrondis qui se rejoignent.
+    shape.addRoundedRect(QRectF(3, 7, 11, 5), 2, 2)
+    shape.addRoundedRect(QRectF(3, 9.5, 26, 16), 3, 3)
+    tint = QColor(color)
+    painter.fillPath(shape, tint)
+    painter.end()
+    return QIcon(pixmap)
+
+
+class ModeIcons(QFileIconProvider):
+    """Fournit l icone des dossiers, teintee par le geste en cours."""
+
+    def __init__(self, color: str):
+        super().__init__()
+        self.icon_ = _folder_icon(color)
+
+    def set_color(self, color: str) -> None:
+        self.icon_ = _folder_icon(color)
+
+    def icon(self, info):
+        return self.icon_
+
 
 TREE_STYLE = """
 QWidget#treePanel { background: rgba(10, 12, 15, 0.82);
                     border: 1px solid #242a33; border-radius: 10px; }
-QLabel#treeTitle { color: #7d8796; font-size: 11px; }
+QWidget#treePanel[action="send"] { border: 2px solid #e0922f; }
+QWidget#treePanel[action="go"] { border: 2px solid #4f8bf0; }
+QPushButton#treeAction { border: 0; border-radius: 6px; padding: 5px 10px;
+                         font-size: 12px; font-weight: 600; color: #11150f; }
+QPushButton#treeAction[action="send"] { background: #e0922f; }
+QPushButton#treeAction[action="go"] { background: #4f8bf0; color: #0b1220; }
 QTreeView#tree { background: transparent; border: 0; color: #b9c2cd;
                  font-size: 13px; outline: 0; }
 QTreeView#tree::item { padding: 3px 2px; border-radius: 4px; }
@@ -51,7 +99,7 @@ class TreePanel(QWidget):
         header.setContentsMargins(0, 0, 0, 0)
         self.action = "send"
         title = QPushButton("Envoyer vers ⇄", self)
-        title.setObjectName("treeRootButton")
+        title.setObjectName("treeAction")
         title.setToolTip("Basculer entre envoyer l element et s y rendre")
         title.setFocusPolicy(Qt.NoFocus)
         title.clicked.connect(self.toggle_action)
@@ -74,6 +122,13 @@ class TreePanel(QWidget):
         self.model = QFileSystemModel(self)
         self.model.setFilter(QDir.Dirs | QDir.NoDotAndDotDot | QDir.Drives)
         self.model.setReadOnly(True)
+        # Seuls les dossiers de tete sont des destinations : ce sont les seuls
+        # vers lesquels on range. Montrer toute l arborescence obligeait a
+        # chercher les bons parmi des centaines, et invitait a la faute.
+        self.model.setNameFilters(["+*"])
+        self.model.setNameFilterDisables(False)
+        self.icons = ModeIcons(SEND_COLOR)
+        self.model.setIconProvider(self.icons)
 
         self.view = QTreeView(self)
         self.view.setObjectName("tree")
@@ -89,6 +144,7 @@ class TreePanel(QWidget):
         layout.addWidget(self.view, 1)
 
         self.root = ""
+        self.set_action(self.action)
 
     def toggle_action(self) -> None:
         """Un clic dans l arbre envoie l element, ou nous y emmene."""
@@ -97,10 +153,23 @@ class TreePanel(QWidget):
         self.actionChanged.emit(self.action)
 
     def set_action(self, action: str) -> None:
+        """Change de geste, et le fait voir : un clic ici deplace des fichiers."""
         self.action = action
         self.action_button.setText(
-            "Envoyer vers ⇄" if action == "send" else "Aller dans ⇄"
+            "⇄  Envoyer vers" if action == "send" else "⇄  Aller dans"
         )
+        color = SEND_COLOR if action == "send" else GO_COLOR
+        self.icons.set_color(color)
+        self.view.setStyleSheet(
+            "QTreeView#tree::item:hover { background: %s; color: #0b1220; }"
+            % QColor(color).darker(115).name()
+        )
+        for widget in (self, self.action_button):
+            widget.setProperty("action", action)
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+        # Qt ne redemande les icones que si le modele le dit.
+        self.model.setIconProvider(self.icons)
 
     def set_root(self, root: str) -> None:
         if not root or not Path(root).is_dir():
