@@ -150,3 +150,36 @@ class ThumbBackfill(QThread):
         except Exception:
             # Un fichier illisible ne doit pas arreter les cent mille autres.
             return self.FAILED
+
+class VideoCount(QThread):
+    """Compte les videos d une racine, sans rien fabriquer.
+
+    Savoir combien il y en a est la premiere question qu on se pose devant une
+    collection, et la seule facon de verifier qu une preparation a bien tout
+    vu. Elle ne meritait pas une ligne de commande.
+    """
+
+    progress = Signal(int)
+    counted = Signal(int)
+
+    def __init__(self, root: Path, skip_hidden: bool = True, parent=None):
+        super().__init__(parent)
+        self.root = Path(root)
+        self.skip_hidden = skip_hidden
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        total = 0
+        last = 0.0
+        for _video in walk_videos(self.root, self.skip_hidden):
+            if self._stop:
+                break
+            total += 1
+            now = time.monotonic()
+            if now - last >= 0.3:
+                self.progress.emit(total)
+                last = now
+        self.counted.emit(total)

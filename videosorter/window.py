@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import actions
-from .backfill import ThumbBackfill
+from .backfill import ThumbBackfill, VideoCount
 from .dupes import DuplicateScan
 from .help import HelpDialog
 from .board import COLUMN_CHOICES, BoardView
@@ -145,6 +145,7 @@ class MainWindow(QMainWindow):
         # Parcours de pre-fabrication des vignettes, quand il tourne.
         self.backfill = None
         self.dupes = None
+        self.counter = None
         self._backfill_started = 0.0
         self._plain_items: list = []
         self._plain_root = None
@@ -301,6 +302,7 @@ class MainWindow(QMainWindow):
             ("Recherche vidéo sur le web…", self.open_web_search),
             ("-", None),
             ("Préparer toutes les vignettes", self.toggle_backfill),
+            ("Compter les vidéos", self.count_videos),
             ("Chercher les doublons", self.find_duplicates),
             ("-", None),
             ("Raccourcis et recherche…", self.show_help),
@@ -867,6 +869,25 @@ class MainWindow(QMainWindow):
         """Ouvre la fiche des raccourcis, tiree de la table qui fait foi."""
         HelpDialog(self).exec()
         self.setFocus()
+
+    def count_videos(self) -> None:
+        """Compte les videos sous la racine, et le dit en clair."""
+        if self.root is None or self.counter is not None:
+            return
+        top = Path(self.levels[0]["root"]) if self.levels else self.root
+        self.counter = VideoCount(top, self.cfg["skip_hidden"], self)
+        self.counter.progress.connect(
+            lambda n: self.show_banner(f"Comptage… {n} vidéo(s)", "#22303f"))
+        self.counter.counted.connect(lambda n: self._told_count(top, n))
+        self.counter.start()
+        self.show_banner(f"Comptage des vidéos sous {top}…", "#22303f")
+
+    def _told_count(self, top, total: int) -> None:
+        self.counter = None
+        self.show_banner(
+            f"{total} vidéo(s) sous {top}. "
+            f"C'est ce nombre que la préparation des vignettes doit atteindre.",
+            "#22303f")
 
     def find_duplicates(self) -> None:
         """Rassemble les vidéos de taille rigoureusement identique.
