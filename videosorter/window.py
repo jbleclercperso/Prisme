@@ -386,8 +386,11 @@ class MainWindow(QMainWindow):
         self.item_parent.hide()
         for label in (self.item_title, self.item_subtitle):
             label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        header_layout.addWidget(self.item_title, 0)
-        header_layout.addWidget(self.item_subtitle, 1)
+        # Avec une politique « Ignored » et un facteur nul, le titre recevait
+        # zero pixel : il etait bien la, et invisible. Il prend desormais la
+        # plus grosse part de la ligne, les chiffres se contentant du reste.
+        header_layout.addWidget(self.item_title, 3)
+        header_layout.addWidget(self.item_subtitle, 2)
 
         # « Entrer » se lit au bout de la ligne qui decrit le dossier — poids,
         # nombre de videos, date — la ou l'on vient de decider qu'il fallait y
@@ -517,7 +520,7 @@ class MainWindow(QMainWindow):
         # Le bandeau se pose **sur** l'image, en bas, au lieu de la surmonter :
         # une rangee de boutons au-dessus coutait quarante pixels de hauteur a
         # chaque fois, et c'est la hauteur qui fait voir une video.
-        self.aside_bar = QWidget(self.aside_player.video_area)
+        self.aside_bar = QWidget(self.aside)
         self.aside_bar.setObjectName("asideBar")
         bar_row = QHBoxLayout(self.aside_bar)
         bar_row.setContentsMargins(10, 4, 6, 4)
@@ -529,6 +532,7 @@ class MainWindow(QMainWindow):
         for text, tip, slot in (
             ("◂", "Précédente", lambda: self.aside_step(-1)),
             ("▸", "Suivante", lambda: self.aside_step(1)),
+            ("⛶", "Plein écran", self.aside_fullscreen),
             ("✕", "Fermer le lecteur", self.close_aside),
         ):
             button = QPushButton(text, self.aside_bar)
@@ -537,6 +541,7 @@ class MainWindow(QMainWindow):
             button.setFocusPolicy(Qt.NoFocus)
             button.clicked.connect(slot)
             bar_row.addWidget(button)
+        aside_box.addWidget(self.aside_bar)
         self.aside.hide()
         self.aside_index = -1
         middle.addWidget(self.aside, 1)
@@ -2022,6 +2027,7 @@ class MainWindow(QMainWindow):
         # descendant, et il ne faisait rien.
         if (tab == self.tab and self.browsing and not self.levels):
             return
+        was = self.tab
         self.tab = tab
         self.content = (CONTENT_VIDEOS if tab == TAB_VIDEOS
                         else CONTENT_FOLDERS)
@@ -2048,6 +2054,13 @@ class MainWindow(QMainWindow):
         # Un onglet est un point de vue sur **toute** la collection, pas sur le
         # sous-dossier ou l on se trouvait. Rester en place donnait un onglet
         # « Dossiers » qui montrait trois sous-dossiers au lieu de la racine.
+        # Sortir des mots-cles doit rendre les vrais dossiers : la liste avait
+        # ete remplacee par les dossiers virtuels, et l'onglet « Dossiers »
+        # semblait alors ne rien faire.
+        if was == TAB_TAGS and tab != TAB_TAGS:
+            if not self.restore_folders():
+                self._add_tag_items()
+
         top = Path(self.levels[0]["root"]) if self.levels else self.root
         if tab == TAB_SPLIT:
             # Le mur ne change ni de dossier ni de mode : il regarde autrement
@@ -2283,13 +2296,21 @@ class MainWindow(QMainWindow):
         # et fabriquer cinq images pour rien retardait celles de la planche.
 
     def _place_aside_bar(self) -> None:
-        """Pose le bandeau au bas de l'image, sur toute sa largeur."""
-        area = self.aside_player.video_area.rect()
-        height = self.aside_bar.sizeHint().height()
-        self.aside_bar.setGeometry(0, max(0, area.height() - height),
-                                   area.width(), height)
-        self.aside_bar.raise_()
+        """Le bandeau vit sous l'image, dans la mise en page.
+
+        Pose dessus, il disparaissait : le widget video de Windows est une
+        fenetre native qui se dessine par-dessus. On ne pouvait donc plus ni
+        fermer le lecteur ni passer au suivant.
+        """
         self.aside_bar.show()
+
+    def aside_fullscreen(self) -> None:
+        """Donne tout l'ecran a la video ouverte a cote."""
+        if self.aside_index < 0:
+            return
+        self.on_board_open(self.aside_index)
+        self.close_aside()
+        self.toggle_cinema(True)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

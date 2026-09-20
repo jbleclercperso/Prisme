@@ -85,6 +85,7 @@ QPushButton#cardDiscard { background: rgba(8, 10, 13, 0.75);
                           color: #e08b96; font-size: 13px; }
 QPushButton#cardDiscard:hover { background: #7a2b34; border-color: #7a2b34;
                                 color: #ffffff; }
+QCheckBox#cardPick { background: transparent; border: 0; padding: 0; }
 QCheckBox#cardPick::indicator { width: 18px; height: 18px;
                                 border: 1px solid #6b7684; border-radius: 4px;
                                 background: rgba(8, 10, 13, 0.75); }
@@ -652,20 +653,27 @@ class SinglePlayer(QWidget):
         # Rail et trait d'avancement : discrets, mais toujours la. Enfants du
         # cadre video et non de la fenetre : poses ailleurs, ils passaient
         # derriere l'image et l'on ne voyait jamais ou en etait la lecture.
-        self.progress_rail = QFrame(self.video_area)
+        # Sous l'image, et non dessus : le widget video de Windows est une
+        # fenetre native qui se dessine par-dessus tout ce qu'on y superpose. On
+        # ne voyait donc jamais ou en etait la lecture.
+        self.under = QWidget(self)
+        under_row = QHBoxLayout(self.under)
+        under_row.setContentsMargins(0, 0, 0, 0)
+        under_row.setSpacing(8)
+        self.progress_rail = QFrame(self.under)
         self.progress_rail.setObjectName("playRail")
-        self.progress_rail.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.progress = QFrame(self.video_area)
+        self.progress_rail.setFixedHeight(6)
+        self.progress = QFrame(self.progress_rail)
         self.progress.setObjectName("playProgress")
-        self.progress.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        under_row.addWidget(self.progress_rail, 1)
 
         # Le temps restant, en permanence, en haut a droite de l'image : c'est
         # la question qu'on se pose en regardant, bien plus que la position
         # absolue.
-        self.remaining = QLabel("", self.video_area)
+        self.remaining = QLabel("", self.under)
         self.remaining.setObjectName("remaining")
-        self.remaining.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.remaining.hide()
+        under_row.addWidget(self.remaining, 0)
+        self.under.setFixedHeight(20)
 
         strip = QWidget(self)
         self.strip_layout = QVBoxLayout(strip)
@@ -683,6 +691,7 @@ class SinglePlayer(QWidget):
         strip.setFixedWidth(176)
         layout.addWidget(strip)
         self.strip = strip
+        layout.addWidget(self.under)
 
         self.audio = QAudioOutput(self)
         self.player = QMediaPlayer(self)
@@ -757,28 +766,14 @@ class SinglePlayer(QWidget):
         duration = self.player.duration()
         fraction = (position / duration) if duration > 0 else 0.0
         # Coordonnees du cadre video, ces pieces en etant les enfants.
-        area = self.video_area.rect()
-        top = area.bottom() - self.RAIL_HEIGHT
-        self.progress_rail.setGeometry(0, top, area.width(), self.RAIL_HEIGHT)
+        width = self.progress_rail.width()
         self.progress.setGeometry(
-            0, top,
-            max(0, int(area.width() * max(0.0, min(1.0, fraction)))),
-            self.RAIL_HEIGHT,
-        )
-        self.progress_rail.show()
+            0, 0, max(0, int(width * max(0.0, min(1.0, fraction)))),
+            self.progress_rail.height())
         self.progress.show()
-        self.progress_rail.raise_()
-        self.progress.raise_()
-
-        if duration > 0:
-            left = max(0, duration - position) / 1000.0
-            self.remaining.setText(f"−{human_duration(left)}")
-            self.remaining.adjustSize()
-            self.remaining.move(area.right() - self.remaining.width() - 12, 12)
-            self.remaining.raise_()
-            self.remaining.show()
-        else:
-            self.remaining.hide()
+        self.remaining.setText(
+            f"−{human_duration(max(0, duration - position) / 1000.0)}"
+            if duration > 0 else "")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

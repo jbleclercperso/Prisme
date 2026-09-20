@@ -919,8 +919,15 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     player = window.single
     player.resize(900, 600)
     player._on_position(0)
-    check(player.progress_rail.height() >= 8,
-          f"la barre d'avancement fait {player.progress_rail.height()} px")
+    # Elle est passee sous l'image : posee dessus, la fenetre video native de
+    # Windows se dessinait par-dessus et on ne la voyait jamais. Plus fine,
+    # donc, mais reellement visible.
+    check(4 <= player.progress_rail.height() <= 10,
+          f"la barre d'avancement reste discrète ({player.progress_rail.height()} px)")
+    check(player.progress_rail.parent() is not player.video_area,
+          "et n'est plus posée sur l'image, où elle disparaissait")
+    check(not player.remaining.isHidden(),
+          "le temps restant s'affiche à côté d'elle")
     check(not player.progress_rail.isHidden(), "et reste visible")
     window.start_root(flat) if flat.exists() else None
     wait_for(app, lambda: not window.scanning, 30)
@@ -1699,15 +1706,20 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           f"les deux copies se retrouvent ({found})")
 
     # Le rejet a la souris passe par la corbeille de session, donc revient.
+    # Sur un dossier fabrique pour l'occasion : ecarter un element dont les
+    # etapes suivantes ont besoin rendrait la mesure — et la suite — fausses.
+    rejets = base / "rejets"
+    shutil.rmtree(rejets, ignore_errors=True)
+    for nom in ("un", "deux", "trois"):
+        (rejets / nom).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, rejets / nom / "clip.mp4")
     window.set_tab(TAB_FOLDERS)
-    window.start_root(root, MODE_FOLDERS)
-    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.start_root(rejets, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     window.toggle_board(True)
     pump(app, 0.4)
     before = window.stats["deleted"]
-    # Un element deja traite par les etapes precedentes est verrouille : on
-    # prend le premier qui ne l'est pas.
-    position = first_untouched(window)
+    position = 0
     target = window.items[position].name
     window.discard_at(position)
     # Le transfert part en tache de fond : on le laisse demarrer, puis l'on

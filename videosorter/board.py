@@ -84,6 +84,9 @@ class BoardCard(QFrame):
         self.pick.setObjectName("cardPick")
         self.pick.setCursor(Qt.PointingHandCursor)
         self.pick.setFocusPolicy(Qt.NoFocus)
+        # Rien que la case : sans taille fixe, le widget s'etalait en bandeau
+        # noir sur toute la largeur de la vignette.
+        self.pick.setFixedSize(22, 22)
         self.pick.move(14, 14)
         self.pick.hide()
         self.pick.toggled.connect(
@@ -359,6 +362,12 @@ class BoardView(QWidget):
         self.width_timer.setInterval(60)
         self.width_timer.timeout.connect(self._apply_widths)
 
+        # Le widget video couvre l'image de la carte survolee, et sous Windows
+        # une fenetre native avale les clics meme declaree transparente. Sans
+        # cela, cliquer sur l'apercu en train de jouer ne faisait rien, et il
+        # fallait viser le titre.
+        self.video.mouseReleaseEvent = self._video_clicked
+
         self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(80)
         self.hover_timer.timeout.connect(self._poll_hover)
@@ -461,6 +470,17 @@ class BoardView(QWidget):
         for card in self.cards:
             card.set_picked(False)
         self.pickedChanged.emit(0)
+
+    def _video_clicked(self, event) -> None:
+        """Renvoie le clic tombe sur l'apercu a la carte qui est dessous."""
+        if not (0 <= self.hovered < len(self.cards)):
+            return
+        card = self.cards[self.hovered]
+        if event.button() == Qt.LeftButton:
+            self.openRequested.emit(card.index)
+        elif event.button() == Qt.RightButton:
+            self.asideRequested.emit(card.index)
+        event.accept()
 
     def _maybe_next_page(self, value: int) -> None:
         bar = self.scroll.verticalScrollBar()
