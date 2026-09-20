@@ -21,7 +21,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from .config import APP_DIR
+import os
+
+from .config import APP_DIR, VIDEO_EXTS
 from .media import build_preview_plan, extract_thumb, thumb_path
 from .scan import walk_videos
 
@@ -183,3 +185,69 @@ class VideoCount(QThread):
                 self.progress.emit(total)
                 last = now
         self.counted.emit(total)
+
+class ThumbAudit(QThread):
+    """Compte les videos qui ont deja leur vignette, et celles qui ne l ont pas.
+
+    C est la seule reponse qui tranche : savoir si la preparation « tourne » ne
+    dit rien, alors que compter les fichiers reellement presents sur le disque
+    ne laisse pas de place au doute. On ne fabrique rien ici, on regarde.
+
+    Les dates et tailles sont relevees pendant l enumeration, qui les rapporte
+    gratuitement : l audit ne redemande donc rien au reseau.
+    """
+
+    progress = Signal(int, int)          # vues, avec vignette
+    done = Signal(int, int)              # total, avec vignette
+
+    def __init__(self, root: Path, width: int, skip_hidden: bool = True,
+                 parent=None):
+        super().__init__(parent)
+        self.root = Path(root)
+        self.width = width
+        self.skip_hidden = skip_hidden
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        from .stamps import remember
+        seen = 0
+        ready = 0
+        last = 0.0
+        stack = [str(self.root)]
+        while stack and not self._stop:
+            current = stack.pop()
+            try:
+                entries = list(os.scandir(current))
+            except OSError:
+                continue
+            for entry in entries:
+                if self._stop:
+                    break
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                        continue
+                    dot = entry.name.rfind(".")
+                    if dot <= 0 or entry.name[dot:].lower() not in VIDEO_EXTS:
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                    remember(entry.path, stat.st_size, stat.st_mtime)
+                except OSError:
+                    continue
+                seen += 1
+                video = Path(entry.path)
+                try:
+                    plan = build_preview_plan([video], 1, 0, True, True)
+                    target = thumb_path(video, plan[0][1], self.width)
+                    if target.exists() and target.stat().st_size > 0:
+                        ready += 1
+                except OSError:
+                    pass
+                now = time.monotonic()
+                if now - last >= 0.3:
+                    self.progress.emit(seen, ready)
+                    last = now
+        self.done.emit(seen, ready)

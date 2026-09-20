@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import actions
-from .backfill import ThumbBackfill, VideoCount
+from .backfill import ThumbAudit, ThumbBackfill, VideoCount
 from .dupes import DuplicateScan
 from .help import HelpDialog
 from .board import COLUMN_CHOICES, BoardView
@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
         self.backfill = None
         self.dupes = None
         self.counter = None
+        self.audit = None
         self._backfill_started = 0.0
         self._plain_items: list = []
         self._plain_root = None
@@ -303,6 +304,7 @@ class MainWindow(QMainWindow):
             ("-", None),
             ("Préparer toutes les vignettes", self.toggle_backfill),
             ("Compter les vidéos", self.count_videos),
+            ("État des vignettes", self.audit_thumbs),
             ("Chercher les doublons", self.find_duplicates),
             ("-", None),
             ("Raccourcis et recherche…", self.show_help),
@@ -888,6 +890,38 @@ class MainWindow(QMainWindow):
             f"{total} vidéo(s) sous {top}. "
             f"C'est ce nombre que la préparation des vignettes doit atteindre.",
             "#22303f")
+
+    def audit_thumbs(self) -> None:
+        """Dit combien de videos ont deja leur vignette, et combien n'en ont pas.
+
+        « Est-ce que ca analyse ? » ne se repond pas en regardant une barre : on
+        compte les fichiers reellement presents. Rien n'est fabrique ici.
+        """
+        if self.root is None or self.audit is not None:
+            return
+        top = Path(self.levels[0]["root"]) if self.levels else self.root
+        self.audit = ThumbAudit(top, self.cfg["thumb_width"],
+                                self.cfg["skip_hidden"], self)
+        self.audit.progress.connect(
+            lambda seen, ready: self.show_banner(
+                f"Vérification… {ready} vignette(s) sur {seen} vidéo(s)",
+                "#22303f"))
+        self.audit.done.connect(lambda seen, ready: self._told_audit(seen, ready))
+        self.audit.start()
+        self.show_banner("Vérification des vignettes déjà fabriquées…", "#22303f")
+
+    def _told_audit(self, seen: int, ready: int) -> None:
+        self.audit = None
+        missing = max(0, seen - ready)
+        if not seen:
+            return self.show_banner("Aucune vidéo trouvée.", "#3a2226")
+        part = ready * 100 // seen
+        self.show_banner(
+            f"{ready} vignette(s) sur {seen} vidéo(s) — {part} %. "
+            + (f"Il en manque {missing} : lancez « Préparer toutes les "
+               f"vignettes »." if missing else
+               "Tout est prêt : l'affichage ne fabrique plus rien."),
+            "#22303f" if missing else "#1f3326")
 
     def find_duplicates(self) -> None:
         """Rassemble les vidéos de taille rigoureusement identique.

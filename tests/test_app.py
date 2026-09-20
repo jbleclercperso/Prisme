@@ -1801,6 +1801,42 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(not missing,
           f"toutes les touches traitées sont documentées (manquent : {missing})")
 
+    print("\n[60] État des vignettes")
+    from videosorter.backfill import ThumbAudit, ThumbBackfill
+
+    audite = base / "audit"
+    shutil.rmtree(audite, ignore_errors=True)
+    (audite / "lot").mkdir(parents=True, exist_ok=True)
+    # Une source prise a l'instant : les etapes precedentes ont pu deplacer
+    # celles qu'elles utilisaient.
+    modele = next(iter(sorted(root.rglob("*.mp4"))), None)
+    check(modele is not None, "une vidéo modèle est disponible")
+    for index in range(3):
+        shutil.copy2(modele, audite / "lot" / f"clip_{index}.mp4")
+
+    def run_audit():
+        out = {}
+        worker = ThumbAudit(audite, window.cfg["thumb_width"], True)
+        worker.done.connect(lambda seen, ready: out.update(seen=seen, ready=ready))
+        worker.start()
+        wait_for(app, lambda: "seen" in out, 120)
+        return out
+
+    before = run_audit()
+    check(before.get("seen") == 3, f"l'audit voit les trois vidéos ({before})")
+    check(before.get("ready") == 0, "et aucune n'a encore sa vignette")
+
+    made = {}
+    worker = ThumbBackfill(audite, window.cfg["thumb_width"], True)
+    worker.done.connect(lambda m, k, whole: made.update(m=m, k=k))
+    worker.start()
+    wait_for(app, lambda: "m" in made, 180)
+
+    after = run_audit()
+    check(after.get("ready") == 3,
+          f"après préparation, les trois sont prêtes ({after})")
+    check(after.get("seen") == 3, "et le total ne bouge pas")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,
