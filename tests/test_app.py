@@ -589,12 +589,15 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     from videosorter.scan import human_duration
     expected = human_duration(window.current.info["duration"])
     title = window.item_title.text()
-    check("—" in title and title.endswith(expected),
-          f"durée accolée au titre (attendu …{expected}, obtenu {title!r})")
-    check(window.current.name in title, "le nom du fichier reste en tête")
+    # La duree passe devant le nom : c'est elle qui decide si l'on regarde.
+    check(title.startswith(expected),
+          f"durée en tête du titre (attendu {expected}…, obtenu {title!r})")
+    check(window.current.name in title, "le nom du fichier suit")
     info_line = window.item_subtitle.text()
     check("240p" in info_line, f"résolution nommée dans les infos (obtenu {info_line!r})")
-    check("320×240" in info_line, "dimensions exactes conservées")
+    # Les dimensions exactes ne disaient rien de plus que « 240p » et
+    # repoussaient la taille hors de vue.
+    check("320×240" not in info_line, "sans les dimensions exactes, redondantes")
     check("Ko" in info_line or "Mo" in info_line, "poids présent")
     check("modifié le" in info_line, "date présente")
 

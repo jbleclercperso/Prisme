@@ -530,6 +530,9 @@ class MainWindow(QMainWindow):
         # Pas de pellicule ici : on regarde, on ne cherche pas un passage. Elle
         # volait de la largeur a l'image sans rien apporter.
         self.aside_player.hide_strip()
+        # Le lecteur de cote enchaine lui aussi : une video finie appelle la
+        # suivante de la planche, sans qu'on ait a y revenir.
+        self.aside_player.finished.connect(lambda: self.aside_step(1))
         aside_box.addWidget(self.aside_player, 1)
 
         # Le bandeau se pose **sur** l'image, en bas, au lieu de la surmonter :
@@ -1522,7 +1525,7 @@ class MainWindow(QMainWindow):
         if item.kind == MODE_FOLDERS:
             # Une icône devant le titre : on sait sans lire si l'on décide du
             # sort d'un dossier entier ou d'un seul fichier.
-            self.item_title.setText(f"📁  {item.name}")
+            self.item_title.setText(item.name)
             # Le compte de fichiers melait aux videos les images et les textes
             # qui trainent a cote : on ne trie pas ceux-la.
             parts = [
@@ -1537,15 +1540,14 @@ class MainWindow(QMainWindow):
             # La durée rejoint le titre : c'est ce qu'on veut savoir en premier
             # d'une vidéo, et la ligne d'informations est déjà chargée.
             duration = human_duration(info["duration"]) if info.get("duration") else ""
+            # La duree d'abord : c'est elle qui decide si l'on regarde. Puis
+            # le nom. Les dimensions exactes ne disent rien de plus que
+            # « 1080p » et repoussaient la taille hors de vue.
             self.item_title.setText(
-                f"🎬  {item.name}   —   {duration}" if duration
-                else f"🎬  {item.name}"
-            )
+                f"{duration}   ·   {item.name}" if duration else item.name)
             parts = []
             if info.get("height"):
                 parts.append(human_resolution(info["height"]))
-            if info.get("width"):
-                parts.append(f"{info['width']}×{info['height']}")
             parts.append(human_size(item.size))
             if info.get("codec"):
                 parts.append(info["codec"])
@@ -2309,6 +2311,7 @@ class MainWindow(QMainWindow):
         self.aside.show()
         self._place_aside_bar()
         self.aside_player.set_muted(self.cfg["muted"])
+        self.aside_player.set_loop(False)
         self.aside_player.set_item(video)
         # Aucun apercu n'est demande : le lecteur de cote n'a pas de pellicule,
         # et fabriquer cinq images pour rien retardait celles de la planche.
@@ -2323,9 +2326,12 @@ class MainWindow(QMainWindow):
         self.aside_bar.show()
 
     def aside_fullscreen(self) -> None:
-        """Donne tout l'ecran a la video ouverte a cote."""
+        """Donne tout l'ecran a la video ouverte a cote, et sait en revenir."""
         if self.aside_index < 0:
             return
+        # On retient d'ou l'on vient : sortir du plein ecran laissait sur la
+        # fiche, au lieu de rendre la planche qu'on etait en train de parcourir.
+        self._back_to_board = self.browsing
         self.on_board_open(self.aside_index)
         self.close_aside()
         self.toggle_cinema(True)
@@ -2364,6 +2370,7 @@ class MainWindow(QMainWindow):
         if item is None or item.kind != MODE_FOLDERS:
             return
         self.plans.pop(self._plan_key(item, self.page_of(item)), None)
+        self.grid.set_contact(self.contact)
         self.grid.set_item(self._plan_key(item, self.page_of(item)),
                            "planche contact…" if self.contact else "…")
         self._request_previews(item, current=True)
@@ -2385,6 +2392,9 @@ class MainWindow(QMainWindow):
             widget.setVisible(not self.cinema and widget.isEnabled())
         self.cinema_button.setText("✕ Quitter le cinéma" if self.cinema
                                    else "⛶ Cinéma")
+        if not self.cinema and getattr(self, "_back_to_board", False):
+            self._back_to_board = False
+            self.show_board_at(self.index)
         if self.cinema:
             self.tree.hide()
         self.setFocus()
