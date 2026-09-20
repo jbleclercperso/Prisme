@@ -631,13 +631,22 @@ class SinglePlayer(QWidget):
         # Posee a droite plutot qu'en dessous : une bande horizontale volait au
         # lecteur quatre-vingt-dix pixels sur toute la largeur, alors que la
         # place perdue sur le cote ne coute rien a une video large.
-        layout = QHBoxLayout(self)
+        # Une colonne : l'image et sa pellicule en haut, la barre d'avancement
+        # en dessous sur toute la largeur. Ajoutee a la rangee horizontale, elle
+        # formait une colonne de vingt pixels contre le bord droit — presente,
+        # mais introuvable.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+        top = QWidget(self)
+        layout = QHBoxLayout(top)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+        outer.addWidget(top, 1)
 
         # Le lecteur est posé dans un cadre qui le rogne : agrandir sa géométrie
         # au-delà du cadre produit un zoom, sans passer par une scène graphique.
-        self.video_area = QWidget(self)
+        self.video_area = QWidget(top)
         self.video_area.setObjectName("videoArea")
         self.video_area.setMinimumHeight(320)
         self.video = QVideoWidget(self.video_area)
@@ -675,9 +684,12 @@ class SinglePlayer(QWidget):
         self.remaining = QLabel("", self.under)
         self.remaining.setObjectName("remaining")
         under_row.addWidget(self.remaining, 0)
-        self.under.setFixedHeight(22)
+        self.under.setFixedHeight(24)
+        self.progress.setGeometry(0, 0, 0, 8)
+        self.progress_rail.show()
+        self.progress.show()
 
-        strip = QWidget(self)
+        strip = QWidget(top)
         self.strip_layout = QVBoxLayout(strip)
         self.strip_layout.setContentsMargins(0, 0, 0, 0)
         self.strip_layout.setSpacing(6)
@@ -693,7 +705,7 @@ class SinglePlayer(QWidget):
         strip.setFixedWidth(176)
         layout.addWidget(strip)
         self.strip = strip
-        layout.addWidget(self.under)
+        outer.addWidget(self.under, 0)
 
         self.audio = QAudioOutput(self)
         self.player = QMediaPlayer(self)

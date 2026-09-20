@@ -14,7 +14,7 @@ from PySide6.QtGui import QCursor, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QCheckBox, QPushButton,
+    QCheckBox, QHBoxLayout, QPushButton,
     QFrame, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -71,7 +71,6 @@ class BoardCard(QFrame):
         self.meta = QLabel("", self)
         self.meta.setObjectName("boardMeta")
         self.meta.setWordWrap(False)
-        layout.addWidget(self.meta)
 
         self.duration_chip = QLabel("", self)
         self.duration_chip.setObjectName("tileDuration")
@@ -80,15 +79,20 @@ class BoardCard(QFrame):
         # Elle ne se montre qu'au survol, ou si elle est cochee : une case par
         # vignette, visible en permanence, ferait un damier avant de faire une
         # planche.
+        # Sous l'image, avec le texte : posees dessus, elles disparaissaient
+        # des que le lecteur d'apercu s'affichait — il couvre l'image, et sous
+        # Windows sa fenetre native passe devant tout. Elles etaient visibles
+        # une demi-seconde, puis inatteignables.
+        handles = QHBoxLayout()
+        handles.setContentsMargins(0, 0, 0, 0)
+        handles.setSpacing(6)
         self.pick = QCheckBox(self)
         self.pick.setObjectName("cardPick")
         self.pick.setCursor(Qt.PointingHandCursor)
         self.pick.setFocusPolicy(Qt.NoFocus)
         # Rien que la case : sans taille fixe, le widget s'etalait en bandeau
         # noir sur toute la largeur de la vignette.
-        self.pick.setFixedSize(22, 22)
-        self.pick.move(14, 14)
-        self.pick.hide()
+        self.pick.setFixedSize(20, 20)
         self.pick.toggled.connect(
             lambda on: self.picked.emit(self.index, bool(on)))
 
@@ -100,10 +104,13 @@ class BoardCard(QFrame):
         self.discard.setToolTip("Écarter — récupérable dans la corbeille de session")
         self.discard.setCursor(Qt.PointingHandCursor)
         self.discard.setFocusPolicy(Qt.NoFocus)
-        self.discard.setFixedSize(24, 24)
-        self.discard.hide()
+        self.discard.setFixedSize(22, 22)
         self.discard.clicked.connect(
             lambda _c=False: self.discarded.emit(self.index))
+        handles.addWidget(self.pick, 0)
+        handles.addWidget(self.meta, 1)
+        handles.addWidget(self.discard, 0)
+        layout.addLayout(handles)
 
         # Sans cela, un clic tombant sur l'image ou le texte n'atteindrait pas
         # la carte : seules ses marges auraient repondu.
@@ -223,27 +230,7 @@ class BoardCard(QFrame):
         self._show_handles(hovered)
 
     def _show_handles(self, hovered: bool) -> None:
-        """Montre la coche et la croix, et les garde a l ecart l une de l autre.
-
-        Elles dependaient du survol sonde par la planche, qui les eteignait des
-        que le pointeur passait sur le lecteur d apercu : elles apparaissaient
-        une demi-seconde puis devenaient inatteignables.
-        """
-        self.pick.setVisible(hovered or self.pick.isChecked())
-        self.pick.move(12, 12)
-        self.pick.raise_()
-        self.discard.setVisible(hovered)
-        self.discard.move(self.width() - self.discard.width() - 12,
-                          self.height() - self.discard.height() - 12)
-        self.discard.raise_()
-
-    def enterEvent(self, event):
-        super().enterEvent(event)
-        self._show_handles(True)
-
-    def leaveEvent(self, event):
-        super().leaveEvent(event)
-        self._show_handles(self.pick.isChecked())
+        """Conserve : les poignees vivent desormais dans la ligne de texte."""
 
     def set_picked(self, picked: bool) -> None:
         """Pose ou retire la coche sans reemettre le signal."""

@@ -440,6 +440,9 @@ class _Field(QLineEdit):
         super().__init__(parent)
         self.setPlaceholderText(placeholder)
         self.setFixedWidth(width)
+        # Une croix discrete a droite : effacer une recherche a la main, mot par
+        # mot, est le genre de corvee qu'on remarque des la deuxieme fois.
+        self.setClearButtonEnabled(True)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Escape, Qt.Key_Return, Qt.Key_Enter):
