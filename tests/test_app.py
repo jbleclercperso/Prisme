@@ -1780,6 +1780,27 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.clear_picked()
     check(not window.board.picked_ids, "Ctrl+N décoche")
 
+    print("\n[59] Fiche des raccourcis")
+    import re as _re
+    from videosorter.help import SEARCH_HELP, SHORTCUTS, HelpDialog, documented_keys
+
+    sheet = HelpDialog()
+    check(sheet.windowTitle().startswith("Raccourcis"), "la fiche s'ouvre")
+    check(len(SHORTCUTS) >= 4, f"elle compte plusieurs sections ({len(SHORTCUTS)})")
+    check(all(rows for _t, rows in SHORTCUTS), "aucune section vide")
+    check(len(SEARCH_HELP) >= 4, "et la syntaxe de recherche y figure")
+    sheet.deleteLater()
+
+    # Le garde-fou : toute touche traitee sous Ctrl doit etre citee. Sans lui,
+    # la fiche vieillirait en silence des le prochain raccourci ajoute.
+    source = (Path(__file__).resolve().parents[1]
+              / "videosorter" / "window.py").read_text(encoding="utf-8")
+    handled = set(_re.findall(r"key == Qt\.Key_([A-Z])\b", source))
+    documented = documented_keys()
+    missing = sorted(handled - documented)
+    check(not missing,
+          f"toutes les touches traitées sont documentées (manquent : {missing})")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

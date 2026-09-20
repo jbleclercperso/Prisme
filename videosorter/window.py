@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from . import actions
 from .backfill import ThumbBackfill
 from .dupes import DuplicateScan
+from .help import HelpDialog
 from .board import COLUMN_CHOICES, BoardView
 from .actions import ActionError, HistoryEntry
 from .config import APP_DIR, Config
@@ -301,6 +302,8 @@ class MainWindow(QMainWindow):
             ("-", None),
             ("Préparer toutes les vignettes", self.toggle_backfill),
             ("Chercher les doublons", self.find_duplicates),
+            ("-", None),
+            ("Raccourcis et recherche…", self.show_help),
             ("Réanalyser tout le disque", self.refresh_root),
             ("Changer de racine…", self.choose_root),
         ])
@@ -856,6 +859,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Doublons
     # ------------------------------------------------------------------
+    def show_help(self) -> None:
+        """Ouvre la fiche des raccourcis, tiree de la table qui fait foi."""
+        HelpDialog(self).exec()
+        self.setFocus()
+
     def find_duplicates(self) -> None:
         """Rassemble les vidéos de taille rigoureusement identique.
 
