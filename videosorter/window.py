@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
 from .tagging import MIN_BUCKET, build_tag_items, top_words
 from .split import DEFAULT_PANES, SplitWall
+from .query import matches_text
 from .scan import (
     MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, Item, RefreshThread,
     cached_items, detect_mode, human_duration, human_resolution, human_size,
@@ -1555,11 +1557,22 @@ class MainWindow(QMainWindow):
             parts.append("modifié le " + datetime.fromtimestamp(item.mtime).strftime("%d/%m/%Y"))
         self.item_subtitle.setText("   ·   ".join(parts))
 
+    def _remember_item(self, item) -> None:
+        """Retient ce qu'on regarde, pour y revenir au prochain lancement.
+
+        Sur cent mille videos, retrouver son point d'arret a la main est le
+        genre de corvee quotidienne qui use plus que le tri lui-meme.
+        """
+        if item is not None and not item.is_tag:
+            self.cfg["last_item"] = item.item_id
+            self.cfg["root"] = str(self.root) if self.root else ""
+
     def show_item(self, index: int) -> None:
         if not self.items:
             return
         self.index = max(0, min(index, len(self.items) - 1))
         item = self.items[self.index]
+        self._remember_item(item)
         self.update_counter()
         self.commands.rebuild(
             self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer")
@@ -2431,6 +2444,26 @@ class MainWindow(QMainWindow):
         self.picked_label.setText(
             f"{count} élément(s) coché(s)" if count else "")
 
+    def pick_all(self) -> None:
+        """Coche tout ce qui est affiche."""
+        self.board.pick_all(True)
+        self.setFocus()
+
+    def pick_invert(self) -> None:
+        """Coche ce qui ne l'est pas, et decoche le reste."""
+        self.board.pick_all(None)
+        self.setFocus()
+
+    def reveal_current(self) -> None:
+        """Ouvre l'explorateur sur l'element courant, selectionne."""
+        item = self.current
+        if item is None:
+            return
+        try:
+            subprocess.Popen(["explorer", "/select,", str(Path(item.path))])
+        except OSError as exc:
+            self.show_banner(f"Explorateur indisponible : {exc}", "#3a2226")
+
     def clear_picked(self) -> None:
         self.board.clear_picked()
         self.setFocus()
@@ -2662,13 +2695,15 @@ class MainWindow(QMainWindow):
     def _matches(self, item) -> bool:
         if not self._sortable(item):
             return False
-        name = item.name.lower()
         rules = self.criteria or {}
-        include = self._terms(rules.get("include", self.cfg["filter_include"]))
-        exclude = self._terms(rules.get("exclude", self.cfg["filter_exclude"]))
-        if include and not any(term in name for term in include):
+        # Un seul champ, mais quelques mots de plus que les siens : « plage
+        # -hiver », « plage or mer », « "saison 2" ». C'est ce qui a permis de
+        # retirer la barre de filtres sans rien perdre.
+        query = rules.get("include", self.cfg["filter_include"])
+        if query and not matches_text(item.name, query):
             return False
-        if any(term in name for term in exclude):
+        exclude = self._terms(rules.get("exclude", self.cfg["filter_exclude"]))
+        if exclude and any(term in item.name.lower() for term in exclude):
             return False
         return self._matches_numeric(item)
 
@@ -3136,6 +3171,14 @@ class MainWindow(QMainWindow):
                 return self.toggle_tree()
             if key == Qt.Key_L:
                 return self.toggle_contact()
+            if key == Qt.Key_A:
+                return self.pick_all()
+            if key == Qt.Key_N:
+                return self.clear_picked()
+            if key == Qt.Key_I:
+                return self.pick_invert()
+            if key == Qt.Key_E:
+                return self.reveal_current()
             if key == Qt.Key_J:
                 return self.toggle_cinema()
             if key == Qt.Key_M:

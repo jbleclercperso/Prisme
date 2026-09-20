@@ -59,6 +59,7 @@ DEFAULTS = {
     "tag_family": "mine",        # mots-cles affiches : mine | top
     "tree_action": "send",       # clic dans l arborescence : send | go
     "tags": [],
+    "last_item": "",             # dernier element regarde, pour y revenir
     "thumbs_last_run": "",       # date de la derniere preparation menee a terme                  # mots-cles, un par ligne
     "board_columns": 5,          # cartes par rangee en vue planche
     "expand_parents": True,      # traverser les dossiers prefixes « + »

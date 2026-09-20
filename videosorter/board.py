@@ -464,6 +464,23 @@ class BoardView(QWidget):
         """Les elements coches, dans l'ordre ou ils sont affiches."""
         return [item for item in self.items if item.item_id in self.picked_ids]
 
+    def pick_all(self, value) -> None:
+        """Coche tout (True), decoche tout (False), ou inverse (None)."""
+        for item in self.items:
+            if value is None:
+                if item.item_id in self.picked_ids:
+                    self.picked_ids.discard(item.item_id)
+                else:
+                    self.picked_ids.add(item.item_id)
+            elif value:
+                self.picked_ids.add(item.item_id)
+            else:
+                self.picked_ids.discard(item.item_id)
+        for card in self.cards:
+            if 0 <= card.index < len(self.items):
+                card.set_picked(self.items[card.index].item_id in self.picked_ids)
+        self.pickedChanged.emit(len(self.picked_ids))
+
     def clear_picked(self) -> None:
         self.picked_ids.clear()
         for card in self.cards:

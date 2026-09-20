@@ -1738,6 +1738,48 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     settle(app, window, 15)
     check(ok, "et Ctrl+Z le ramène")
 
+    print("\n[58] Langage de recherche et sélection")
+    from videosorter.query import describe, matches_text, parse
+
+    check(matches_text("plage ete 2019.mp4", "plage"), "un mot simple")
+    check(matches_text("Plage Été.mp4", "plage ete"),
+          "deux mots exigés, casse et accents ignorés")
+    check(not matches_text("plage.mp4", "plage montagne"),
+          "et il les faut tous les deux")
+    check(matches_text("mer.mp4", "plage or mer"), "« or » ouvre le choix")
+    check(matches_text("plage.mp4", "plage or mer"), "d'un côté comme de l'autre")
+    check(not matches_text("plage hiver.mp4", "plage -hiver"),
+          "« - » écarte")
+    check(matches_text("plage ete.mp4", "plage -hiver"),
+          "sans écarter le reste")
+    check(matches_text("saison 2 final.mp4", '"saison 2"'),
+          "les guillemets tiennent l'expression")
+    check(not matches_text("saison 3.mp4", '"saison 2"'),
+          "et n'attrapent qu'elle")
+    check(matches_text("n importe quoi.mp4", ""), "une recherche vide laisse tout")
+
+    groups, excluded = parse("plage or mer -hiver")
+    check(groups == [["plage", "mer"]] and excluded == ["hiver"],
+          f"l'analyse rend groupes et exclusions ({groups}, {excluded})")
+    check("sans" in describe("plage -hiver"), "et se résume en clair")
+
+    # La selection au clavier porte sur toute la liste, pas sur la page.
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(tri, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.toggle_board(True)
+    pump(app, 0.4)
+    window.pick_all()
+    check(len(window.board.picked_ids) == len(window.items),
+          f"Ctrl+A coche tout ({len(window.board.picked_ids)})")
+    window.pick_invert()
+    check(not window.board.picked_ids, "Ctrl+I inverse, donc décoche tout")
+    window.pick_invert()
+    check(len(window.board.picked_ids) == len(window.items),
+          "et le rétablit")
+    window.clear_picked()
+    check(not window.board.picked_ids, "Ctrl+N décoche")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,
