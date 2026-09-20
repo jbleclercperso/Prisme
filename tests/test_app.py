@@ -1667,6 +1667,60 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(board.page == 1,
           "et l'on n'en avale pas deux pour un seul arrêt en bas")
 
+    print("\n[57] Doublons et rejet à la souris")
+    from videosorter.dupes import MIN_SIZE, group_by_size, walk_sized
+
+    # Le regroupement lui-meme : meme taille, au moins deux fichiers, et les
+    # plus lourds d'abord.
+    gros = MIN_SIZE + 1000
+    paires = [(Path("a/x.mp4"), gros), (Path("b/y.mp4"), gros),
+              (Path("c/z.mp4"), gros + 5000), (Path("d/w.mp4"), gros + 5000),
+              (Path("e/seul.mp4"), gros + 77),
+              (Path("f/minus.mp4"), 10), (Path("g/minus2.mp4"), 10)]
+    groupes = group_by_size(paires)
+    check(len(groupes) == 2, f"deux groupes de doublons ({len(groupes)})")
+    check(groupes[0][0] > groupes[1][0], "le plus lourd d'abord")
+    check(all(len(paths) == 2 for _s, paths in groupes), "deux fichiers chacun")
+    check(not any("seul" in str(pth) for _s, paths in groupes for pth in paths),
+          "un fichier de taille unique n'en est pas un")
+    check(not any("minus" in str(pth) for _s, paths in groupes for pth in paths),
+          "et les fichiers minuscules sont écartés, trop peu concluants")
+
+    # De bout en bout, sur un dossier fabrique pour l'occasion.
+    twins = base / "doublons"
+    shutil.rmtree(twins, ignore_errors=True)
+    (twins / "un").mkdir(parents=True, exist_ok=True)
+    (twins / "deux").mkdir(parents=True, exist_ok=True)
+    source = sorted(tri.rglob("*.mp4"))[0]
+    shutil.copy2(source, twins / "un" / "copie.mp4")
+    shutil.copy2(source, twins / "deux" / "copie.mp4")
+    found = group_by_size(walk_sized(twins), minimum=1)
+    check(len(found) == 1 and len(found[0][1]) == 2,
+          f"les deux copies se retrouvent ({found})")
+
+    # Le rejet a la souris passe par la corbeille de session, donc revient.
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.toggle_board(True)
+    pump(app, 0.4)
+    before = window.stats["deleted"]
+    # Un element deja traite par les etapes precedentes est verrouille : on
+    # prend le premier qui ne l'est pas.
+    position = first_untouched(window)
+    target = window.items[position].name
+    window.discard_at(position)
+    # Le transfert part en tache de fond : on le laisse demarrer, puis l'on
+    # attend qu'il aboutisse plutot que de parier sur un delai.
+    pump(app, 1.0)
+    ok = wait_for(app, lambda: window.stats["deleted"] == before + 1, 30)
+    settle(app, window, 15)
+    check(ok, f"un clic sur « ✕ » écarte la vignette ({target})")
+    window.act_undo()
+    ok = wait_for(app, lambda: window.stats["deleted"] == before, 30)
+    settle(app, window, 15)
+    check(ok, "et Ctrl+Z le ramène")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

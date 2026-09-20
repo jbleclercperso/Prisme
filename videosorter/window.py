@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from . import actions
 from .backfill import ThumbBackfill
+from .dupes import DuplicateScan
 from .board import COLUMN_CHOICES, BoardView
 from .actions import ActionError, HistoryEntry
 from .config import APP_DIR, Config
@@ -140,6 +141,7 @@ class MainWindow(QMainWindow):
         # d'onglet ne doit jamais relire le disque pour la retrouver.
         # Parcours de pre-fabrication des vignettes, quand il tourne.
         self.backfill = None
+        self.dupes = None
         self._backfill_started = 0.0
         self._plain_items: list = []
         self._plain_root = None
@@ -296,6 +298,7 @@ class MainWindow(QMainWindow):
             ("Recherche vidéo sur le web…", self.open_web_search),
             ("-", None),
             ("Préparer toutes les vignettes", self.toggle_backfill),
+            ("Chercher les doublons", self.find_duplicates),
             ("Réanalyser tout le disque", self.refresh_root),
             ("Changer de racine…", self.choose_root),
         ])
@@ -482,6 +485,7 @@ class MainWindow(QMainWindow):
         )
         self.board.openRequested.connect(self.on_board_open)
         self.board.asideRequested.connect(self.open_aside)
+        self.board.discardRequested.connect(self.discard_at)
         self.board.pickedChanged.connect(self.on_picked_changed)
         self.board.rateRequested.connect(self.on_board_rate)
         self.board.previewNeeded.connect(self.on_board_preview)
@@ -824,6 +828,74 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Fabrication des vignettes d'avance
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Doublons
+    # ------------------------------------------------------------------
+    def find_duplicates(self) -> None:
+        """Rassemble les vidéos de taille rigoureusement identique.
+
+        Rien n'est supprimé : les groupes s'affichent comme une planche
+        ordinaire, les membres d'un même groupe côte à côte. On coche ce dont on
+        ne veut plus et l'on se sert du bouton « Supprimer » habituel, qui passe
+        par la corbeille de session — donc réversible.
+        """
+        if self.dupes is not None:
+            self.dupes.stop()
+            return
+        if self.root is None:
+            return
+        top = Path(self.levels[0]["root"]) if self.levels else self.root
+        self.dupes = DuplicateScan(top, self.cfg["skip_hidden"], self)
+        self.dupes.progress.connect(self.on_dupes_progress)
+        self.dupes.found.connect(self.on_dupes_found)
+        self.dupes.start()
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.progress.setFormat("recherche de doublons…")
+        self.progress.show()
+        self.show_banner(f"Recherche de doublons sous {top}…", "#22303f")
+
+    def on_dupes_progress(self, seen: int) -> None:
+        if self.scanning:
+            return
+        self.progress.setFormat(f"doublons : {seen} vidéo(s) examinée(s)…")
+        self.progress.show()
+
+    def on_dupes_found(self, groups: list) -> None:
+        self.dupes = None
+        self.progress.hide()
+        self.progress.setFormat("%v / %m analysés")
+        if not groups:
+            self.show_banner("Aucun doublon trouvé.", "#22303f")
+            return
+        # Les membres d'un meme groupe se suivent : c'est ce qui permet de les
+        # comparer d'un coup d'oeil au lieu de les chercher dans la liste.
+        items = []
+        extra = 0
+        for _size, paths in groups:
+            extra += len(paths) - 1
+            for path in paths:
+                items.append(Item(path=Path(path), kind=MODE_FILES,
+                                  videos=[Path(path)], video_count=1,
+                                  file_count=1))
+        self.stop_scan()
+        self.browsing = True
+        self.all_items = items
+        self._plain_items = []
+        self.mode = MODE_FLAT
+        self.sort_mode = ""            # l'ordre des groupes doit tenir
+        self.items = list(items)
+        self.index = 0
+        self._apply_selectors()
+        self.refresh_board()
+        self._show_counts()
+        gagne = sum(size * (len(paths) - 1) for size, paths in groups)
+        self.show_banner(
+            f"{len(groups)} groupe(s) de doublons — {extra} fichier(s) en trop, "
+            f"soit {human_size(gagne)} à récupérer. Cochez ce dont vous ne "
+            f"voulez plus, puis « Supprimer » : tout part dans la corbeille de "
+            f"session et revient par Ctrl+Z.", "#22303f")
+
     def toggle_backfill(self) -> None:
         """Lance, ou arrête, la fabrication de toutes les vignettes manquantes.
 
@@ -1787,10 +1859,17 @@ class MainWindow(QMainWindow):
         Deux sources de verrous sous Windows : le lecteur Qt, et les ffmpeg de
         préchargement qui fabriquent les vignettes des éléments suivants.
         """
-        for player in (self.grid.player, self.single.player):
+        # La planche et le lecteur de cote lisent eux aussi des fichiers : les
+        # oublier laissait un verrou Windows sur la video qu'on venait d'ecarter,
+        # et le deplacement echouait sans rien dire.
+        for player in (self.grid.player, self.single.player,
+                       self.board.player, self.aside_player.player):
             player.stop()
             player.setSource(QUrl())
+        for pane in self.wall.panes:
+            pane.stop()
         self.grid.video.hide()
+        self.board.video.hide()
         self.preview.quiesce(1200)
         QApplication.processEvents()
 
@@ -2276,6 +2355,18 @@ class MainWindow(QMainWindow):
             self.show_item(self.index + 1)
         else:
             self.show_banner("Dernière vidéo de la liste", "#2a2f38")
+
+    def discard_at(self, position: int) -> None:
+        """Écarte la vignette cliquée, sans quitter la planche.
+
+        Rien n'est perdu : l'élément part dans la corbeille de session, d'où il
+        revient par Ctrl+Z ou par la corbeille elle-même. C'est ce qui permet de
+        rejeter vite sans avoir à réfléchir deux fois.
+        """
+        if not (0 <= position < len(self.items)):
+            return
+        self.index = position
+        self.act_delete()
 
     def on_picked_changed(self, count: int) -> None:
         self.picked_bar.setVisible(bool(count))

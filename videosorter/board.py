@@ -14,7 +14,7 @@ from PySide6.QtGui import QCursor, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QCheckBox,
+    QCheckBox, QPushButton,
     QFrame, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -36,6 +36,7 @@ class BoardCard(QFrame):
 
     opened = Signal(int)
     asided = Signal(int)
+    discarded = Signal(int)
     rated = Signal(int, int)
     played = Signal(int)
     picked = Signal(int, bool)
@@ -87,6 +88,19 @@ class BoardCard(QFrame):
         self.pick.hide()
         self.pick.toggled.connect(
             lambda on: self.picked.emit(self.index, bool(on)))
+
+        # Rejeter d'un clic, au coin oppose de la case a cocher. Garder, c'est
+        # passer au suivant ; rejeter demandait jusqu'ici le clavier, ce qui
+        # obligeait a lacher la souris a chaque decision.
+        self.discard = QPushButton("✕", self)
+        self.discard.setObjectName("cardDiscard")
+        self.discard.setToolTip("Écarter — récupérable dans la corbeille de session")
+        self.discard.setCursor(Qt.PointingHandCursor)
+        self.discard.setFocusPolicy(Qt.NoFocus)
+        self.discard.setFixedSize(24, 24)
+        self.discard.hide()
+        self.discard.clicked.connect(
+            lambda _c=False: self.discarded.emit(self.index))
 
         # Sans cela, un clic tombant sur l'image ou le texte n'atteindrait pas
         # la carte : seules ses marges auraient repondu.
@@ -211,6 +225,10 @@ class BoardCard(QFrame):
         self.pick.setVisible(hovered or self.pick.isChecked())
         if self.pick.isVisible():
             self.pick.raise_()
+        self.discard.setVisible(hovered)
+        if hovered:
+            self.discard.move(self.width() - self.discard.width() - 12, 12)
+            self.discard.raise_()
 
     def set_picked(self, picked: bool) -> None:
         """Pose ou retire la coche sans reemettre le signal."""
@@ -245,6 +263,7 @@ class BoardView(QWidget):
 
     openRequested = Signal(int)
     asideRequested = Signal(int)
+    discardRequested = Signal(int)
     pickedChanged = Signal(int)
     rateRequested = Signal(int, int)
     previewNeeded = Signal(int)
@@ -362,6 +381,7 @@ class BoardView(QWidget):
             card = BoardCard(len(self.cards), self.canvas)
             card.opened.connect(self.openRequested)
             card.asided.connect(self.asideRequested)
+            card.discarded.connect(self.discardRequested)
             card.picked.connect(self._on_picked)
             card.rated.connect(self.rateRequested)
             card.played.connect(self._play_full)
