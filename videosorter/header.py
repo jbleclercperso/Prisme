@@ -57,6 +57,13 @@ QPushButton#sortChip[chosen="true"] { background: #262c35; border-color: #39414d
                                       color: #ffffff; }
 QPushButton#segmentChoice:hover { color: #dfe6ee; }
 QPushButton#segmentChoice[chosen="true"] { background: #262c35; color: #ffffff; }
+QPushButton#stepper { background: #14181e; border: 1px solid #2b323d;
+                      border-radius: 5px; color: #b9c2cd; font-size: 14px;
+                      padding: 2px 0; }
+QPushButton#stepper:hover { background: #262c35; border-color: #39414d;
+                            color: #ffffff; }
+QPushButton#stepper:disabled { color: #4a515c; border-color: #1d222a; }
+QLabel#counter { color: #9fb0c4; font-size: 13px; }
 QLabel#segmentLabel { color: #6f7885; font-size: 12px; }
 QPushButton#crumb { background: transparent; border: 0; padding: 3px 6px;
                     color: #9fb0c4; font-size: 14px; }
@@ -327,11 +334,14 @@ class ControlBar(QWidget):
         self.columns_label = QLabel("", self)
         self.columns_label.setObjectName("counter")
         self.columns_label.setAlignment(Qt.AlignCenter)
-        self.columns_label.setFixedWidth(22)
+        self.columns_label.setFixedWidth(24)
+        self.columns_label.setToolTip("Vignettes par rangée")
         for widget, tip in ((self.wider, "Des vignettes plus grandes"),
                             (self.tighter, "Des vignettes plus petites")):
-            widget.setFixedWidth(26)
+            widget.setObjectName("stepper")
+            widget.setFixedSize(26, 24)
             widget.setToolTip(tip)
+            widget.setCursor(Qt.PointingHandCursor)
         # Conserve pour les appels existants, sans occuper l'ecran.
         self.columns = _combo([(n, str(n)) for n in columns_choices])
         self.columns.hide()
@@ -345,8 +355,12 @@ class ControlBar(QWidget):
         self.count.setObjectName("counter")
         self.previous = _button("◂", self.previousPage.emit)
         self.next = _button("▸", self.nextPage.emit)
-        self.previous.setFixedWidth(26)
-        self.next.setFixedWidth(26)
+        for widget, tip in ((self.previous, "Page précédente"),
+                            (self.next, "Page suivante")):
+            widget.setObjectName("stepper")
+            widget.setFixedSize(26, 24)
+            widget.setToolTip(tip)
+            widget.setCursor(Qt.PointingHandCursor)
         row.addWidget(self.previous)
         row.addWidget(self.count)
         row.addWidget(self.next)

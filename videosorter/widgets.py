@@ -350,6 +350,10 @@ class PreviewGrid(QWidget):
         # du chargement devoilait la derniere image du media precedent, le temps
         # que la nouvelle soit rendue. On attend cette image-la.
         self._awaiting_frame = False
+        self._blackout = False
+        self.blackout_timer = QTimer(self)
+        self.blackout_timer.setSingleShot(True)
+        self.blackout_timer.timeout.connect(self._end_blackout)
         self.video.videoSink().videoFrameChanged.connect(self._on_frame)
         self.player.mediaStatusChanged.connect(self._on_status)
         self.player.positionChanged.connect(self._on_position)
@@ -495,6 +499,12 @@ class PreviewGrid(QWidget):
             self.video.videoSink().setVideoFrame(QVideoFrame())
         except (RuntimeError, TypeError):
             pass
+
+    def _end_blackout(self) -> None:
+        """Fin du noir de transition : l'image peut reparaitre."""
+        self._blackout = False
+        if not self._awaiting_frame and self.hovered_slot != -1:
+            self.video.show()
 
     def _on_frame(self, frame) -> None:
         """Premiere image du nouvel extrait : c'est maintenant qu'on l'affiche."""
@@ -735,6 +745,10 @@ class SinglePlayer(QWidget):
         # video a l autre, on voyait donc un instant celle d avant. On le cache
         # et l on vide sa surface jusqu a la premiere image de la nouvelle.
         self._awaiting_frame = False
+        self._blackout = False
+        self.blackout_timer = QTimer(self)
+        self.blackout_timer.setSingleShot(True)
+        self.blackout_timer.timeout.connect(self._end_blackout)
         self.video.videoSink().videoFrameChanged.connect(self._on_frame)
         self.player.mediaStatusChanged.connect(self._on_status)
         self.player.positionChanged.connect(self._on_position)
@@ -771,17 +785,24 @@ class SinglePlayer(QWidget):
         for tile in self.tiles:
             tile.reset()
             tile.placeholder.setText(message)
+        # Attendre la premiere image ne suffisait pas : Qt en livre parfois une
+        # qui appartient encore au fichier precedent, et l'on voyait passer une
+        # image subliminale. On impose donc un noir franc, court mais entier :
+        # l'image ne revient qu'une fois ce delai passe **et** une image du
+        # nouveau fichier arrivee.
         self._awaiting_frame = True
+        self._blackout = True
         self.video.hide()
         try:
             self.video.videoSink().setVideoFrame(QVideoFrame())
         except (RuntimeError, TypeError):
             pass
+        self.blackout_timer.start(180)
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
 
     def _on_frame(self, frame) -> None:
-        """Premiere image du nouveau fichier : c est maintenant qu on l affiche."""
+        """Premiere image du nouveau fichier : on la retient jusqu au bout du noir."""
         if not self._awaiting_frame:
             return
         try:
@@ -790,7 +811,13 @@ class SinglePlayer(QWidget):
         except (RuntimeError, AttributeError):
             pass
         self._awaiting_frame = False
-        self.video.show()
+        if not self._blackout:
+            self.video.show()
+
+    def _end_blackout(self) -> None:
+        self._blackout = False
+        if not self._awaiting_frame:
+            self.video.show()
 
     def set_plan(self, plan: list) -> None:
         for slot, tile in enumerate(self.tiles):
