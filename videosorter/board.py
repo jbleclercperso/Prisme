@@ -139,15 +139,10 @@ class BoardCard(QFrame):
         self.duration_chip.show()
 
     def _place_chip(self) -> None:
-        """En bas a droite de l'image, la ou elle ne cache rien d'utile.
-
-        En haut, elle tombait sur le sujet ; en bas, le coin d'une vignette est
-        presque toujours du decor.
-        """
+        """En haut a droite de l'image : c'est la qu'on la cherche."""
         chip = self.duration_chip
         area = self.image.geometry()
-        chip.move(area.right() - chip.width() - 8,
-                  area.bottom() - chip.height() - 8)
+        chip.move(area.right() - chip.width() - 8, area.top() + 8)
 
     def set_item(self, item, stars: int) -> None:
         self.item = item
@@ -225,13 +220,30 @@ class BoardCard(QFrame):
         self.setProperty("hovered", "true" if hovered else "false")
         self.style().unpolish(self)
         self.style().polish(self)
+        self._show_handles(hovered)
+
+    def _show_handles(self, hovered: bool) -> None:
+        """Montre la coche et la croix, et les garde a l ecart l une de l autre.
+
+        Elles dependaient du survol sonde par la planche, qui les eteignait des
+        que le pointeur passait sur le lecteur d apercu : elles apparaissaient
+        une demi-seconde puis devenaient inatteignables.
+        """
         self.pick.setVisible(hovered or self.pick.isChecked())
-        if self.pick.isVisible():
-            self.pick.raise_()
+        self.pick.move(12, 12)
+        self.pick.raise_()
         self.discard.setVisible(hovered)
-        if hovered:
-            self.discard.move(self.width() - self.discard.width() - 12, 12)
-            self.discard.raise_()
+        self.discard.move(self.width() - self.discard.width() - 12,
+                          self.height() - self.discard.height() - 12)
+        self.discard.raise_()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._show_handles(True)
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._show_handles(self.pick.isChecked())
 
     def set_picked(self, picked: bool) -> None:
         """Pose ou retire la coche sans reemettre le signal."""

@@ -235,6 +235,12 @@ class SplitWall(QWidget):
         self.empty.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         outer.addWidget(self.empty)
 
+        # La taille du vivier, dite au-dessus des panneaux : on veut savoir
+        # dans combien de videos le hasard pioche, surtout apres un filtre.
+        self.caption = QLabel("", self)
+        self.caption.setObjectName("splitName")
+        outer.addWidget(self.caption)
+
         self.row = QWidget(self)
         row_layout = QHBoxLayout(self.row)
         row_layout.setContentsMargins(0, 0, 0, 0)
@@ -248,6 +254,11 @@ class SplitWall(QWidget):
             self.panes.append(pane)
         self.row.hide()
         outer.addWidget(self.row, 1)
+
+    def set_caption(self, count: int) -> None:
+        self.caption.setText(
+            f"{count} vidéo(s) verticale(s) connue(s) — le mur y pioche au hasard"
+            if count else "")
 
     # -- vivier ----------------------------------------------------------
     def set_pool(self, videos: list) -> None:

@@ -716,8 +716,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "le nombre de vidéos tient dans la pastille")
     chip = visible[0].duration_chip
     image = visible[0].image.geometry()
-    check(chip.y() > image.center().y(),
-          f"posée en bas de la vignette (y={chip.y()}, image {image.top()}"
+    check(chip.y() < image.center().y(),
+          f"posée en haut de la vignette (y={chip.y()}, image {image.top()}"
           f"–{image.bottom()})")
     check(chip.x() > image.center().x(), "et à droite")
 
@@ -1651,12 +1651,14 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     # Arriver en bas de la planche passe a la page suivante.
     window.set_tab(TAB_FOLDERS)
-    window.start_root(tri, MODE_FOLDERS)
-    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and window.items, 60)
     window.toggle_board(True)
     pump(app, 0.4)
     board = window.board
-    board.items = list(window.items) * 40          # de quoi faire des pages
+    # Une liste fabriquee : la pagination se mesure sur le nombre d'elements,
+    # pas sur ce que les etapes precedentes ont laisse dans le jeu d'essai.
+    board.items = list(window.items) * 60
     board.set_page(0)
     pump(app, 0.3)
     check(board.total_pages() > 1, "assez d'éléments pour paginer")

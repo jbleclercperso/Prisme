@@ -406,6 +406,19 @@ class MainWindow(QMainWindow):
         self.contact_button.clicked.connect(self.toggle_contact)
         self.contact_button.hide()
 
+        # Avancer et reculer sans le clavier : trois vignettes d'affilee se
+        # jugent a la souris, et lacher la souris pour une fleche rompt le geste.
+        self.prev_button = QPushButton("◂", header)
+        self.prev_button.setToolTip("Élément précédent   (←)")
+        self.prev_button.setFixedWidth(30)
+        self.prev_button.setFocusPolicy(Qt.NoFocus)
+        self.prev_button.clicked.connect(lambda: self.step(-1))
+        self.next_button = QPushButton("▸", header)
+        self.next_button.setToolTip("Élément suivant   (→)")
+        self.next_button.setFixedWidth(30)
+        self.next_button.setFocusPolicy(Qt.NoFocus)
+        self.next_button.clicked.connect(lambda: self.step(1))
+
         self.cinema_button = QPushButton("⛶ Cinéma", header)
         self.cinema_button.setCheckable(True)
         self.cinema_button.setToolTip(
@@ -419,6 +432,8 @@ class MainWindow(QMainWindow):
         self.enter_button.setToolTip("Trier le contenu de ce dossier   (Ctrl+↓)")
         self.enter_button.setFocusPolicy(Qt.NoFocus)
         self.enter_button.clicked.connect(self.enter_current)
+        header_layout.addWidget(self.prev_button, 0)
+        header_layout.addWidget(self.next_button, 0)
         header_layout.addWidget(self.contact_button, 0)
         header_layout.addWidget(self.cinema_button, 0)
         header_layout.addWidget(self.enter_button, 0)
@@ -1975,6 +1990,7 @@ class MainWindow(QMainWindow):
         """Remplit le mur avec ce que l'on connaît de vertical."""
         self.viewer.setCurrentWidget(self.wall)
         self.wall.set_pool(self.vertical_pool())
+        self.wall.set_caption(len(self.wall.pool))
         self.item_title.setText(f"{len(self.wall.pool)} vidéo(s) verticale(s)")
 
     def open_video_path(self, path: str) -> None:
@@ -2167,6 +2183,8 @@ class MainWindow(QMainWindow):
             not self.browsing and item is not None
             and item.kind != MODE_FOLDERS)
         self.cinema_button.setChecked(self.cinema)
+        for button in (self.prev_button, self.next_button):
+            button.setVisible(not self.browsing and bool(self.items))
         self.enter_button.setVisible(
             not self.browsing and item is not None
             and item.kind == MODE_FOLDERS and not item.locked
@@ -2356,8 +2374,17 @@ class MainWindow(QMainWindow):
         self.cinema = (not self.cinema) if on is None else bool(on)
         self.cinema_button.setChecked(self.cinema)
         for widget in (self.crumbs, self.tabs, self.controls, self.commands,
-                       self.item_card, self.progress, self.stars):
+                       self.progress, self.stars):
             widget.setVisible(not self.cinema)
+        # La fiche reste, mais reduite a ce qui permet d'en sortir et de
+        # continuer : sans cela, une fois entre dans le cinema, plus rien ne
+        # permettait d'en revenir.
+        self.item_card.setVisible(True)
+        for widget in (self.item_subtitle, self.contact_button,
+                       self.enter_button):
+            widget.setVisible(not self.cinema and widget.isEnabled())
+        self.cinema_button.setText("✕ Quitter le cinéma" if self.cinema
+                                   else "⛶ Cinéma")
         if self.cinema:
             self.tree.hide()
         self.setFocus()
@@ -2937,6 +2964,11 @@ class MainWindow(QMainWindow):
             else "Son actif — cliquer pour le couper   (Ctrl+M)"
         )
 
+    def step(self, delta: int) -> None:
+        """Element precedent ou suivant, comme les fleches du clavier."""
+        if self.items:
+            self.show_item(self.index + delta)
+
     def advance(self) -> None:
         if self.index + 1 >= len(self.items):
             if self.scanning:
@@ -3133,6 +3165,9 @@ class MainWindow(QMainWindow):
         if key == Qt.Key_Left:
             return self.show_item(self.index - 1)
         if key == Qt.Key_Escape:
+            if self.cinema:
+                # Echap sort d'abord du cinema : c'est le geste qu'on fait.
+                return self.toggle_cinema(False)
             if not self.browsing:
                 # On edite : on remonte aux vignettes avant de quitter le niveau.
                 self.show_board_at(self.index)

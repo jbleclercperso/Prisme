@@ -96,6 +96,8 @@ QLabel#tileDuration { background: rgba(0,0,0,0.78); color: #ffffff;
                      font-size: 13px; font-weight: 700; }
 QLabel#tileCaption { color: #9aa6b4; font-size: 11px; font-weight: 600; }
 QLabel#tilePlaceholder { color: #59616d; font-size: 12px; }
+QFrame#singleRail { background: #222932; border-radius: 4px; }
+QFrame#singleDone { background: #4d8dff; border-radius: 4px; }
 QFrame#playRail { background: rgba(255,255,255,0.22); border: 0;
                   border-radius: 4px; }
 QFrame#playProgress { background: #5c9dff; border: 0; border-radius: 4px; }
@@ -661,10 +663,10 @@ class SinglePlayer(QWidget):
         under_row.setContentsMargins(0, 0, 0, 0)
         under_row.setSpacing(8)
         self.progress_rail = QFrame(self.under)
-        self.progress_rail.setObjectName("playRail")
-        self.progress_rail.setFixedHeight(6)
+        self.progress_rail.setObjectName("singleRail")
+        self.progress_rail.setFixedHeight(8)
         self.progress = QFrame(self.progress_rail)
-        self.progress.setObjectName("playProgress")
+        self.progress.setObjectName("singleDone")
         under_row.addWidget(self.progress_rail, 1)
 
         # Le temps restant, en permanence, en haut a droite de l'image : c'est
@@ -673,7 +675,7 @@ class SinglePlayer(QWidget):
         self.remaining = QLabel("", self.under)
         self.remaining.setObjectName("remaining")
         under_row.addWidget(self.remaining, 0)
-        self.under.setFixedHeight(20)
+        self.under.setFixedHeight(22)
 
         strip = QWidget(self)
         self.strip_layout = QVBoxLayout(strip)
@@ -697,6 +699,11 @@ class SinglePlayer(QWidget):
         self.player = QMediaPlayer(self)
         self.player.setVideoOutput(self.video)
         self.player.setAudioOutput(self.audio)
+        # Le widget garde a l ecran la derniere image rendue : en passant d une
+        # video a l autre, on voyait donc un instant celle d avant. On le cache
+        # et l on vide sa surface jusqu a la premiere image de la nouvelle.
+        self._awaiting_frame = False
+        self.video.videoSink().videoFrameChanged.connect(self._on_frame)
         self.player.mediaStatusChanged.connect(self._on_status)
         self.player.positionChanged.connect(self._on_position)
         self.player.durationChanged.connect(lambda _d: self._on_position(
@@ -732,8 +739,26 @@ class SinglePlayer(QWidget):
         for tile in self.tiles:
             tile.reset()
             tile.placeholder.setText(message)
+        self._awaiting_frame = True
+        self.video.hide()
+        try:
+            self.video.videoSink().setVideoFrame(QVideoFrame())
+        except (RuntimeError, TypeError):
+            pass
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
+
+    def _on_frame(self, frame) -> None:
+        """Premiere image du nouveau fichier : c est maintenant qu on l affiche."""
+        if not self._awaiting_frame:
+            return
+        try:
+            if not frame.isValid():
+                return
+        except (RuntimeError, AttributeError):
+            pass
+        self._awaiting_frame = False
+        self.video.show()
 
     def set_plan(self, plan: list) -> None:
         for slot, tile in enumerate(self.tiles):
