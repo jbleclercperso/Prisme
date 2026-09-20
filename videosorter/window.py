@@ -613,6 +613,10 @@ class MainWindow(QMainWindow):
         self.activity_timer.timeout.connect(self._show_activity)
         self.activity_timer.start()
 
+        self.chrome_timer = QTimer(self)
+        self.chrome_timer.setSingleShot(True)
+        self.chrome_timer.timeout.connect(self._sleep_chrome)
+
         self.banner_timer = QTimer(self)
         self.banner_timer.setSingleShot(True)
         self.banner_timer.timeout.connect(self.banner.hide)
@@ -2418,7 +2422,28 @@ class MainWindow(QMainWindow):
             self.show_board_at(self.index)
         if self.cinema:
             self.tree.hide()
+            # Regarder et commander sont deux moments distincts : en cinema,
+            # la fiche s'efface, et le moindre mouvement de souris la rappelle
+            # pour deux secondes.
+            self.item_card.hide()
+            self.setMouseTracking(True)
+            self.chrome_timer.start(2000)
         self.setFocus()
+
+    def _wake_chrome(self) -> None:
+        """Rappelle la fiche le temps d'un geste, puis la laisse repartir."""
+        if not self.cinema:
+            return
+        self.item_card.show()
+        self.chrome_timer.start(2000)
+
+    def _sleep_chrome(self) -> None:
+        if self.cinema:
+            self.item_card.hide()
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        self._wake_chrome()
 
     def on_video_finished(self) -> None:
         """La vidéo est allée à son terme : on passe à la suivante.

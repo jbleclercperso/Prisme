@@ -38,9 +38,17 @@ QLabel#hint { color: #6f7885; }
 QFrame#card { background: #1b1f26; border: 1px solid #262c35; border-radius: 10px; }
 QFrame#boardCard { background: #171b21; border: 1px solid #262c35; border-radius: 10px; }
 QFrame#boardCard[hovered="true"] { border-color: #4c8dff; background: #1c222b; }
-QFrame#boardCard[state="rangé"] { border-color: #3f6b39; }
-QFrame#boardCard[state="écarté"] { border-color: #6d2f38; }
-QFrame#boardCard[state="passé"] { border-color: #4a4f5c; }
+/* Ce qui est decide garde une trace, au lieu de disparaitre : on voit son
+   avancement sur la page, et l'on peut revenir sur une decision d'un coup
+   d'oeil. Un bord seul se remarquait a peine sur une planche dense. */
+QFrame#boardCard[state="rangé"] { border-color: #3f6b39;
+                                  background: rgba(63, 107, 57, 0.16); }
+QFrame#boardCard[state="écarté"] { border-color: #6d2f38;
+                                   background: rgba(109, 47, 56, 0.16); }
+QFrame#boardCard[state="passé"] { border-color: #4a4f5c;
+                                  background: rgba(74, 79, 92, 0.14); }
+QFrame#boardCard[state="rangé"] QLabel#boardMeta { color: #8fc386; }
+QFrame#boardCard[state="écarté"] QLabel#boardMeta { color: #d08a95; }
 QLabel#boardImage { background: #0b0d10; border-radius: 6px; color: #59616d; }
 QLabel#boardName { font-size: 14px; font-weight: 600; color: #e6e8ea; }
 /* Les deux portees du hasard : la collection entiere, ou l element affiche.
