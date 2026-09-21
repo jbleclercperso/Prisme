@@ -55,6 +55,8 @@ SHORTCUTS = [
         ("Ctrl+R", "tout réanalyser"),
         ("Chip « Non vus »", "ne garder que ce qui n'a été ni décidé ni regardé"),
         ("⋯ → Rafale", "la suivante arrive toute seule après 8 s sans décision"),
+        ("⋯ → Journal des gels", "quand l'interface s'est figée, combien de temps, après quoi"),
+        ("Mur : ▸  ⚄  ⤢", "la suivante du même dossier ; une autre n'importe où ; ouvrir"),
     ]),
 ]
 

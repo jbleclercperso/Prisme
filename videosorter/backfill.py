@@ -15,6 +15,7 @@ presente n'est jamais refaite, donc relancer le parcours ne recommence rien.
 """
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -54,6 +55,8 @@ class ThumbBackfill(QThread):
         self.width = width
         self.skip_hidden = skip_hidden
         self._stop = False
+        self._go = threading.Event()
+        self._go.set()
         self.made = 0
         self.kept = 0
         self.failed = 0
@@ -61,6 +64,18 @@ class ThumbBackfill(QThread):
 
     def stop(self) -> None:
         self._stop = True
+        self._go.set()
+
+    def pause(self) -> None:
+        """Suspend les extractions : le mur, lui, a besoin de la ligne."""
+        self._go.clear()
+
+    def resume(self) -> None:
+        self._go.set()
+
+    @property
+    def paused(self) -> bool:
+        return not self._go.is_set()
 
     # -- le travail d'une video -----------------------------------------
     def _one(self, video) -> str:
@@ -145,6 +160,7 @@ class ThumbBackfill(QThread):
         return found
 
     def _guarded(self, video):
+        self._go.wait()
         if self._stop:
             return None
         try:

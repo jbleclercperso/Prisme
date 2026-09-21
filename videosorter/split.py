@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import random
 
-from PySide6.QtCore import QUrl, Qt, Signal
+from PySide6.QtCore import QTimer, QUrl, Qt, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from .perf import mark
 from .scan import human_duration
 from .widgets import elide
 
@@ -28,6 +29,8 @@ from .widgets import elide
 # presque exactement. Quatre les amincissent au point qu'on ne distingue plus
 # grand-chose.
 DEFAULT_PANES = 3
+# Delai entre deux demarrages de panneaux.
+STAGGER_MS = 650
 # Les nombres qui font un rectangle. Cinq ou sept n'en font pas.
 PANE_CHOICES = (2, 3, 4, 6, 8, 9, 10)
 ORIENTATIONS = (("vertical", "Verticales"), ("horizontal", "Horizontales"),
@@ -65,7 +68,8 @@ class SplitPane(QFrame):
 
     RAIL_HEIGHT = 6
 
-    wants_next = Signal(int)
+    wants_next = Signal(int)          # une autre, au hasard, n'importe ou
+    wants_sibling = Signal(int, str)  # la suivante du meme dossier
     opened = Signal(str)
 
     def __init__(self, index: int, scroll_seconds: int = 5, parent=None):
@@ -112,8 +116,11 @@ class SplitPane(QFrame):
         # au mur, donc a la fenetre entiere, qui ne pouvait plus retrecir.
         self.name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         bar.addWidget(self.name, 1)
+        # Trois gestes : la suivante du meme dossier quand une video plait,
+        # une autre au hasard n'importe ou, et ouvrir en grand.
         for text, tip, slot in (
-            ("⇄", "Une autre vidéo dans ce panneau", self._next),
+            ("▸", "La suivante, dans le même dossier", self._sibling),
+            ("⚄", "Une autre, au hasard, n'importe où", self._next),
             ("⤢", "Ouvrir cette vidéo", self._open),
         ):
             button = QPushButton(text, self)
@@ -133,6 +140,7 @@ class SplitPane(QFrame):
 
     # -- contenu ---------------------------------------------------------
     def play(self, path: str) -> None:
+        mark(f"wall.play {path[-40:]}")
         self.video_path = path
         self.name.setText(elide(path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1], 28))
         self.name.setToolTip(path)
@@ -167,6 +175,10 @@ class SplitPane(QFrame):
 
     def _next(self) -> None:
         self.wants_next.emit(self.index)
+
+    def _sibling(self) -> None:
+        if self.video_path:
+            self.wants_sibling.emit(self.index, self.video_path)
 
     def _open(self) -> None:
         if self.video_path:
@@ -244,7 +256,10 @@ class SplitPane(QFrame):
 class SplitWall(QWidget):
     """Le mur entier : quelques panneaux, et un vivier où puiser."""
 
+    STAGGER_MS = STAGGER_MS
+
     opened = Signal(str)
+    siblingRequested = Signal(int, str)
     countChanged = Signal(int)
     orientationChanged = Signal(str)
     fullscreenRequested = Signal()
@@ -366,6 +381,7 @@ class SplitWall(QWidget):
         while len(self.panes) < count:
             pane = SplitPane(len(self.panes), self.scroll_seconds, self.row)
             pane.wants_next.connect(self.refill_one)
+            pane.wants_sibling.connect(self.siblingRequested)
             pane.opened.connect(self.opened)
             pane.set_bare(self.panes[0].bare if self.panes else False)
             self.panes.append(pane)
@@ -392,7 +408,8 @@ class SplitWall(QWidget):
         for pane in self.panes:
             pane.set_bare(bare)
 
-    def set_caption(self, count: int, unknown: int = 0, pinned: bool = False) -> None:
+    def set_caption(self, count: int, unknown: int = 0, pinned: bool = False,
+                    heavy: int = 0) -> None:
         if pinned:
             self.caption.setText(f"{count} vidéo(s) choisie(s) — lues ensemble")
             return
@@ -401,6 +418,8 @@ class SplitWall(QWidget):
         text = f"{count} vidéo(s) {kind}".replace("  ", " ")
         if unknown:
             text += f" (dont {unknown} d'orientation encore inconnue)"
+        if heavy:
+            text += f" — {heavy} au-delà de 1080p écartée(s) : trop lourdes pour ce mur"
         self.caption.setText(text + " — le mur y pioche au hasard" if count else "")
 
     # -- vivier ----------------------------------------------------------
@@ -419,11 +438,27 @@ class SplitWall(QWidget):
             return
         picks = random.sample(self.pool, min(len(self.panes), len(self.pool)))
         self.shown = list(picks)
-        for index, pane in enumerate(self.panes):
-            if index < len(picks):
-                pane.play(picks[index])
-            else:
-                pane.clear()
+        # Un panneau a la fois, pas six d'un coup : six ouvertures simultanees
+        # sur le partage, six decodages qui demarrent ensemble, et l'interface
+        # ne respire plus. Echelonnes, chacun a la ligne pour lui un instant.
+        for pane in self.panes:
+            pane.clear()
+        self._queue = list(enumerate(picks))
+        self._start_one()
+
+    def _start_one(self) -> None:
+        if not getattr(self, "_queue", None):
+            return
+        index, path = self._queue.pop(0)
+        if index < len(self.panes) and self.isVisible():
+            self.panes[index].play(path)
+        if self._queue:
+            QTimer.singleShot(self.STAGGER_MS, self._start_one)
+
+    def play_in(self, index: int, path: str) -> None:
+        """Pose cette video dans ce panneau (la suivante du dossier, par exemple)."""
+        if 0 <= index < len(self.panes) and path:
+            self.panes[index].play(path)
 
     def refill_one(self, index: int) -> None:
         """Remplace la vidéo d'un seul panneau, sans toucher aux autres."""
@@ -435,6 +470,7 @@ class SplitWall(QWidget):
         self.panes[index].play(random.choice(choices))
 
     def stop(self) -> None:
+        self._queue = []
         for pane in self.panes:
             pane.stop()
 

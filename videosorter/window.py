@@ -33,6 +33,7 @@ from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
 from .tagging import MIN_BUCKET, build_tag_items, top_words
 from .split import DEFAULT_PANES, SplitWall
+from .perf import LOG as STALL_LOG, WATCH, mark
 from .query import matches_text
 
 # Les tons du bandeau d'etat. Ils etaient ecrits en dur a chaque appel, avec
@@ -228,6 +229,9 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_mute()
         self._refresh_state()
+        WATCH.setParent(self)
+        WATCH.start()
+        self._siblings_cache: dict = {}
         self.welcome.set_recent(cfg["recent_roots"])
         self.stack.setCurrentIndex(PAGE_WELCOME)
 
@@ -369,6 +373,7 @@ class MainWindow(QMainWindow):
             ("Rafale : passer tout seul après 8 s", self.toggle_burst),
             ("-", None),
             ("Raccourcis et recherche…", self.show_help),
+            ("Journal des gels de l'interface", self.open_stall_log),
             ("Réanalyser tout le disque", self.refresh_root),
             ("Changer de racine…", self.choose_root),
         ])
@@ -611,6 +616,7 @@ class MainWindow(QMainWindow):
         self.wall.orientationChanged.connect(self.set_wall_orientation)
         self.wall.fullscreenRequested.connect(self.toggle_wall_fullscreen)
         self.wall.exitRequested.connect(lambda: self.toggle_wall_fullscreen(False))
+        self.wall.siblingRequested.connect(self.wall_sibling)
         self.wall_full = False
         self._wall_pinned: list = []
         self.viewer.addWidget(self.board)
@@ -1962,6 +1968,18 @@ class MainWindow(QMainWindow):
     def peek_hide(self) -> None:
         self.single.peek_end()
 
+    def open_stall_log(self) -> None:
+        """Ouvre le journal des gels : quand, combien de temps, et apres quoi."""
+        if not STALL_LOG.exists():
+            self.show_banner(
+                f"Aucun gel relevé depuis le début ({WATCH.stalls} au total "
+                "cette session). Le journal sera à : " + str(STALL_LOG), "done")
+            return
+        try:
+            os.startfile(str(STALL_LOG))
+        except OSError as exc:
+            self.show_banner(f"Journal illisible : {exc}", "error")
+
     def open_radial(self) -> None:
         """Clic droit : les destinations en rond autour de la souris."""
         item = self.current
@@ -2071,6 +2089,7 @@ class MainWindow(QMainWindow):
     def show_item(self, index: int) -> None:
         if not self.items:
             return
+        mark(f"show_item {index}")
         self.index = max(0, min(index, len(self.items) - 1))
         item = self.items[self.index]
         self._remember_item(item)
@@ -2606,16 +2625,66 @@ class MainWindow(QMainWindow):
                 found.append(key)
         return found, unknown
 
+    def wall_sibling(self, index: int, path: str) -> None:
+        """La suivante du meme dossier, dans ce panneau. Une lecture du dossier,
+        puis plus aucune : la liste est gardee pour la session."""
+        from .config import VIDEO_EXTS
+        folder = Path(path).parent
+        listing = self._siblings_cache.get(str(folder))
+        if listing is None:
+            mark(f"wall.sibling listing {folder}")
+            try:
+                listing = sorted(
+                    (entry.path for entry in os.scandir(folder)
+                     if entry.is_file()
+                     and entry.name[entry.name.rfind("."):].lower() in VIDEO_EXTS),
+                    key=str.lower)
+            except OSError:
+                listing = []
+            self._siblings_cache[str(folder)] = listing
+        if len(listing) < 2:
+            self.show_banner("C'est la seule vidéo de son dossier.", "quiet")
+            return
+        try:
+            at = listing.index(path)
+        except ValueError:
+            at = -1
+        mark("wall.play sibling")
+        self.wall.play_in(index, listing[(at + 1) % len(listing)])
+
     def show_wall(self) -> None:
         """Remplit le mur avec ce que l'on connaît de vertical."""
+        mark("show_wall")
+        # Le mur lit plusieurs videos a la fois : la recolte de vignettes et la
+        # preparation, qui occupent jusqu'a douze lectures du partage, lui
+        # laissent la ligne. La preparation reprend quand on quitte le mur.
+        self.preview.stop_harvest()
+        if self.backfill is not None:
+            self.backfill.pause()
         self.viewer.setCurrentWidget(self.wall)
         if self._wall_pinned:
             self.wall.set_pool(self._wall_pinned)
             self.wall.set_caption(len(self.wall.pool), pinned=True)
         else:
             pool, unknown = self.vertical_pool()
+            heavy = 0
+            if len(self.wall.panes) >= 4:
+                # A quatre panneaux et plus, chacun fait 300 pixels de large :
+                # une source 4K n'y apporte rien, et six decodages 4K a la fois
+                # mettent n'importe quel processeur a genoux — c'etait le gel
+                # de cinq minutes. On ecarte ce qu'on sait etre au-dela de
+                # 1080p ; l'inconnu reste.
+                light = []
+                for video in pool:
+                    info = INDEX.probe(video) or {}
+                    if max(info.get("width") or 0, info.get("height") or 0) > 1920:
+                        heavy += 1
+                    else:
+                        light.append(video)
+                if light:
+                    pool = light
             self.wall.set_pool(pool)
-            self.wall.set_caption(len(pool), unknown)
+            self.wall.set_caption(len(pool), unknown, heavy=heavy)
         self.item_title.setText(f"{len(self.wall.pool)} vidéo(s) pour le mur")
 
     def open_video_path(self, path: str) -> None:
@@ -2664,7 +2733,9 @@ class MainWindow(QMainWindow):
         self._show_counts()
         # Sans cela, l'onglet Videos ne beneficiait d'aucune preparation : il ne
         # passe par aucune analyse, et c'est elle seule qui lancait la recolte.
-        self.start_harvest()
+        # Un instant apres l'affichage, pas avant : l'onglet doit d'abord
+        # apparaitre, la recolte parcourt cent mille elements.
+        QTimer.singleShot(150, self.start_harvest)
 
     def set_tab(self, tab: str, reposition: bool = True) -> None:
         """Change de point de vue sans changer de collection.
@@ -2675,6 +2746,7 @@ class MainWindow(QMainWindow):
         """
         if tab not in TABS:
             return
+        mark(f"set_tab {tab}")
         # Recliquer l'onglet ou l'on est ramene chez soi : a la racine, sur les
         # vignettes. C'est le geste qu'on fait quand on s'est perdu en
         # descendant, et il ne faisait rien.
@@ -2700,6 +2772,12 @@ class MainWindow(QMainWindow):
                 self.toggle_wall_fullscreen(False)
             self.wall.stop()
             self._wall_pinned = []
+            if was == TAB_SPLIT:
+                # Recolte et preparation reprennent des qu'on quitte le mur.
+                if self.backfill is not None:
+                    self.backfill.resume()
+                if self.items:
+                    self.start_harvest()
         self._apply_selectors()
 
         if self.root is None:
@@ -2953,6 +3031,7 @@ class MainWindow(QMainWindow):
             return
         self.aside_index = position
         video = str(item.videos[0])
+        mark("open_aside")
         self.aside_title.setText(item.name)
         self.aside_title.setToolTip(str(item.path))
         self.aside.show()

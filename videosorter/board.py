@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QFrame, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from .perf import mark
 from .scan import MODE_FOLDERS, human_duration, human_resolution, human_size
 from .widgets import elide
 
@@ -812,6 +813,7 @@ class BoardView(QWidget):
         self._segment_start = int(card.ts * 1000)
         self._pending_seek = self._segment_start
         url = QUrl.fromLocalFile(card.video)
+        mark("board.play")
         self._awaiting_frame = True
         self._blackout = True
         self.blackout_timer.start()

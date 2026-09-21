@@ -1501,10 +1501,13 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(len(pool) == 2 + unknown, f"et l'inconnu est compté ({unknown})")
 
     window.set_tab(TAB_SPLIT)
-    pump(app, 0.6)
+    pump(app, 0.3)
     check(window.viewer.currentWidget() is window.wall, "l'onglet montre le mur")
+    # Les panneaux demarrent l'un apres l'autre : on attend le dernier.
+    expected = min(DEFAULT_PANES, len(pool))
+    wait_for(app, lambda: len([p for p in window.wall.panes if p.video_path]) >= expected, 10)
     playing = [p for p in window.wall.panes if p.video_path]
-    check(len(playing) == min(DEFAULT_PANES, len(pool)),
+    check(len(playing) == expected,
           f"un panneau par vidéo disponible ({len(playing)})")
     check(all(p.video_path in pool for p in playing),
           "et chacun lit une vidéo du vivier")
@@ -2138,6 +2141,65 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.1)
     window.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
     check(radial.isHidden(), "Échap le referme")
+
+    print("\n[65] Mur en douceur, suivante du dossier, chien de garde")
+    import time as _time
+    from videosorter import perf as _perf
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 60)
+    window._wall_pinned = [str(v) for v in sorted(root.rglob("*.mp4"))[:4]]
+    window.set_wall_count(4)
+    window.set_tab(TAB_SPLIT)
+    pump(app, 0.05)
+    started = [p for p in window.wall.panes if p.video_path]
+    check(len(started) <= 2, f"les panneaux ne partent pas tous d'un coup ({len(started)})")
+    check(wait_for(app, lambda: len([p for p in window.wall.panes if p.video_path]) == 4, 10),
+          "mais tous finissent par jouer")
+    check(window.preview.harvester is None or not window.preview.harvester.isRunning(),
+          "la récolte de vignettes s'est effacée devant le mur")
+    from videosorter.backfill import ThumbBackfill as _TB
+    fake = _TB(root, 320, True)
+    window.backfill = fake
+    window.show_wall()
+    check(fake.paused, "et la préparation se met en pause devant le mur")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+    check(not fake.paused, "puis reprend quand on le quitte")
+    window.backfill = None
+    fake.deleteLater()
+    window.set_tab(TAB_SPLIT)
+    pump(app, 0.2)
+    first = window.wall.panes[0].video_path
+    window.wall.panes[0]._sibling()
+    pump(app, 0.3)
+    after = window.wall.panes[0].video_path
+    check(after != first and Path(after).parent == Path(first).parent,
+          "▸ passe à la suivante du même dossier")
+    check(str(Path(first).parent) in window._siblings_cache, "et la liste du dossier est retenue")
+    window._wall_pinned = []
+    heavy_video = str(sorted(root.rglob("*.mp4"))[0])
+    INDEX.put_probe(heavy_video, "", {"duration": 8.0, "width": 2160, "height": 3840,
+                                      "codec": "hevc", "ok": True})
+    window.set_wall_orientation("any")
+    pump(app, 0.3)
+    check(heavy_video not in window.wall.pool and "1080p" in window.wall.caption.text(),
+          "à quatre panneaux, la 4K connue est écartée et la légende le dit")
+    window.set_wall_count(3)
+    window.set_wall_orientation("vertical")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+
+    # Le journal du test ne doit pas polluer celui de l'utilisateur.
+    _perf.LOG = base / "_appdata" / "gel.log"
+    before_stalls = _perf.WATCH.stalls
+    _perf.WATCH.mark("test.sleep")
+    _time.sleep(1.3)
+    pump(app, 0.6)
+    check(_perf.WATCH.stalls == before_stalls + 1 and _perf.WATCH.worst >= 1.0,
+          f"un gel de plus d'une seconde est relevé ({_perf.WATCH.worst:.1f} s)")
+    check(_perf.LOG.exists() and "test.sleep" in _perf.LOG.read_text(encoding="utf-8"),
+          "avec l'action qui le précédait, dans le journal")
 
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
