@@ -332,3 +332,56 @@ class TitleScan(QThread):
                     break
         self.progress.emit(seen, total)
         self.done.emit(seen, found)
+
+
+class SceneScan(QThread):
+    """Releve les changements de plan des videos qui n'en ont pas encore.
+
+    Quatre de front seulement : chaque relevé traverse le fichier, meme en ne
+    lisant que les images cles, et saturer le partage ferait tout ralentir.
+    """
+
+    WORKERS = 4
+    progress = Signal(int, int)      # faites, total
+    done = Signal(int, int)          # sondees, avec des plans
+
+    def __init__(self, root: Path, skip_hidden: bool = True, parent=None):
+        super().__init__(parent)
+        self.root = Path(root)
+        self.skip_hidden = skip_hidden
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def _one(self, video) -> int:
+        from .index import INDEX
+        from .media import scene_times
+        from .stamps import stamp_of
+        if self._stop:
+            return 0
+        times = scene_times(Path(video))
+        INDEX.put_scenes(video, stamp_of(str(video)) or "", times)
+        return 1 if times else 0
+
+    def run(self) -> None:
+        from .index import INDEX
+        todo = [video for video in walk_videos(self.root, self.skip_hidden)
+                if not INDEX.has_scenes(video)]
+        if self._stop:
+            return self.done.emit(0, 0)
+        total = len(todo)
+        seen = found = 0
+        last = 0.0
+        with ThreadPoolExecutor(max_workers=self.WORKERS) as pool:
+            for outcome in pool.map(self._one, todo):
+                seen += 1
+                found += outcome
+                now = time.monotonic()
+                if now - last >= 0.3:
+                    self.progress.emit(seen, total)
+                    last = now
+                if self._stop:
+                    break
+        self.progress.emit(seen, total)
+        self.done.emit(seen, found)

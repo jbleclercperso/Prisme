@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import shutil
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -79,6 +80,22 @@ def is_network_path(path) -> bool:
         return ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\") == DRIVE_REMOTE
     except (OSError, AttributeError, ValueError):
         return False
+
+
+def _run_err(cmd: list[str], timeout: int = 30) -> tuple:
+    """Comme `_run`, mais rend aussi la sortie d'erreur.
+
+    ffmpeg ecrit ce que `showinfo` releve sur la sortie d'erreur, pas sur la
+    sortie standard : sans elle, on ne verrait rien.
+    """
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            creationflags=NO_WINDOW, encoding="utf-8", errors="replace",
+        )
+        return proc.returncode, proc.stdout or "", proc.stderr or ""
+    except (OSError, subprocess.SubprocessError):
+        return 1, "", ""
 
 
 def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str]:
@@ -296,6 +313,65 @@ def build_contact_plan(videos: list, rows: int = CONTACT_ROWS,
     return plan
 
 
+# Au-dessus de ce seuil, ffmpeg considere que l'image a franchement change.
+# Trop bas, un mouvement de camera compte pour un plan ; trop haut, un film
+# entier n'en a que trois.
+SCENE_THRESHOLD = 0.28
+# On ne lit que les images cles : un changement de plan en est presque
+# toujours une, et le fichier se traverse alors dix fois plus vite. Sur un
+# partage reseau, c'est la difference entre quelques secondes et une minute.
+SCENE_ARGS = ["-skip_frame", "nokey"]
+_SCENE_TIME = re.compile(r"pts_time:([0-9.]+)")
+
+
+def scene_times(video: Path, timeout: int = 90) -> list:
+    """Les instants ou l'image change franchement, en secondes.
+
+    Les vignettes etaient prises a des fractions fixes — 20 %, 35 %, 50 %… —
+    ce qui donne une image noire sur une video qui commence par un fondu, et
+    cinq fois le meme plan sur une video statique. Ici l'on prend les plans
+    eux-memes.
+    """
+    if not Tools.ffmpeg:
+        return []
+    code, _out, err = _run_err([
+        Tools.ffmpeg, "-v", "info", "-nostdin"] + SCENE_ARGS + [
+        "-i", str(video), "-an", "-sn",
+        "-filter:v", f"select='gt(scene,{SCENE_THRESHOLD})',showinfo",
+        "-fps_mode", "vfr", "-f", "null", "-",
+    ], timeout=timeout)
+    if code != 0 and not err:
+        return []
+    times = []
+    for found in _SCENE_TIME.findall(err):
+        try:
+            value = float(found)
+        except ValueError:
+            continue
+        # Deux plans a moins d'une seconde ne donneront pas deux images
+        # differentes : on garde le premier.
+        if not times or value - times[-1] >= 1.0:
+            times.append(value)
+    return times
+
+
+def pick_moments(times: list, duration: float, count: int) -> list:
+    """Choisit `count` instants parmi les plans releves, bien repartis.
+
+    Prendre les premiers donnerait cinq fois le generique ; on les echelonne
+    donc sur toute la duree, en evitant les toutes premieres secondes qui ne
+    montrent souvent qu'un logo.
+    """
+    usable = [t for t in times if t >= 1.0
+              and (duration <= 0 or t <= duration - 0.5)]
+    if not usable:
+        return []
+    if len(usable) <= count:
+        return usable
+    step = len(usable) / float(count)
+    return [usable[min(len(usable) - 1, int(i * step))] for i in range(count)]
+
+
 def build_preview_plan(videos: list, count: int, page: int = 0,
                        one_per_video: bool = True, blind: bool = False) -> list:
     """Construit une page d'aperçus.
@@ -326,8 +402,26 @@ def build_preview_plan(videos: list, count: int, page: int = 0,
             for index in range(count)
         ]
 
+    # Les plans deja releves servent d'abord : c'est la seule facon d'avoir
+    # des images qui montrent quelque chose plutot que des fractions rondes.
+    if not one_per_video and INDEX.has_scenes(videos[0]):
+        info = INDEX.probe(videos[0]) or {}
+        duration = info.get("duration") or 0.0
+        moments = pick_moments(INDEX.scenes_of(videos[0]), duration, count)
+        if moments:
+            return [(str(videos[0]), ts, duration, info.get("height") or 0)
+                    for ts in moments]
+
     plan = []
     for index, (video, fraction) in enumerate(pairs):
+        if one_per_video and INDEX.has_scenes(video):
+            info = INDEX.probe(video) or {}
+            duration = info.get("duration") or 0.0
+            moments = pick_moments(INDEX.scenes_of(video), duration, 5)
+            if moments:
+                plan.append((str(video), moments[index % len(moments)],
+                             duration, info.get("height") or 0))
+                continue
         info = INDEX.probe(video)
         if info is None:
             if blind:

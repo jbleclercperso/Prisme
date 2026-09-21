@@ -2346,6 +2346,115 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     finally:
         _cfgmod._LOCAL, _cfgmod.APP_DIR = kept_local, kept_dir
 
+    print("\n[69] Recherche indulgente, plans repérés, base d'empreintes")
+    import subprocess as _sp2, time as _t2
+    from videosorter.query import (
+        available as _fuzzy_ok, describe as _desc, matches_text)
+    from videosorter.media import build_preview_plan, pick_moments, scene_times
+    from videosorter.dupes import SignatureScan, group_by_signature, signature
+
+    # -- 1. la recherche pardonne une lettre de travers ----------------------
+    check(matches_text("Video Montagne Ete.mp4", "~mongagne") is _fuzzy_ok(),
+          "« ~mongagne » trouve « Montagne » quand rapidfuzz est là")
+    check(not matches_text("Video Montagne Ete.mp4", "mongagne"),
+          "sans le signe, l'exact reste exact")
+    check(matches_text("Video Montagne Ete.mp4", "mongagne", True) is _fuzzy_ok(),
+          "et le repli global la retrouve")
+    check(not matches_text("Plage Soleil.mp4", "~mongagne"),
+          "mais il n'attrape pas n'importe quoi")
+    check(matches_text("Plage Hiver.mp4", "~plage -hiver") is False,
+          "les exclusions restent littérales")
+    check("peu près" in _desc("~plage"), "et l'à-peu-près se dit en clair")
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(audite / "lot", MODE_FLAT)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
+    window.toggle_board(True)
+    window.apply_filter("clpi", "")
+    pump(app, 0.3)
+    if _fuzzy_ok():
+        check(window._loose and len(window.items) >= 1,
+              f"rien d'exact : l'écran se remplit d'approchants ({len(window.items)})")
+        check("à peu près" in " ".join(window._active_filters()),
+              "et le dit dans les filtres actifs")
+    window.apply_filter("", "")
+    pump(app, 0.2)
+    check(not window._loose, "un nouveau réglage revient à l'exact")
+
+    # -- 3. les vignettes se posent sur des plans -----------------------------
+    shots = base / "plans"
+    shutil.rmtree(shots, ignore_errors=True)
+    shots.mkdir(parents=True)
+    cut = shots / "trois_plans.mp4"
+    _sp2.run([Tools.ffmpeg, "-y", "-v", "error",
+              "-f", "lavfi", "-i", "color=black:s=320x180:d=6",
+              "-f", "lavfi", "-i", "testsrc=s=320x180:d=6",
+              "-f", "lavfi", "-i", "color=white:s=320x180:d=6",
+              "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1[v]",
+              "-map", "[v]", "-pix_fmt", "yuv420p", "-g", "12", str(cut)],
+             check=True)
+    times = scene_times(cut)
+    check(len(times) >= 2, f"les changements de plan sont trouvés ({len(times)})")
+    chosen = pick_moments(times, 18.0, 3)
+    check(chosen and all(t >= 1.0 for t in chosen),
+          "les instants choisis évitent la première seconde")
+    check(pick_moments([], 18.0, 3) == [],
+          "sans plan connu, on retombe sur les fractions")
+    INDEX.put_scenes(cut, "s", times)
+    check(INDEX.has_scenes(cut) and INDEX.scenes_of(cut) == times,
+          "les plans sont retenus")
+    plan = build_preview_plan([cut], 3, 0, one_per_video=False)
+    check(all(entry[1] in times for entry in plan),
+          f"et le plan d'aperçus se pose dessus ({[round(e[1], 1) for e in plan]})")
+
+    # -- 2. la base d'empreintes, et son second passage immédiat --------------
+    marks = base / "sigs"
+    shutil.rmtree(marks, ignore_errors=True)
+    (marks / "lot").mkdir(parents=True)
+    model = next(iter(sorted(root.rglob("*.mp4"))))
+    shutil.copy2(model, marks / "lot" / "copie_a.mp4")
+    # Le meme film, reencode : autre taille, memes images.
+    _sp2.run([Tools.ffmpeg, "-y", "-v", "error", "-i", str(model), "-crf", "35",
+              "-pix_fmt", "yuv420p", str(marks / "lot" / "copie_b.mp4")], check=True)
+    _sp2.run([Tools.ffmpeg, "-y", "-v", "error", "-f", "lavfi",
+              "-i", "mandelbrot=size=320x180:rate=10", "-t", "20",
+              "-pix_fmt", "yuv420p", str(marks / "lot" / "autre.mp4")], check=True)
+
+    first = {}
+    marker = SignatureScan(marks, window.cfg["thumb_width"], True)
+    marker.done.connect(lambda seen, total: first.update(seen=seen, total=total))
+    marker.start()
+    check(wait_for(app, lambda: "seen" in first, 240), "le premier passage sonde")
+    check(first["seen"] == 3 and first["total"] == 3,
+          f"les trois vidéos ({first})")
+    check(len(INDEX.sig_of(marks / "lot" / "copie_a.mp4")) >= 2,
+          "chaque vidéo porte plusieurs empreintes")
+
+    second = {}
+    again = SignatureScan(marks, window.cfg["thumb_width"], True)
+    again.done.connect(lambda seen, total: second.update(seen=seen, total=total))
+    again.start()
+    check(wait_for(app, lambda: "seen" in second, 60), "le second passage tourne")
+    check(second["seen"] == 0 and second["total"] == 3,
+          f"et ne resonde rien — c'est tout l'intérêt de la base ({second})")
+
+    mine = [entry for entry in INDEX.all_sigs() if str(marks) in str(entry[0])]
+    groups = group_by_signature(mine)
+    names = [{path.name for path in group[1]} for group in groups]
+    check(names == [{"copie_a.mp4", "copie_b.mp4"}],
+          f"deux encodages du même film se retrouvent, l'autre non ({names})")
+
+    os.utime(marks / "lot" / "copie_a.mp4",
+             (_t2.time() + 120, _t2.time() + 120))
+    third = {}
+    once_more = SignatureScan(marks, window.cfg["thumb_width"], True)
+    once_more.done.connect(lambda seen, total: third.update(seen=seen))
+    once_more.start()
+    check(wait_for(app, lambda: "seen" in third, 180) and third["seen"] == 1,
+          f"une vidéo modifiée est resondée, elle seule ({third})")
+    INDEX.reopen(base / "_appdata" / "index.db")
+    check(len([e for e in INDEX.all_sigs() if str(marks) in str(e[0])]) == 3,
+          "et la base survit à une réouverture")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

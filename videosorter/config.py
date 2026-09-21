@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 APP_NAME = "Prisme"
@@ -29,8 +30,52 @@ def adopt_old_cache() -> str:
         return ""
     return str(old)
 CONFIG_PATH = APP_DIR / "config.json"
+def _chosen_cache() -> Path | None:
+    """Le cache designe ailleurs, s'il l'a ete.
+
+    Deux ordinateurs qui regardent le meme partage fabriquent exactement les
+    memes vignettes : leur nom ne depend que du chemin, de la taille et de la
+    date du fichier. Les mettre en commun evite au second de refaire le
+    travail du premier — et c'est le travail le plus long de tous.
+
+    Deux facons de le designer, dans cet ordre : la variable d'environnement
+    PRISME_CACHE, ou un fichier `prisme.cache` pose a cote du programme, qui
+    ne contient qu'un chemin. Un fichier plutot qu'un reglage dans
+    config.json : celui-ci vit deja dans le cache, et l'on ne peut pas y lire
+    ou il se trouve.
+    """
+    told = os.environ.get("PRISME_CACHE", "").strip()
+    if not told:
+        for folder in (Path(sys.argv[0]).resolve().parent, Path.cwd()):
+            note = folder / "prisme.cache"
+            try:
+                if note.is_file():
+                    told = note.read_text(encoding="utf-8").strip()
+                    if told:
+                        break
+            except OSError:
+                continue
+    if not told:
+        return None
+    try:
+        chosen = Path(told).expanduser()
+        chosen.mkdir(parents=True, exist_ok=True)
+        return chosen
+    except OSError:
+        return None
+
+
+SHARED_DIR = _chosen_cache()
+if SHARED_DIR is not None:
+    APP_DIR = SHARED_DIR
+
+# Les vignettes se partagent sans risque : ce sont des fichiers independants,
+# nommes par leur contenu. L'index, lui, est une base : deux ecritures en
+# meme temps par le reseau la fragiliseraient. Il reste donc chez chacun,
+# sauf demande expresse.
 THUMB_DIR = APP_DIR / "thumbs"
-INDEX_PATH = APP_DIR / "index.db"
+INDEX_PATH = (_LOCAL / APP_NAME / "index.db" if SHARED_DIR is not None
+              else APP_DIR / "index.db")
 # Anciens caches JSON, repris puis effaces par l'index au premier lancement.
 PROBE_CACHE_PATH = APP_DIR / "probe-cache.json"
 SCAN_CACHE_PATH = APP_DIR / "scan-cache.json"

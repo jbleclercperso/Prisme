@@ -57,6 +57,9 @@ SHORTCUTS = [
         ("⋯ → Rafale", "la suivante arrive toute seule après 8 s sans décision"),
         ("⋯ → Journal des gels", "quand l'interface s'est figée, combien de temps, après quoi"),
         ("⋯ → Analyser les titres", "lit le titre des métadonnées de chaque vidéo, pour les mots fréquents"),
+        ("⋯ → Repérer les plans", "les vignettes se posent sur des changements de plan, non sur des fractions"),
+        ("⋯ → Empreintes", "sonde ce qui manque ; ensuite les doublons sortent sans toucher au disque"),
+        ("⋯ → Où sont les vignettes", "leur dossier, et comment le partager avec un autre PC"),
         ("Mur : ▸  ⚄  ⤢", "la suivante du même dossier ; une autre n'importe où ; ouvrir"),
         ("Mur : clic droit sur un panneau", "ses neuf instants ; cliquer une case y va"),
     ]),
@@ -67,6 +70,7 @@ SEARCH_HELP = [
     ("plage or mer", "l'un ou l'autre suffit"),
     ("plage -hiver", "« plage », mais pas « hiver »"),
     ('"saison 2"', "l'expression exacte, espaces compris"),
+    ("~montagne", "à peu près : « mongagne » et « Montaigne » aussi"),
     ("⋯ → Enregistrer cette recherche", "la retrouver d'un clic, avec son tri et « Non vus »"),
 ]
 
@@ -130,7 +134,8 @@ class HelpDialog(QDialog):
         body.addWidget(search)
 
         note = QLabel(
-            "La casse et les accents sont ignorés : « Été » trouve « ete ».",
+            "La casse et les accents sont ignorés : « Été » trouve « ete ». "
+            "Quand rien d'exact ne sort, l'à-peu-près est tenté tout seul.",
             inner)
         note.setObjectName("helpIntro")
         note.setWordWrap(True)

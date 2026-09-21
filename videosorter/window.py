@@ -16,8 +16,10 @@ from PySide6.QtWidgets import (
 )
 
 from . import actions
-from .backfill import TitleScan, ThumbAudit, ThumbBackfill, VideoCount
-from .dupes import DuplicateScan, ImageDuplicateScan
+from .backfill import SceneScan, TitleScan, ThumbAudit, ThumbBackfill, VideoCount
+from .dupes import (
+    DuplicateScan, ImageDuplicateScan, SignatureScan, group_by_signature,
+)
 from .help import HelpDialog
 from .board import COLUMN_CHOICES, BoardView
 from .actions import ActionError, HistoryEntry
@@ -34,7 +36,7 @@ from .ratings import Ratings
 from .tagging import MIN_BUCKET, TagsThread, build_tag_items, top_words
 from .split import DEFAULT_PANES, SplitWall
 from .perf import LOG as STALL_LOG, WATCH, mark
-from .query import matches_text
+from .query import available as fuzzy_available, matches_text
 
 # Les tons du bandeau d'etat. Ils etaient ecrits en dur a chaque appel, avec
 # sept teintes pour quatre intentions.
@@ -199,7 +201,11 @@ class MainWindow(QMainWindow):
         self._tags_thread = None
         self._tags_key = None
         self.titles_scan = None
+        self.scene_scan = None
+        self.sig_scan = None
         self._resume_id = cfg["last_item"] or ""
+        # Vrai le temps d'un repli sur l'a-peu-pres, quand l'exact n'a rien rendu.
+        self._loose = False
         # Le compteur de session : combien de decisions, depuis quand.
         self._session_started = time.monotonic()
         self._decisions = 0
@@ -372,14 +378,18 @@ class MainWindow(QMainWindow):
             ("Compter les vidéos", self.count_videos),
             ("État des vignettes", self.audit_thumbs),
             ("Analyser les titres des métadonnées", self.scan_titles),
+            ("Repérer les plans (vignettes plus parlantes)", self.scan_scenes),
             ("Chercher les doublons (même taille)", self.find_duplicates),
             ("Chercher les doublons (même image)",
              lambda: self.find_duplicates(by_image=True)),
+            ("Empreintes : sonder ce qui manque", self.scan_signatures),
+            ("Doublons d'après les empreintes", self.duplicates_from_sigs),
             ("-", None),
             ("Rafale : passer tout seul après 8 s", self.toggle_burst),
             ("-", None),
             ("Raccourcis et recherche…", self.show_help),
             ("Journal des gels de l'interface", self.open_stall_log),
+            ("Où sont les vignettes…", self.show_cache_place),
             ("Réanalyser tout le disque", self.refresh_root),
             ("Changer de racine…", self.choose_root),
         ])
@@ -2048,6 +2058,36 @@ class MainWindow(QMainWindow):
     def peek_hide(self) -> None:
         self.single.peek_end()
 
+    def show_cache_place(self) -> None:
+        """Dit ou vit le cache, et comment le partager avec un autre PC."""
+        from .config import INDEX_PATH, SHARED_DIR, THUMB_DIR
+        try:
+            count = sum(len(files) for _d, _s, files in os.walk(THUMB_DIR))
+        except OSError:
+            count = 0
+        shared = ("Ce cache est partagé : il a été désigné par PRISME_CACHE "
+                  "ou par un fichier « prisme.cache » posé à côté du "
+                  "programme.\n\n"
+                  if SHARED_DIR is not None else
+                  "Ce cache est propre à cet ordinateur.\n\n")
+        QMessageBox.information(
+            self, "Où sont les vignettes",
+            f"Vignettes : {THUMB_DIR}\n"
+            f"({count} fichier(s))\n\n"
+            f"Index : {INDEX_PATH}\n\n"
+            + shared +
+            "Pour qu'un second ordinateur les réutilise au lieu de tout "
+            "refabriquer :\n"
+            "1. posez le dossier des vignettes sur le partage, par exemple "
+            "X:\\_prisme ;\n"
+            "2. à côté du programme, créez un fichier « prisme.cache » "
+            "contenant ce seul chemin ;\n"
+            "3. lancez Prisme sur les deux machines.\n\n"
+            "Le nom d'une vignette ne dépend que du chemin, de la taille et "
+            "de la date de la vidéo : les deux machines fabriquent donc "
+            "exactement les mêmes, à condition que le partage porte la même "
+            "lettre de lecteur des deux côtés.")
+
     def open_stall_log(self) -> None:
         """Ouvre le journal des gels : quand, combien de temps, et apres quoi."""
         if not STALL_LOG.exists():
@@ -2688,7 +2728,8 @@ class MainWindow(QMainWindow):
         active = []
         query = (self.criteria or {}).get("include", self.cfg["filter_include"])
         if query:
-            active.append(f"recherche « {query} »")
+            active.append(f"recherche « {query} »"
+                          + (" — à peu près" if self._loose else ""))
         if self.cfg["only_unseen"]:
             active.append("non vus seulement")
         chosen = self.controls.orientations()
@@ -3036,6 +3077,98 @@ class MainWindow(QMainWindow):
         self._tags_thread = None
         if self.tab == TAB_TAGS and self.tag_family != "mine" and not self.scanning:
             self._add_tag_items()
+
+    def scan_signatures(self) -> None:
+        """Remplit la base d'empreintes — seulement ce qui n'y est pas encore.
+
+        Quatre images par video, retenues avec sa taille et sa date. Le
+        premier passage coute ; ensuite, ajouter mille videos ne demande que
+        de sonder ces mille-la, et la recherche de doublons devient immediate.
+        """
+        if self.sig_scan is not None:
+            self.sig_scan.stop()
+            self.show_banner("Empreintes : arrêt demandé…", "quiet")
+            return
+        if self.root is None:
+            return
+        top = self.top_root()
+        self.sig_scan = SignatureScan(top, self.cfg["thumb_width"],
+                                      self.cfg["skip_hidden"], self)
+        self.sig_scan.progress.connect(
+            lambda done, total: self._refresh_state(
+                f"empreintes {self._thousands(done)} / {self._thousands(total)}"))
+        self.sig_scan.done.connect(self._told_sigs)
+        self.sig_scan.start()
+        self.show_banner(
+            f"Empreintes sous {top} : seules les vidéos nouvelles ou modifiées "
+            "sont sondées. Recliquer arrête.", "info")
+
+    def _told_sigs(self, seen: int, total: int) -> None:
+        self.sig_scan = None
+        self._refresh_state()
+        self.show_banner(
+            f"Empreintes : {seen} vidéo(s) sondée(s) cette fois, "
+            f"{total} dans la base. « Doublons d'après les empreintes » est "
+            "désormais immédiat.", "done")
+
+    def duplicates_from_sigs(self) -> None:
+        """Compare les empreintes deja en base. Aucun acces au disque."""
+        entries = INDEX.all_sigs()
+        if not entries:
+            self.show_banner(
+                "La base d'empreintes est vide : lancez d'abord "
+                "« Empreintes : sonder ce qui manque ».", "quiet")
+            return
+        top = str(self.top_root() or "")
+        here = [entry for entry in entries
+                if not top or str(entry[0]).startswith(top)]
+        if not here:
+            self.show_banner(
+                f"Aucune empreinte sous {top} — sondez d'abord cette racine.",
+                "quiet")
+            return
+        self._dupes_by_image = True
+        self.show_banner(
+            f"Comparaison de {len(here)} empreinte(s)…", "info")
+        QApplication.processEvents()
+        self.on_dupes_found(group_by_signature(here))
+
+    def scan_scenes(self) -> None:
+        """Releve les changements de plan sous la racine, en fond.
+
+        Les vignettes cessent alors d'etre prises a des fractions rondes : on
+        prend les plans eux-memes, et une video qui commence par du noir ne
+        montre plus du noir.
+        """
+        if self.scene_scan is not None:
+            self.scene_scan.stop()
+            self.show_banner("Repérage des plans : arrêt demandé…", "quiet")
+            return
+        if self.root is None:
+            return
+        top = self.top_root()
+        self.scene_scan = SceneScan(top, self.cfg["skip_hidden"], self)
+        self.scene_scan.progress.connect(
+            lambda done, total: self._refresh_state(
+                f"plans {self._thousands(done)} / {self._thousands(total)}"))
+        self.scene_scan.done.connect(self._told_scenes)
+        self.scene_scan.start()
+        self.show_banner(
+            f"Repérage des plans sous {top}. Chaque vidéo est traversée une "
+            "fois, images clés seulement ; rien n'est redemandé ensuite. "
+            "Recliquer arrête.", "info")
+
+    def _told_scenes(self, seen: int, found: int) -> None:
+        self.scene_scan = None
+        self.plans = {}
+        self._refresh_state()
+        self.show_banner(
+            f"Plans : {seen} vidéo(s) parcourue(s), {found} avec des "
+            "changements de plan. Les vignettes s'y posent désormais.", "done")
+        if not self.browsing and self.current is not None:
+            self.show_item(self.index)
+        elif self.browsing:
+            self.refresh_board()
 
     def scan_titles(self) -> None:
         """Lit le titre des metadonnees de toute la collection, en fond."""
@@ -3672,7 +3805,7 @@ class MainWindow(QMainWindow):
         # -hiver », « plage or mer », « "saison 2" ». C'est ce qui a permis de
         # retirer la barre de filtres sans rien perdre.
         query = rules.get("include", self.cfg["filter_include"])
-        if query and not matches_text(item.name, query):
+        if query and not matches_text(item.name, query, self._loose):
             return False
         exclude = self._terms(rules.get("exclude", self.cfg["filter_exclude"]))
         if exclude and any(term in item.name.lower() for term in exclude):
@@ -3743,6 +3876,7 @@ class MainWindow(QMainWindow):
 
     def _on_controls_changed(self) -> None:
         """Un reglage a bouge : on refiltre, puis on reclasse."""
+        self._loose = False
         rules = self.controls.criteria()
         self.criteria = rules
         self.cfg["orientations"] = list(rules.get("orientations") or [])
@@ -3753,7 +3887,33 @@ class MainWindow(QMainWindow):
         self.cfg.save()
         self.apply_filter(rules["include"], rules["exclude"])
 
+    def _retry_loosely(self) -> bool:
+        """Rien d'exact : on retente a peu pres, et on le dit.
+
+        Une lettre de travers ne doit pas rendre un ecran vide quand il y a
+        cent mille fichiers derriere, dont beaucoup sont mal nommes.
+        """
+        query = (self.criteria or {}).get("include", self.cfg["filter_include"])
+        if self._loose or not query or not self.all_items:
+            return False
+        self._loose = True
+        found = [item for item in self.all_items if self._matches(item)]
+        if not found:
+            self._loose = False
+            return False
+        self.items = found
+        self.show_banner(
+            f"Rien d'exact pour « {query} » — voici les {len(found)} "
+            "résultat(s) approchants." + ("" if fuzzy_available() else
+            " (installez rapidfuzz pour de meilleurs rapprochements)"),
+            "quiet")
+        return True
+
     def apply_filter(self, include: str, exclude: str) -> None:
+        # Toute nouvelle recherche repart de l'exact : sans cela, un repli
+        # sur l'a-peu-pres restait en vigueur pour les suivantes, sans que
+        # rien ne le dise.
+        self._loose = False
         self.cfg["filter_include"] = include
         self.cfg["filter_exclude"] = exclude
         # Les criteres sont la seule source consultee par _matches : les laisser
@@ -3765,6 +3925,8 @@ class MainWindow(QMainWindow):
 
         current = self.current
         self.items = [item for item in self.all_items if self._matches(item)]
+        if not self.items:
+            self._retry_loosely()
         self.apply_sort()
         self._show_counts()
 

@@ -18,6 +18,8 @@ import os
 import time
 from pathlib import Path
 
+from concurrent.futures import ThreadPoolExecutor
+
 from PySide6.QtCore import QThread, Signal
 
 from .config import VIDEO_EXTS
@@ -245,3 +247,211 @@ class ImageDuplicateScan(QThread):
                     last = now
         self.progress.emit(seen)
         self.found.emit([] if self._stop else group_by_look(entries))
+
+
+# ---------------------------------------------------------------------------
+# L'empreinte d'une video : plusieurs images, retenues une fois pour toutes
+# ---------------------------------------------------------------------------
+
+# Quatre images valent bien mieux qu'une : deux encodages du meme film ont
+# rarement la meme premiere image — generique, logo, recadrage — mais se
+# suivent ensuite. Huit n'apportaient presque rien et coutaient le double.
+SHOTS = 4
+# Deux images se ressemblent en dessous de cette distance.
+CLOSE = 6
+# Et deux videos sont un doublon si au moins tant de leurs images concordent.
+AGREE = 2
+
+
+def walk_stamped(root: Path, skip_hidden: bool = True):
+    """(chemin, taille, date) de chaque video. L'enumeration les donne toutes
+    les trois sans une seule lecture de plus."""
+    stack = [str(root)]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if not (skip_hidden and _is_hidden(entry)):
+                        stack.append(entry.path)
+                    continue
+                if skip_hidden and _is_hidden(entry):
+                    continue
+                dot = entry.name.rfind(".")
+                if dot <= 0 or entry.name[dot:].lower() not in VIDEO_EXTS:
+                    continue
+                stat = entry.stat(follow_symlinks=False)
+                yield Path(entry.path), stat.st_size, stat.st_mtime
+            except OSError:
+                continue
+
+
+def signature(video, width: int, shots: int = SHOTS) -> list:
+    """Les empreintes de `shots` images de cette video.
+
+    Les instants viennent des changements de plan quand ils sont connus —
+    c'est le releve des plans qui les donne — sinon de fractions echelonnees.
+    Les images passent par le cache de vignettes : ce qui a deja ete extrait
+    ne l'est pas deux fois, et la deuxieme recherche de doublons ne coute
+    presque rien.
+    """
+    from .index import INDEX
+    from .media import extract_thumb, pick_moments, probe
+
+    video = Path(video)
+    # Sans la duree, les quatre instants tombent tous a zero et l'empreinte
+    # ne vaut plus rien : on sonde la video si on ne la connait pas encore.
+    # Un ffprobe de plus au premier passage, jamais aux suivants.
+    info = INDEX.probe(video)
+    if not info:
+        info = probe(video) or {}
+    duration = info.get("duration") or 0.0
+    moments = pick_moments(INDEX.scenes_of(video), duration, shots)
+    if not moments:
+        if duration > 2:
+            moments = [duration * (index + 1) / (shots + 1) for index in range(shots)]
+        else:
+            moments = [0.0]
+    found = []
+    for ts in moments:
+        try:
+            image = extract_thumb(video, ts, width)
+        except OSError:
+            continue
+        if image is None:
+            continue
+        value = dhash(image)
+        if value is not None:
+            found.append(value)
+    return found
+
+
+def _near(left: list, right: list, close: int = CLOSE) -> int:
+    """Combien d'images de l'une trouvent une semblable dans l'autre."""
+    agreed = 0
+    for value in left:
+        if any(bin(value ^ other).count("1") <= close for other in right):
+            agreed += 1
+    return agreed
+
+
+def group_by_signature(entries: list, close: int = CLOSE,
+                       agree: int = AGREE) -> list:
+    """Groupes de videos qui se ressemblent. `entries` : (chemin, empreintes, taille).
+
+    Cent mille empreintes ne se comparent pas deux a deux. Chaque image est
+    rangee par tranches de huit bits : deux images proches partagent
+    forcement une tranche, donc se croisent dans un meme casier, et l'on ne
+    compare que ce qui s'y trouve.
+    """
+    buckets: dict = {}
+    for index, (_path, values, _size) in enumerate(entries):
+        for value in values:
+            for chunk in range(8):
+                buckets.setdefault((chunk, (value >> (chunk * 8)) & 0xFF),
+                                   set()).add(index)
+    parent = list(range(len(entries)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    tried = set()
+    for members in buckets.values():
+        if len(members) < 2 or len(members) > 400:
+            continue
+        ordered = sorted(members)
+        for at, a in enumerate(ordered):
+            for b in ordered[at + 1:]:
+                if (a, b) in tried:
+                    continue
+                tried.add((a, b))
+                # Une video dont on n'a tire qu'une image ne peut pas en
+                # accorder deux : on n'exige jamais plus qu'elle ne porte.
+                want = min(agree, len(entries[a][1]), len(entries[b][1]))
+                if want and _near(entries[a][1], entries[b][1], close) >= want:
+                    ra, rb = find(a), find(b)
+                    if ra != rb:
+                        parent[ra] = rb
+    groups: dict = {}
+    for index in range(len(entries)):
+        groups.setdefault(find(index), []).append(index)
+    out = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        paths = sorted((Path(entries[i][0]) for i in members),
+                       key=lambda p: str(p).lower())
+        out.append((max(entries[i][2] for i in members), paths))
+    out.sort(key=lambda group: group[0], reverse=True)
+    return out
+
+
+class SignatureScan(QThread):
+    """Remplit la base d'empreintes — seulement ce qui manque.
+
+    Le premier passage coute : quatre images par video. Les suivants sont
+    immediats, puisque chaque empreinte est retenue avec la taille et la date
+    du fichier : seules les videos nouvelles, ou modifiees, sont a sonder.
+    """
+
+    WORKERS = 6
+    progress = Signal(int, int)      # faites, total
+    done = Signal(int, int)          # sondees, dans la base
+
+    def __init__(self, root: Path, width: int, skip_hidden: bool = True,
+                 parent=None):
+        super().__init__(parent)
+        self.root = Path(root)
+        self.width = width
+        self.skip_hidden = skip_hidden
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def _one(self, pair) -> int:
+        from .index import INDEX
+        video, size, stamp = pair
+        if self._stop:
+            return 0
+        values = signature(video, self.width)
+        INDEX.put_sig(video, stamp, values, size)
+        return 1 if values else 0
+
+    def run(self) -> None:
+        from .index import INDEX
+        from .stamps import remember
+        todo = []
+        known = 0
+        for video in walk_stamped(self.root, self.skip_hidden):
+            if self._stop:
+                break
+            path, size, mtime = video
+            remember(str(path), size, mtime)
+            stamp = f"{int(mtime)}|{size}"
+            if INDEX.sig_fresh(path, stamp):
+                known += 1
+                continue
+            todo.append((path, size, stamp))
+        total = len(todo)
+        seen = 0
+        last = 0.0
+        if total:
+            with ThreadPoolExecutor(max_workers=self.WORKERS) as pool:
+                for _outcome in pool.map(self._one, todo):
+                    seen += 1
+                    now = time.monotonic()
+                    if now - last >= 0.3:
+                        self.progress.emit(seen, total)
+                        last = now
+                    if self._stop:
+                        break
+        self.progress.emit(seen, total)
+        self.done.emit(seen, known + seen)

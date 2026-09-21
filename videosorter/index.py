@@ -60,6 +60,17 @@ CREATE TABLE IF NOT EXISTS listings(
     stamp REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (root, mode)
 );
+CREATE TABLE IF NOT EXISTS sigs(
+    path   TEXT PRIMARY KEY,
+    stamp  TEXT NOT NULL DEFAULT '',
+    hashes TEXT NOT NULL DEFAULT '',
+    size   INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS scenes(
+    path   TEXT PRIMARY KEY,
+    stamp  TEXT NOT NULL DEFAULT '',
+    times  TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS titles(
     path  TEXT PRIMARY KEY,
     stamp TEXT NOT NULL DEFAULT '',
@@ -138,6 +149,8 @@ class Index:
         self._load_probes()
         self._load_seen()
         self._load_titles()
+        self._load_scenes()
+        self._load_sigs()
         self._migrate_json()
 
     def _sound(self) -> bool:
@@ -178,6 +191,104 @@ class Index:
             self.rebuilt = True
         except sqlite3.Error:
             self.db = None
+
+    def _load_sigs(self) -> None:
+        """Toutes les empreintes connues, en memoire : c'est sur elles que la
+        recherche de doublons travaille, sans toucher au disque."""
+        self.sigs: dict = {}
+        if self.db is None:
+            return
+        try:
+            rows = self.db.execute(
+                "SELECT path, stamp, hashes, size FROM sigs").fetchall()
+        except sqlite3.Error:
+            return
+        for path, stamp, hashes, size in rows:
+            try:
+                values = [int(x, 16) for x in hashes.split(",") if x]
+            except ValueError:
+                continue
+            self.sigs[path] = (stamp, values, size)
+
+    def put_sig(self, path, stamp: str, hashes: list, size: int) -> None:
+        """L'empreinte d'une video. Une liste vide vaut « essaye, rien
+        d'exploitable » : on ne la recalculera pas tant qu'elle ne change pas."""
+        key = str(path)
+        self.sigs[key] = (stamp or "", list(hashes), int(size or 0))
+        if self.db is None:
+            return
+        with self.lock:
+            try:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO sigs(path, stamp, hashes, size)"
+                    " VALUES (?,?,?,?)",
+                    (key, stamp or "", ",".join(f"{h:016x}" for h in hashes),
+                     int(size or 0)))
+                self.db.commit()
+            except sqlite3.Error:
+                pass
+
+    def sig_fresh(self, path, stamp: str) -> bool:
+        """Vrai si l'empreinte connue vaut encore pour ce fichier.
+
+        C'est ce qui rend le second passage immediat : seules les videos
+        nouvelles, ou modifiees depuis, sont a sonder.
+        """
+        found = self.sigs.get(str(path))
+        return found is not None and (not stamp or found[0] == stamp)
+
+    def sig_of(self, path) -> list:
+        found = self.sigs.get(str(path))
+        return list(found[1]) if found else []
+
+    def all_sigs(self) -> list:
+        """(chemin, empreintes, taille) de tout ce qui est connu."""
+        return [(path, values, size)
+                for path, (_stamp, values, size) in self.sigs.items() if values]
+
+    def forget_sig(self, path) -> None:
+        key = str(path)
+        self.sigs.pop(key, None)
+        if self.db is None:
+            return
+        with self.lock:
+            try:
+                self.db.execute("DELETE FROM sigs WHERE path = ?", (key,))
+                self.db.commit()
+            except sqlite3.Error:
+                pass
+
+    def _load_scenes(self) -> None:
+        self.scenes: dict = {}
+        if self.db is None:
+            return
+        try:
+            for path, times in self.db.execute("SELECT path, times FROM scenes"):
+                self.scenes[path] = [float(x) for x in times.split(",") if x]
+        except (sqlite3.Error, ValueError):
+            pass
+
+    def put_scenes(self, path, stamp: str, times: list) -> None:
+        """Les changements de plan releves. Une liste vide vaut « cherche, rien
+        trouve » : on ne redemandera pas."""
+        key = str(path)
+        self.scenes[key] = list(times)
+        if self.db is None:
+            return
+        with self.lock:
+            try:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO scenes(path, stamp, times) VALUES (?,?,?)",
+                    (key, stamp or "", ",".join(f"{t:.2f}" for t in times)))
+                self.db.commit()
+            except sqlite3.Error:
+                pass
+
+    def has_scenes(self, path) -> bool:
+        return str(path) in self.scenes
+
+    def scenes_of(self, path) -> list:
+        return self.scenes.get(str(path), [])
 
     def _load_titles(self) -> None:
         self.titles: dict = {}
@@ -578,6 +689,8 @@ class Index:
         self._load_probes()
         self._load_seen()
         self._load_titles()
+        self._load_scenes()
+        self._load_sigs()
         if migrate:
             self._migrate_json()
 
