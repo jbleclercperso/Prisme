@@ -423,16 +423,6 @@ class PreviewGrid(QWidget):
         for tile in self.tiles:
             tile.strip_mode = contact
 
-    def set_contact(self, contact: bool) -> None:
-        """En planche contact, chaque case annonce son instant, pas son rang.
-
-        Une planche doit se lire comme une planche : cinq cases d'une meme
-        video, chacune disant a quelle seconde elle a ete prise. Numerotees de
-        un a vingt, elles passaient pour vingt videos.
-        """
-        for tile in self.tiles:
-            tile.strip_mode = contact
-
     def set_plan(self, plan: list) -> None:
         self.set_visible_count(len(plan))
         for slot, tile in enumerate(self.tiles):

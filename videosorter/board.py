@@ -155,6 +155,7 @@ class BoardCard(QFrame):
         self.item = item
         self.video = ""
         self._pixmap = None
+        self._scaled_for = None
         self._resolution = ""
         self.image.setPixmap(QPixmap())
         self.image.setText("…")
@@ -218,6 +219,13 @@ class BoardCard(QFrame):
     def _rescale(self) -> None:
         if self._pixmap is None:
             return
+        # Un lissage par carte et par taille, pas un par evenement : la meme
+        # image etait relissee deux fois a chaque re-mise en page, pour
+        # trente cartes, et la planche s'en ressentait a chaque onglet.
+        wanted = (self.image.width(), self.image.height(), id(self._pixmap))
+        if wanted == self._scaled_for:
+            return
+        self._scaled_for = wanted
         self.image.setPixmap(self._pixmap.scaled(
             self.image.width(), self.image.height(),
             Qt.KeepAspectRatio, Qt.SmoothTransformation,
@@ -367,6 +375,11 @@ class BoardView(QWidget):
         # fallait viser le titre.
         self.video.mouseReleaseEvent = self._video_clicked
 
+        self.dwell_timer = QTimer(self)
+        self.dwell_timer.setSingleShot(True)
+        self.dwell_timer.setInterval(140)
+        self.dwell_timer.timeout.connect(self._dwell_elapsed)
+        self._dwell_target = -1
         self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(80)
         self.hover_timer.timeout.connect(self._poll_hover)
@@ -669,7 +682,16 @@ class BoardView(QWidget):
             self.stop()
             return
         self.cards[found].set_hovered(True)
-        self._play(found)
+        # Traverser la planche ne doit pas charger une video par carte
+        # croisee : on attend que la souris se pose. Le lecteur ne part que
+        # si elle est encore sur la meme carte apres ce court delai.
+        self._dwell_target = found
+        self.dwell_timer.start()
+
+    def _dwell_elapsed(self) -> None:
+        found = self._dwell_target
+        if found != -1 and found == self.hovered and found < len(self.cards):
+            self._play(found)
 
     def _blank(self) -> None:
         """Cache l'apercu et efface ce qu'il restait de l'image precedente."""

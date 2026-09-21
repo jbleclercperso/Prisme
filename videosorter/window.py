@@ -181,6 +181,7 @@ class MainWindow(QMainWindow):
         self.trash.changed.connect(self.on_trash_changed)
 
         self.transfers = TransferQueue(self)
+        self._commands_signature = None
         self.transfers.finished.connect(self.on_transfer_finished)
         self.transfers.changed.connect(self.on_transfers_changed)
 
@@ -1634,6 +1635,18 @@ class MainWindow(QMainWindow):
             self.cfg["last_item"] = item.item_id
             self.cfg["root"] = str(self.root) if self.root else ""
 
+    def _rebuild_commands(self, force: bool = False) -> None:
+        """Refait la barre des touches seulement quand elle a change.
+
+        Elle etait recreee a chaque video : une quinzaine de widgets detruits
+        et reconstruits par fleche, pour afficher exactement la meme chose.
+        """
+        label = DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer")
+        signature = (repr(self.cfg.destinations), label)
+        if force or signature != self._commands_signature:
+            self._commands_signature = signature
+            self.commands.rebuild(self.cfg.destinations, label)
+
     def show_item(self, index: int) -> None:
         if not self.items:
             return
@@ -1641,9 +1654,7 @@ class MainWindow(QMainWindow):
         item = self.items[self.index]
         self._remember_item(item)
         self.update_counter()
-        self.commands.rebuild(
-            self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer")
-        )
+        self._rebuild_commands()
 
         self._describe(item)
 
@@ -1955,6 +1966,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
+    def _hush_players(self) -> None:
+        """Arrete ce qui joue, sans rien attendre ni rien decharger."""
+        for player in (self.grid.player, self.single.player,
+                       self.board.player, self.aside_player.player):
+            player.stop()
+        self.grid.video.hide()
+        self.board.video.hide()
+
     def _release_media(self) -> None:
         """Relâche tous les handles sur les fichiers avant une opération disque.
 
@@ -2135,7 +2154,11 @@ class MainWindow(QMainWindow):
         self.cfg["content"] = self.content
         self.cfg["view"] = self.view
         self.cfg.save()
-        self._release_media()
+        # On ne deplace aucun fichier ici : inutile de relacher les verrous,
+        # et surtout d'attendre les ffmpeg en cours. `_release_media` bloquait
+        # le fil de l'interface jusqu'a 1,2 s a chaque onglet — c'etait la
+        # lenteur qu'on sentait sous le doigt.
+        self._hush_players()
         if tab != TAB_SPLIT:
             self.wall.stop()
         self._apply_selectors()
