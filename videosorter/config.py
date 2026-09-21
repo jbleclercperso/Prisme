@@ -61,6 +61,7 @@ DEFAULTS = {
     "tags": [],
     "last_item": "",             # dernier element regarde, pour y revenir
     "only_unseen": False,        # ne montrer que ce qui reste a voir
+    "searches": [],              # recherches enregistrees : nom, requete, tri, non-vus, onglet
     "burst": False,              # rafale : passer tout seul apres quelques secondes
     "wall_panes": 3,             # panneaux du mur
     "wall_orientation": "vertical",  # ce qu'il y pioche : vertical | horizontal | any

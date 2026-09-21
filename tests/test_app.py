@@ -1887,6 +1887,179 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.cfg["tab"] = TAB_FOLDERS
     window.cfg.save()
 
+    print("\n[62] Mur, peek, scrub, non-vus, rafale, recherches, doublons par image")
+    import subprocess as _sp
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent
+    from PySide6.QtMultimedia import QMediaPlayer as _QMP
+    from PySide6.QtWidgets import QInputDialog
+    from videosorter.dupes import ImageDuplicateScan, dhash, group_by_look
+    from videosorter.split import grid_for
+    from videosorter.index import INDEX
+    from videosorter.backfill import ThumbBackfill
+
+    # -- le mur : grille, nombre, orientation, plein ecran --------------------
+    check(grid_for(3, "vertical") == (1, 3) and grid_for(6, "vertical") == (2, 3),
+          "verticales : une ligne jusqu'à cinq")
+    check(grid_for(9, "any") == (3, 3) and grid_for(10, "horizontal") == (2, 5),
+          "horizontales : le carré, ou presque")
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 4, 60)
+    window.set_tab(TAB_SPLIT)
+    pump(app, 0.3)
+    check(len(window.wall.panes) == 3, "le mur arrive avec trois panneaux")
+    window.set_wall_count(6)
+    pump(app, 0.2)
+    check(len(window.wall.panes) == 6 and window.cfg["wall_panes"] == 6,
+          "six panneaux, et c'est retenu")
+    window.set_wall_orientation("any")
+    pump(app, 0.3)
+    check(len(window.wall.pool) >= 4, f"« Toutes » : le vivier prend tout ({len(window.wall.pool)})")
+    window.toggle_wall_fullscreen()
+    pump(app, 0.4)
+    check(window.wall_full and window.tabs.isHidden() and window.wall.controls.isHidden()
+          and window.wall.panes[0].bar.isHidden(), "plein écran : plus rien autour")
+    window.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+    pump(app, 0.4)
+    check(not window.wall_full and not window.tabs.isHidden(), "Échap : tout revient")
+    window.set_wall_count(3)
+    window.set_wall_orientation("vertical")
+
+    # -- la fiche : peek, scrub, compteur, non-vus, rafale ----------------------
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(audite / "lot", MODE_FLAT)
+    check(wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60),
+          "trois clips à plat")
+    window.toggle_board(False)
+    pump(app, 0.3)
+    sp = window.single
+    window.show_item(0)
+    pump(app, 0.3)
+    window.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Shift, Qt.ShiftModifier))
+    pump(app, 0.1)
+    check(sp.peeking and not sp.peek.isHidden(), "Maj enfoncée : la mosaïque est là")
+    check(sp.peek.cells[0].caption.text().startswith("6"),
+          f"les cases portent les destinations ({sp.peek.cells[0].caption.text()!r})")
+    peek_key = f"peek@{window.current.item_id}"
+    check(wait_for(app, lambda: len(window.peek_thumbs.get(peek_key, {})) == 9, 60),
+          "neuf images arrivent")
+    window.keyReleaseEvent(QKeyEvent(QEvent.KeyRelease, Qt.Key_Shift, Qt.NoModifier))
+    pump(app, 0.1)
+    check(not sp.peeking and sp.peek.isHidden(), "Maj relâchée : elle disparaît")
+
+    check(wait_for(app, lambda: sp.player.duration() > 0, 30), "durée connue")
+    duration = sp.player.duration()
+    width = sp.video_area.width()
+
+    def _mouse(kind, x, buttons=Qt.LeftButton):
+        return QMouseEvent(kind, QPointF(x, 50), QPointF(x, 50), Qt.LeftButton,
+                           buttons, Qt.NoModifier)
+    sp.player.setPosition(0)
+    pump(app, 0.2)
+    sp._scrub_press(_mouse(QEvent.MouseButtonPress, 100))
+    sp._scrub_move(_mouse(QEvent.MouseMove, 100 + width // 2))
+    pump(app, 0.3)
+    check(abs(sp.player.position() - duration // 2) < duration * 0.15,
+          f"glisser d'une demi-largeur = une demi-durée ({sp.player.position()} / {duration})")
+    sp._scrub_release(_mouse(QEvent.MouseButtonRelease, 100 + width // 2, Qt.NoButton))
+    sp._scrub_press(_mouse(QEvent.MouseButtonPress, 100))
+    sp._scrub_release(_mouse(QEvent.MouseButtonRelease, 101, Qt.NoButton))
+    pump(app, 0.2)
+    check(sp.player.playbackState() == _QMP.PlaybackState.PausedState, "un clic met en pause")
+    sp.toggle_pause()
+
+    decisions = window._decisions
+    window.act_skip()
+    pump(app, 0.2)
+    check(window._decisions == decisions + 1 and "/min" in window.controls.count.text(),
+          "une décision compte, et la ligne le dit")
+
+    before = len(window.items)
+    seen_id = window.items[-1].item_id
+    INDEX.mark_seen(seen_id)
+    window.set_only_unseen(True)
+    pump(app, 0.2)
+    check(len(window.items) == before - 2,
+          f"« Non vus » écarte le passé et le vu ({len(window.items)} sur {before})")
+    window.set_only_unseen(False)
+    pump(app, 0.2)
+    check(len(window.items) == before and INDEX.is_seen(seen_id), "et tout revient")
+
+    window.burst_timer.setInterval(300)
+    window.toggle_burst()
+    window.show_item(0)
+    pump(app, 0.45)
+    check(window.index == 1, f"rafale : la suivante arrive toute seule ({window.index})")
+    window.toggle_burst()
+
+    # -- recherches enregistrees -------------------------------------------------
+    kept_text, kept_item = QInputDialog.getText, QInputDialog.getItem
+    QInputDialog.getText = staticmethod(lambda *a, **k: ("Mes clips", True))
+    QInputDialog.getItem = staticmethod(lambda *a, **k: ("Mes clips", True))
+    window.controls.include.setText("clip")
+    window.on_controls_changed()
+    window.set_only_unseen(True)
+    window.save_search()
+    saved = window.cfg["searches"]
+    check(len(saved) == 1 and saved[0]["query"] == "clip" and saved[0]["unseen"],
+          "la recherche s'enregistre avec sa requête et « Non vus »")
+    window.controls.include.setText("")
+    window.on_controls_changed()
+    window.set_only_unseen(False)
+    window.apply_search(saved[0])
+    pump(app, 0.3)
+    check(window.controls.include.text() == "clip" and window.cfg["only_unseen"],
+          "et se repose d'un clic")
+    window.forget_search()
+    check(not window.cfg["searches"], "puis s'oublie")
+    QInputDialog.getText, QInputDialog.getItem = kept_text, kept_item
+    window.set_only_unseen(False)
+    window.controls.include.setText("")
+    window.on_controls_changed()
+
+    # -- doublons par image -----------------------------------------------------
+    img = QImage(64, 64, QImage.Format.Format_RGB32)
+    for y in range(64):
+        for x in range(64):
+            img.setPixelColor(x, y, QColor(x * 4 % 256, (x * y) % 256, y * 4 % 256))
+    pa, pb, pc = base / "_appdata" / "a.png", base / "_appdata" / "b.jpg", base / "_appdata" / "c.png"
+    img.save(str(pa))
+    img.scaled(200, 120).save(str(pb), "JPG", 60)
+    flat_img = QImage(64, 64, QImage.Format.Format_RGB32)
+    flat_img.fill(QColor(0, 0, 0))
+    flat_img.save(str(pc))
+    ha, hb = dhash(pa), dhash(pb)
+    check(ha is not None and bin(ha ^ hb).count("1") <= 6,
+          "redimensionnée et recompressée, l'empreinte reste proche")
+    check(dhash(pc) is None, "une image plate n'en a pas")
+    groups = group_by_look([(pa, 10, ha), (pb, 20, hb), (Path("z"), 5, ha ^ 0xFFFFFFFF)])
+    check(len(groups) == 1 and set(groups[0][1]) == {pa, pb}, "deux proches, un groupe")
+
+    look = base / "look" / "lot"
+    shutil.rmtree(base / "look", ignore_errors=True)
+    look.mkdir(parents=True)
+    model = next(iter(sorted(root.rglob("*.mp4"))))
+    shutil.copy2(model, look / "un.mp4")
+    shutil.copy2(model, look / "deux.mp4")
+    # Les clips du jeu se ressemblent tous : il en faut un vraiment autre.
+    _sp.run([Tools.ffmpeg, "-y", "-v", "error", "-f", "lavfi",
+             "-i", "mandelbrot=size=320x180:rate=10", "-t", "30",
+             "-pix_fmt", "yuv420p", str(look / "autre.mp4")], check=True)
+    made = {}
+    worker = ThumbBackfill(base / "look", window.cfg["thumb_width"], True)
+    worker.done.connect(lambda m, k, whole: made.update(m=m))
+    worker.start()
+    check(wait_for(app, lambda: "m" in made, 120), "vignettes fabriquées")
+    out = {}
+    scan = ImageDuplicateScan(base / "look", window.cfg["thumb_width"], True)
+    scan.found.connect(lambda g: out.update(groups=g))
+    scan.start()
+    check(wait_for(app, lambda: "groups" in out, 60), "balayage terminé")
+    found = out["groups"]
+    check(len(found) == 1 and {q.name for q in found[0][1]} == {"un.mp4", "deux.mp4"},
+          f"les deux copies se retrouvent, la troisième non ({found})")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

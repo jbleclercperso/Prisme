@@ -62,6 +62,7 @@ SEARCH_HELP = [
     ("plage or mer", "l'un ou l'autre suffit"),
     ("plage -hiver", "« plage », mais pas « hiver »"),
     ('"saison 2"', "l'expression exacte, espaces compris"),
+    ("⋯ → Enregistrer cette recherche", "la retrouver d'un clic, avec son tri et « Non vus »"),
 ]
 
 HELP_STYLE = """

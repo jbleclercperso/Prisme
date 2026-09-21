@@ -9,14 +9,14 @@ from pathlib import Path
 
 from PySide6.QtCore import QSize, QTimer, QUrl, Qt
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
+    QApplication, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QListWidget,
     QMainWindow, QMessageBox, QProgressBar, QProgressDialog, QPushButton,
     QLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import actions
 from .backfill import ThumbAudit, ThumbBackfill, VideoCount
-from .dupes import DuplicateScan
+from .dupes import DuplicateScan, ImageDuplicateScan
 from .help import HelpDialog
 from .board import COLUMN_CHOICES, BoardView
 from .actions import ActionError, HistoryEntry
@@ -337,7 +337,9 @@ class MainWindow(QMainWindow):
             ("Préparer toutes les vignettes", self.toggle_backfill),
             ("Compter les vidéos", self.count_videos),
             ("État des vignettes", self.audit_thumbs),
-            ("Chercher les doublons", self.find_duplicates),
+            ("Chercher les doublons (même taille)", self.find_duplicates),
+            ("Chercher les doublons (même image)",
+             lambda: self.find_duplicates(by_image=True)),
             ("-", None),
             ("Rafale : passer tout seul après 8 s", self.toggle_burst),
             ("-", None),
@@ -345,6 +347,13 @@ class MainWindow(QMainWindow):
             ("Réanalyser tout le disque", self.refresh_root),
             ("Changer de racine…", self.choose_root),
         ])
+        # Les recherches enregistrees : la requete, son tri, et « Non vus »,
+        # sous un nom. Le langage de recherche existait, il manquait de le
+        # retenir.
+        self.overflow.addSeparator()
+        self.overflow.addAction("Enregistrer cette recherche…", self.save_search)
+        self.searches_menu = self.overflow.addMenu("Recherches enregistrées")
+        self.searches_menu.aboutToShow.connect(self._fill_searches_menu)
         self.more_button.setMenu(self.overflow)
         self._name_backfill_action()
 
@@ -964,7 +973,7 @@ class MainWindow(QMainWindow):
                "Tout est prêt : l'affichage ne fabrique plus rien."),
             "info" if missing else "done")
 
-    def find_duplicates(self) -> None:
+    def find_duplicates(self, by_image: bool = False) -> None:
         """Rassemble les vidéos de taille rigoureusement identique.
 
         Rien n'est supprimé : les groupes s'affichent comme une planche
@@ -978,7 +987,13 @@ class MainWindow(QMainWindow):
         if self.root is None:
             return
         top = Path(self.levels[0]["root"]) if self.levels else self.root
-        self.dupes = DuplicateScan(top, self.cfg["skip_hidden"], self)
+        self._dupes_by_image = by_image
+        if by_image:
+            # Sur les vignettes deja faites : rien n'est relu sur le partage.
+            self.dupes = ImageDuplicateScan(
+                top, self.cfg["thumb_width"], self.cfg["skip_hidden"], self)
+        else:
+            self.dupes = DuplicateScan(top, self.cfg["skip_hidden"], self)
         self.dupes.progress.connect(self.on_dupes_progress)
         self.dupes.found.connect(self.on_dupes_found)
         self.dupes.start()
@@ -999,7 +1014,12 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         self.progress.setFormat("%v / %m analysés")
         if not groups:
-            self.show_banner("Aucun doublon trouvé.", "info")
+            self.show_banner(
+                "Aucun doublon trouvé." + (
+                    " Par image, seules les vidéos qui ont déjà leur vignette "
+                    "sont comparées : « État des vignettes » dit combien."
+                    if getattr(self, "_dupes_by_image", False) else ""),
+                "info")
             return
         # Les membres d'un meme groupe se suivent : c'est ce qui permet de les
         # comparer d'un coup d'oeil au lieu de les chercher dans la liste.
@@ -1023,9 +1043,11 @@ class MainWindow(QMainWindow):
         self.refresh_board()
         self._show_counts()
         gagne = sum(size * (len(paths) - 1) for size, paths in groups)
+        how = ("qui se ressemblent" if getattr(self, "_dupes_by_image", False)
+               else "de doublons")
         self.show_banner(
-            f"{len(groups)} groupe(s) de doublons — {extra} fichier(s) en trop, "
-            f"soit {human_size(gagne)} à récupérer. Cochez ce dont vous ne "
+            f"{len(groups)} groupe(s) {how} — {extra} fichier(s) en trop, "
+            f"jusqu'à {human_size(gagne)} à récupérer. Cochez ce dont vous ne "
             f"voulez plus, puis « Supprimer » : tout part dans la corbeille de "
             f"session et revient par Ctrl+Z.", "info")
 
@@ -1777,6 +1799,70 @@ class MainWindow(QMainWindow):
 
     def peek_hide(self) -> None:
         self.single.peek_end()
+
+    def save_search(self) -> None:
+        """Retient la recherche en cours sous un nom, avec son tri et « Non vus »."""
+        query = self.controls.include.text().strip()
+        unseen = bool(self.cfg["only_unseen"])
+        if not query and not unseen and self.sort_mode in ("", "random"):
+            self.show_banner("Rien à enregistrer : le champ est vide et rien "
+                             "n'est filtré.", "quiet")
+            return
+        name, ok = QInputDialog.getText(
+            self, "Enregistrer la recherche", "Sous quel nom ?", text=query or "Non vus")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        searches = [s for s in list(self.cfg["searches"] or [])
+                    if s.get("name") != name]
+        searches.append({"name": name, "query": query, "sort": self.sort_mode,
+                         "unseen": unseen, "tab": self.tab})
+        self.cfg["searches"] = searches
+        self.cfg.save()
+        self.show_banner(f"Recherche « {name} » enregistrée — menu ⋯ → "
+                         "Recherches enregistrées.", "done")
+
+    def _fill_searches_menu(self) -> None:
+        menu = self.searches_menu
+        menu.clear()
+        searches = list(self.cfg["searches"] or [])
+        if not searches:
+            none = menu.addAction("(aucune pour l'instant)")
+            none.setEnabled(False)
+            return
+        for entry in searches:
+            menu.addAction(entry.get("name", "?"),
+                           lambda checked=False, e=entry: self.apply_search(e))
+        menu.addSeparator()
+        menu.addAction("Oublier une recherche…", self.forget_search)
+
+    def apply_search(self, entry: dict) -> None:
+        """Repose une recherche : onglet, requête, tri, puis « Non vus »."""
+        tab = entry.get("tab") or self.tab
+        if tab != self.tab and tab in TABS and tab != TAB_SPLIT:
+            self.set_tab(tab)
+        field = self.controls.include
+        field.blockSignals(True)
+        field.setText(entry.get("query", ""))
+        field.blockSignals(False)
+        self.on_controls_changed()
+        sort = entry.get("sort") or "random"
+        self.controls.set_sort(sort)
+        self.set_sort(sort)
+        self.set_only_unseen(bool(entry.get("unseen")))
+        self.show_banner(f"Recherche « {entry.get('name', '')} »", "quiet")
+
+    def forget_search(self) -> None:
+        names = [s.get("name", "?") for s in list(self.cfg["searches"] or [])]
+        if not names:
+            return
+        name, ok = QInputDialog.getItem(
+            self, "Oublier une recherche", "Laquelle ?", names, 0, False)
+        if not ok:
+            return
+        self.cfg["searches"] = [s for s in self.cfg["searches"] if s.get("name") != name]
+        self.cfg.save()
+        self.show_banner(f"« {name} » oubliée.", "quiet")
 
     def _rebuild_commands(self, force: bool = False) -> None:
         """Refait la barre des touches seulement quand elle a change.
