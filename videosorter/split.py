@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 
 from .perf import mark
 from .scan import human_duration
-from .widgets import elide
+from .widgets import PeekOverlay, elide
 
 # Trois panneaux : sur un ecran large, trois videos verticales le remplissent
 # presque exactement. Quatre les amincissent au point qu'on ne distingue plus
@@ -71,6 +71,8 @@ class SplitPane(QFrame):
     wants_next = Signal(int)          # une autre, au hasard, n'importe ou
     wants_sibling = Signal(int, str)  # la suivante du meme dossier
     opened = Signal(str)
+    peekRequested = Signal(int, str)  # clic droit : les neuf instants
+    peekChosen = Signal(int, int)     # une case cliquee : (panneau, case)
 
     def __init__(self, index: int, scroll_seconds: int = 5, parent=None):
         super().__init__(parent)
@@ -91,19 +93,32 @@ class SplitPane(QFrame):
 
         self.video = QVideoWidget(self.stage)
         self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # Le widget video de Windows avale les gestes : on les lui reprend.
+        self.video.mouseReleaseEvent = self.mouseReleaseEvent
+        self.video.wheelEvent = self.wheelEvent
+        self.peek = PeekOverlay(self.stage)
+        self.peek.chosen.connect(lambda slot: self.peekChosen.emit(self.index, slot))
+        self.peeking = False
 
-        # Poses sur l'image, donc enfants du cadre qui la porte : ailleurs, ils
-        # passeraient derriere elle.
-        self.rail = QFrame(self.stage)
+        # Sous l'image, pas dessus : le lecteur natif passe devant tout ce
+        # qu'on lui superpose, et l'on ne voyait ni le rail ni le temps
+        # restant. Une ligne fine, toujours la, meme en plein ecran.
+        self.under = QWidget(self)
+        under = QHBoxLayout(self.under)
+        under.setContentsMargins(0, 0, 0, 0)
+        under.setSpacing(6)
+        self.rail = QFrame(self.under)
         self.rail.setObjectName("playRail")
-        self.rail.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.done = QFrame(self.stage)
+        self.rail.setFixedHeight(self.RAIL_HEIGHT)
+        self.done = QFrame(self.rail)
         self.done.setObjectName("playProgress")
-        self.done.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.remaining = QLabel("", self.stage)
+        self.done.setGeometry(0, 0, 0, self.RAIL_HEIGHT)
+        under.addWidget(self.rail, 1)
+        self.remaining = QLabel("", self.under)
         self.remaining.setObjectName("remaining")
-        self.remaining.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.remaining.hide()
+        under.addWidget(self.remaining, 0)
+        self.under.setFixedHeight(18)
+        layout.addWidget(self.under)
 
         self.bar = QWidget(self)
         bar = QHBoxLayout(self.bar)
@@ -164,11 +179,13 @@ class SplitPane(QFrame):
             self.bar.hide()
 
     def clear(self) -> None:
+        self.peek_end()
         self.video_path = ""
         self.name.setText("—")
         self.player.stop()
         self.player.setSource(QUrl())
-        self.remaining.hide()
+        self.remaining.setText("")
+        self.done.setGeometry(0, 0, 0, self.RAIL_HEIGHT)
 
     def stop(self) -> None:
         self.player.stop()
@@ -188,11 +205,7 @@ class SplitPane(QFrame):
     def _place(self) -> None:
         area = self.stage.rect()
         self.video.setGeometry(area)
-        top = area.bottom() - self.RAIL_HEIGHT
-        self.rail.setGeometry(0, top, area.width(), self.RAIL_HEIGHT)
-        self.rail.raise_()
-        self.done.raise_()
-        self.remaining.raise_()
+        self.peek.setGeometry(area)
 
     def _on_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -202,25 +215,35 @@ class SplitPane(QFrame):
 
     def _on_position(self, position: int) -> None:
         duration = self.player.duration()
-        area = self.stage.rect()
         fraction = (position / duration) if duration > 0 else 0.0
-        top = area.bottom() - self.RAIL_HEIGHT
-        self.rail.setGeometry(0, top, area.width(), self.RAIL_HEIGHT)
+        width = self.rail.width()
         self.done.setGeometry(
-            0, top, max(0, int(area.width() * max(0.0, min(1.0, fraction)))),
-            self.RAIL_HEIGHT,
-        )
-        self.rail.show()
-        self.done.show()
-        self.rail.raise_()
-        self.done.raise_()
-        if duration > 0:
-            left = max(0, duration - position) / 1000.0
-            self.remaining.setText(f"−{human_duration(left)}")
-            self.remaining.adjustSize()
-            self.remaining.move(area.right() - self.remaining.width() - 10, 10)
-            self.remaining.raise_()
-            self.remaining.show()
+            0, 0, max(0, int(width * max(0.0, min(1.0, fraction)))),
+            self.RAIL_HEIGHT)
+        self.remaining.setText(
+            f"−{human_duration(max(0, duration - position) / 1000.0)}"
+            if duration > 0 else "")
+
+    # -- les neuf instants ----------------------------------------------------
+    def peek_begin(self, captions: list) -> None:
+        self.peeking = True
+        self.peek.reset(captions)
+        self.peek.setGeometry(self.stage.rect())
+        self.video.hide()
+        self.peek.show()
+        self.peek.raise_()
+
+    def peek_end(self) -> None:
+        if not self.peeking:
+            return
+        self.peeking = False
+        self.peek.hide()
+        if self.video_path:
+            self.video.show()
+
+    def seek(self, seconds: float) -> None:
+        self.player.setPosition(int(seconds * 1000))
+        self.player.play()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -241,6 +264,10 @@ class SplitPane(QFrame):
         event.accept()
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.RightButton and self.video_path:
+            self.peekRequested.emit(self.index, self.video_path)
+            event.accept()
+            return
         if event.button() == Qt.LeftButton and self.video_path:
             # Un clic sur l'image met en pause ou reprend : on regarde trois
             # videos, il faut pouvoir en retenir une sans perdre les autres.
@@ -265,6 +292,8 @@ class SplitWall(QWidget):
     fullscreenRequested = Signal()
     exitRequested = Signal()
     unseenToggled = Signal(bool)
+    peekRequested = Signal(int, str)
+    peekChosen = Signal(int, int)
 
     def __init__(self, panes: int = DEFAULT_PANES, scroll_seconds: int = 5,
                  parent=None, orientation: str = "vertical"):
@@ -315,15 +344,16 @@ class SplitWall(QWidget):
             controls.addWidget(button)
             self.count_buttons[count] = button
         controls.addSpacing(10)
-        self.orientation_buttons: dict = {}
-        for key, label in ORIENTATIONS:
-            button = QPushButton(label, self.controls)
-            button.setObjectName("splitButton")
-            button.setFocusPolicy(Qt.NoFocus)
-            button.clicked.connect(
-                lambda _c=False, k=key: self.orientationChanged.emit(k))
-            controls.addWidget(button)
-            self.orientation_buttons[key] = button
+        # Un seul bouton qui tourne : Verticales → Horizontales → Toutes.
+        # Trois chips prenaient la place de deux boutons pour un choix a
+        # trois positions.
+        self.orient_button = QPushButton("", self.controls)
+        self.orient_button.setObjectName("splitButton")
+        self.orient_button.setFocusPolicy(Qt.NoFocus)
+        self.orient_button.setProperty("chosen", "true")
+        self.orient_button.setToolTip("Ce que le mur pioche : cliquer pour changer")
+        self.orient_button.clicked.connect(self._cycle_orientation)
+        controls.addWidget(self.orient_button)
         controls.addSpacing(10)
         self.unseen = QPushButton("Non vus", self.controls)
         self.unseen.setObjectName("splitButton")
@@ -373,15 +403,18 @@ class SplitWall(QWidget):
         self.unseen.style().unpolish(self.unseen)
         self.unseen.style().polish(self.unseen)
 
+    def _cycle_orientation(self) -> None:
+        keys = [key for key, _label in ORIENTATIONS]
+        at = keys.index(self.orientation) if self.orientation in keys else 0
+        self.orientationChanged.emit(keys[(at + 1) % len(keys)])
+
     def _mark_choices(self) -> None:
         for count, button in self.count_buttons.items():
             button.setProperty("chosen", "true" if count == len(self.panes) else "false")
             button.style().unpolish(button)
             button.style().polish(button)
-        for key, button in self.orientation_buttons.items():
-            button.setProperty("chosen", "true" if key == self.orientation else "false")
-            button.style().unpolish(button)
-            button.style().polish(button)
+        label = dict(ORIENTATIONS).get(self.orientation, "Toutes")
+        self.orient_button.setText(f"{label} ▾")
 
     def set_orientation(self, orientation: str) -> None:
         self.orientation = orientation
@@ -399,6 +432,8 @@ class SplitWall(QWidget):
             pane = SplitPane(len(self.panes), self.scroll_seconds, self.row)
             pane.wants_next.connect(self.refill_one)
             pane.wants_sibling.connect(self.siblingRequested)
+            pane.peekRequested.connect(self.peekRequested)
+            pane.peekChosen.connect(self.peekChosen)
             pane.opened.connect(self.opened)
             pane.set_bare(self.panes[0].bare if self.panes else False)
             self.panes.append(pane)
@@ -489,7 +524,12 @@ class SplitWall(QWidget):
     def stop(self) -> None:
         self._queue = []
         for pane in self.panes:
+            pane.peek_end()
             pane.stop()
+
+    def end_peeks(self) -> None:
+        for pane in self.panes:
+            pane.peek_end()
 
     def hideEvent(self, event):
         super().hideEvent(event)

@@ -2237,9 +2237,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.3)
     check(window.controls.sorts.isHidden() and window.controls.unseen.isHidden()
           and window.controls.wider.isHidden(), "sur le mur, la ligne des filtres se vide")
-    check(not window.item_card.isHidden() and window.wall.controls.parent() is window.item_card
-          and not window.wall.controls.isHidden(), "les réglages du mur sont sur la ligne du titre")
-    check("vidéo" in window.item_title.text(), "qui dit la taille du vivier")
+    check(window.wall.controls.parent() is window.controls
+          and not window.wall.controls.isHidden(), "les réglages du mur sont sur la ligne de recherche")
+    check("vidéo" in window.wall.orient_button.toolTip(), "dont l'infobulle dit la taille du vivier")
     window.wall.unseenToggled.emit(True)
     pump(app, 0.3)
     check(window.cfg["only_unseen"] is True and window.wall.unseen.property("chosen") == "true",

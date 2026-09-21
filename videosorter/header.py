@@ -377,6 +377,24 @@ class ControlBar(QWidget):
         # occupaient quatre fois la place pour le meme reglage, et il fallait
         # l'ouvrir pour savoir ou l'on en etait.
         self.columns_choices = list(columns_choices)
+        # Pour les dossiers : le nombre de cartes par rangee en clair, comme
+        # sur le mur, et non un ± qu'il faut cliquer plusieurs fois.
+        self.column_chips = QWidget(self)
+        chips = QHBoxLayout(self.column_chips)
+        chips.setContentsMargins(0, 0, 0, 0)
+        chips.setSpacing(4)
+        self.column_buttons: dict = {}
+        for count in columns_choices:
+            button = QPushButton(str(count), self.column_chips)
+            button.setObjectName("splitButton")
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setToolTip(f"{count} par rangée")
+            button.clicked.connect(lambda _c=False, n=count: self._choose_columns(n))
+            chips.addWidget(button)
+            self.column_buttons[count] = button
+        row.addWidget(self.column_chips)
+        self.column_chips.hide()
+
         self.wider = _button("−", lambda: self._step_columns(-1))
         self.tighter = _button("+", lambda: self._step_columns(1))
         self.columns_label = QLabel("", self)
@@ -472,8 +490,7 @@ class ControlBar(QWidget):
             field.blockSignals(False)
 
     def set_folder_fields_visible(self, on: bool) -> None:
-        self.folder_min.setVisible(on)
-        self.folder_max.setVisible(on)
+        """Conserve : c'est `set_mode` qui decide desormais."""
 
     def criteria(self) -> dict:
         return {
@@ -517,7 +534,15 @@ class ControlBar(QWidget):
         self.set_columns(chosen)
         self.columnsChanged.emit(chosen)
 
+    def _choose_columns(self, columns: int) -> None:
+        self.set_columns(columns)
+        self.columnsChanged.emit(columns)
+
     def set_columns(self, columns: int) -> None:
+        for count, button in self.column_buttons.items():
+            button.setProperty("chosen", "true" if count == columns else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
         index = self.columns.findData(columns)
         if index >= 0:
             self.columns.blockSignals(True)
@@ -536,25 +561,48 @@ class ControlBar(QWidget):
     def set_browsing(self, browsing: bool) -> None:
         """La densité et la pagination ne valent qu'en parcours."""
         self._browsing = browsing
-        for widget in (self.wider, self.columns_label, self.tighter,
-                       self.previous, self.next):
-            widget.setVisible(browsing and not getattr(self, "_wall", False))
+        self._lay_out_mode()
+
+    def set_mode(self, mode: str) -> None:
+        """Chaque onglet n'a que ce qui lui sert.
+
+        « folders » : recherche, tris sans la note, bornes de dossier, cartes
+        par rangee en clair, pagination. « videos » et « tags » : tout.
+        « wall » : la recherche seule — ses reglages vivent a cote.
+        """
+        self._mode = mode
+        self._lay_out_mode()
+
+    def _lay_out_mode(self) -> None:
+        mode = getattr(self, "_mode", "videos")
+        browsing = getattr(self, "_browsing", True)
+        wall = mode == "wall"
+        folders = mode == "folders"
+        self.sorts.setVisible(not wall)
+        self.sorts.buttons["stars"].setVisible(not folders)
+        self.unseen.setVisible(not wall and not folders)
+        for button in self.orientation_buttons.values():
+            button.setVisible(not wall and not folders)
+        self.folder_min.setVisible(folders)
+        self.folder_max.setVisible(folders)
+        self.column_chips.setVisible(folders and browsing)
+        for widget in (self.wider, self.columns_label, self.tighter):
+            widget.setVisible(browsing and not wall and not folders)
+        for widget in (self.previous, self.next):
+            widget.setVisible(browsing and not wall)
+        if wall:
+            self.clear.hide()
 
     def set_wall(self, on: bool) -> None:
-        """Sur le mur, la ligne ne garde que la recherche : le reste ne s'y
-        applique pas, ou vit sur la ligne du dessous."""
-        self._wall = on
-        for widget in (self.sorts, self.unseen, self.clear,
-                       *self.orientation_buttons.values()):
-            widget.setVisible(not on)
+        """Conserve pour les appels existants : « wall » ou l'onglet courant."""
         if on:
-            self.folder_min.hide()
-            self.folder_max.hide()
-        self.set_browsing(getattr(self, "_browsing", True))
+            self.set_mode("wall")
+        elif getattr(self, "_mode", "") == "wall":
+            self.set_mode("videos")
 
     def set_filters(self, active: list) -> None:
         """Montre « ✕ filtres » si quelque chose est pose, et dit quoi."""
-        if getattr(self, "_wall", False):
+        if getattr(self, "_mode", "") == "wall":
             self.clear.hide()
             return
         self.clear.setVisible(bool(active))

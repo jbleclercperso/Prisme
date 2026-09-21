@@ -643,9 +643,12 @@ class MainWindow(QMainWindow):
         self.wall.unseenToggled.connect(self._wall_unseen)
         # Les reglages du mur — nombre, orientation, non vus, plein ecran — en
         # bout de la ligne du titre, pas sur une ligne a eux.
-        self.wall.controls.setParent(self.item_card)
-        self.item_card.layout().addWidget(self.wall.controls, 0)
+        self.wall.controls.setParent(self.controls)
+        self.controls.layout().itemAt(0).layout().addWidget(self.wall.controls)
         self.wall.controls.hide()
+        self.wall.peekRequested.connect(self.wall_peek)
+        self.wall.peekChosen.connect(self.wall_peek_chosen)
+        self._wall_peek = None
         self.controls.clearRequested.connect(self.reset_filters)
         self.wall_full = False
         self._wall_pinned: list = []
@@ -2256,8 +2259,12 @@ class MainWindow(QMainWindow):
     def on_plan_ready(self, key: str, plan: list) -> None:
         self.plans[key] = plan
         if key.startswith("peek@"):
+            peeked = self._wall_peek
             for slot, entry in enumerate(plan):
                 self.single.peek.set_caption(slot, human_duration(entry[1]))
+                if peeked and peeked[1] == key and peeked[0] < len(self.wall.panes):
+                    self.wall.panes[peeked[0]].peek.set_caption(
+                        slot, human_duration(entry[1]))
                 self.preview.request_thumb(key, slot, entry[0], entry[1], True)
             return
         if key.startswith("board@"):
@@ -2310,6 +2317,9 @@ class MainWindow(QMainWindow):
             if (self.single.peeking and current is not None
                     and key == f"peek@{current.item_id}"):
                 self.single.peek_thumb(slot, path)
+            peeked = self._wall_peek
+            if peeked and peeked[1] == key and peeked[0] < len(self.wall.panes):
+                self.wall.panes[peeked[0]].peek.set_thumb(slot, path)
             return
         if key.startswith("board@"):
             position = self._board_position_of(key)
@@ -2568,6 +2578,39 @@ class MainWindow(QMainWindow):
         self._show_counts()
         return True
 
+    def wall_peek(self, index: int, path: str) -> None:
+        """Clic droit sur un panneau : ses neuf instants, par-dessus lui."""
+        pane = self.wall.panes[index] if 0 <= index < len(self.wall.panes) else None
+        if pane is None:
+            return
+        if pane.peeking:
+            pane.peek_end()
+            self._wall_peek = None
+            return
+        self.wall.end_peeks()
+        key = f"peek@{path}"
+        plan = self.plans.get(key) or []
+        pane.peek_begin([human_duration(entry[1]) for entry in plan])
+        self._wall_peek = (index, key)
+        ready = self.peek_thumbs.get(key)
+        if ready:
+            for slot, thumb in ready.items():
+                pane.peek.set_thumb(slot, thumb)
+            return
+        if key not in self.plans:
+            self.preview.request_plan(key, [path], PeekOverlay.COUNT,
+                                      page=0, one_per_video=False, urgent=True)
+
+    def wall_peek_chosen(self, index: int, slot: int) -> None:
+        pane = self.wall.panes[index] if 0 <= index < len(self.wall.panes) else None
+        if pane is None:
+            return
+        plan = self.plans.get(f"peek@{pane.video_path}") or []
+        if 0 <= slot < len(plan):
+            pane.seek(plan[slot][1])
+        pane.peek_end()
+        self._wall_peek = None
+
     def _wall_unseen(self, on: bool) -> None:
         self.cfg["only_unseen"] = bool(on)
         self.cfg.save_soon()
@@ -2775,6 +2818,8 @@ class MainWindow(QMainWindow):
             self.wall.set_pool(pool)
             self.wall.set_caption(len(pool), unknown, heavy=heavy)
         self.wall.set_unseen(bool(self.cfg["only_unseen"]))
+        self.wall.orient_button.setToolTip(
+            (self.wall.caption.text() or "Le mur") + " — cliquer pour changer")
         self.item_title.setText(self.wall.caption.text()
                                 or f"{len(self.wall.pool)} vidéo(s) pour le mur")
         self.item_subtitle.setText("")
@@ -2986,10 +3031,10 @@ class MainWindow(QMainWindow):
         self.tag_chips.setVisible(self.tab == TAB_TAGS)
         self.tags_button.setVisible(self.tab == TAB_TAGS)
         self.controls.set_browsing(self.browsing)
-        self.controls.set_wall(self.tab == TAB_SPLIT)
-        # La fiche ne dit rien qu'on ne lise deja ailleurs quand on parcourt —
-        # sauf sur le mur, ou sa ligne porte les reglages.
-        self.item_card.setVisible(not self.browsing or self.tab == TAB_SPLIT)
+        self.controls.set_mode({TAB_SPLIT: "wall", TAB_FOLDERS: "folders",
+                                TAB_TAGS: "tags"}.get(self.tab, "videos"))
+        # La fiche ne dit rien qu'on ne lise deja ailleurs quand on parcourt.
+        self.item_card.setVisible(not self.browsing)
         self.wall.controls.setVisible(self.tab == TAB_SPLIT and not self.wall_full)
         item = self.current
         self.grid_chips.setVisible(
@@ -3023,7 +3068,6 @@ class MainWindow(QMainWindow):
         self.nav_row.setVisible(self.tab != TAB_SPLIT and not self.cinema)
         self.single.under.setVisible(
             not self.browsing and item is not None and item.kind != MODE_FOLDERS)
-        self.controls.set_folder_fields_visible(self.tab == TAB_FOLDERS)
 
     def _origin_for(self, current):
         """Le plus haut dossier dont `current` descend : la racine du fil."""
@@ -4104,6 +4148,10 @@ class MainWindow(QMainWindow):
                 return self.radial.close_menu()
             if self.single.peeking:
                 return self.peek_hide()
+            if self._wall_peek is not None:
+                self.wall.end_peeks()
+                self._wall_peek = None
+                return
             if self.cinema:
                 # Echap sort d'abord du cinema : c'est le geste qu'on fait.
                 return self.toggle_cinema(False)

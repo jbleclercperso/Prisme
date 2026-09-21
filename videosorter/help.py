@@ -57,6 +57,7 @@ SHORTCUTS = [
         ("⋯ → Rafale", "la suivante arrive toute seule après 8 s sans décision"),
         ("⋯ → Journal des gels", "quand l'interface s'est figée, combien de temps, après quoi"),
         ("Mur : ▸  ⚄  ⤢", "la suivante du même dossier ; une autre n'importe où ; ouvrir"),
+        ("Mur : clic droit sur un panneau", "ses neuf instants ; cliquer une case y va"),
     ]),
 ]
 
