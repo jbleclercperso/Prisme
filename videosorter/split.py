@@ -248,6 +248,7 @@ class SplitWall(QWidget):
     countChanged = Signal(int)
     orientationChanged = Signal(str)
     fullscreenRequested = Signal()
+    exitRequested = Signal()
 
     def __init__(self, panes: int = DEFAULT_PANES, scroll_seconds: int = 5,
                  parent=None, orientation: str = "vertical"):
@@ -315,6 +316,21 @@ class SplitWall(QWidget):
         controls.addWidget(full)
         outer.addWidget(self.controls)
 
+        # En plein ecran, une seule chose reste : de quoi en sortir. Une ligne
+        # fine, a droite, hors des panneaux — poses dessus, elle passerait
+        # derriere leurs lecteurs natifs.
+        self.exit_row = QWidget(self)
+        exit_row = QHBoxLayout(self.exit_row)
+        exit_row.setContentsMargins(0, 0, 0, 0)
+        exit_row.addStretch(1)
+        self.exit_button = QPushButton("✕  Quitter le plein écran   (Échap)", self.exit_row)
+        self.exit_button.setObjectName("splitButton")
+        self.exit_button.setFocusPolicy(Qt.NoFocus)
+        self.exit_button.clicked.connect(self.exitRequested)
+        exit_row.addWidget(self.exit_button)
+        self.exit_row.hide()
+        outer.addWidget(self.exit_row)
+
         self.row = QWidget(self)
         self.grid = QGridLayout(self.row)
         self.grid.setContentsMargins(0, 0, 0, 0)
@@ -372,15 +388,20 @@ class SplitWall(QWidget):
     def set_bare(self, bare: bool) -> None:
         """Rien que les videos : ni reglages, ni barres de panneau."""
         self.controls.setVisible(not bare)
+        self.exit_row.setVisible(bare)
         for pane in self.panes:
             pane.set_bare(bare)
 
-    def set_caption(self, count: int) -> None:
-        kind = {"vertical": "verticale(s) connue(s)",
-                "horizontal": "horizontale(s) connue(s)"}.get(self.orientation, "")
-        self.caption.setText(
-            f"{count} vidéo(s) {kind} — le mur y pioche au hasard".replace("  ", " ")
-            if count else "")
+    def set_caption(self, count: int, unknown: int = 0, pinned: bool = False) -> None:
+        if pinned:
+            self.caption.setText(f"{count} vidéo(s) choisie(s) — lues ensemble")
+            return
+        kind = {"vertical": "verticales", "horizontal": "horizontales"}.get(
+            self.orientation, "")
+        text = f"{count} vidéo(s) {kind}".replace("  ", " ")
+        if unknown:
+            text += f" (dont {unknown} d'orientation encore inconnue)"
+        self.caption.setText(text + " — le mur y pioche au hasard" if count else "")
 
     # -- vivier ----------------------------------------------------------
     def set_pool(self, videos: list) -> None:

@@ -1491,10 +1491,14 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
                         {"duration": 8.0, "width": 640, "height": 320,
                          "codec": "h264", "ok": True})
 
-    pool = window.vertical_pool()
-    check(len(pool) == 2, f"seules les verticales entrent au vivier ({len(pool)})")
+    pool, unknown = window.vertical_pool()
+    # Les horizontales connues restent dehors ; ce qui n'a pas ete sonde entre,
+    # et la legende dit combien — un mur vide n'apprend rien.
     check(all(str(v) in pool for v in videos[:2]),
-          "et ce sont bien celles dont la hauteur dépasse la largeur")
+          "les verticales connues entrent au vivier")
+    check(not any(str(v) in pool for v in videos[2:]),
+          "les horizontales connues restent dehors")
+    check(len(pool) == 2 + unknown, f"et l'inconnu est compté ({unknown})")
 
     window.set_tab(TAB_SPLIT)
     pump(app, 0.6)

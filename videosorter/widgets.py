@@ -693,9 +693,12 @@ def draw_icon(kind: str, on: bool = True, size: int = 20,
 class PeekCell(QFrame):
     """Une case du peek : un instant de la video, et la destination qui va avec."""
 
+    clicked = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("peekCell")
+        self.setCursor(Qt.PointingHandCursor)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(3)
@@ -735,6 +738,11 @@ class PeekCell(QFrame):
         super().resizeEvent(event)
         self._rescale()
 
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
 
 class PeekOverlay(QWidget):
     """Neuf instants de la video, en mosaique, le temps qu'on tient la touche.
@@ -746,6 +754,7 @@ class PeekOverlay(QWidget):
     """
 
     COUNT = 9
+    chosen = Signal(int)      # une case cliquee : on veut aller a cet instant
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -758,6 +767,7 @@ class PeekOverlay(QWidget):
         self.cells: list = []
         for slot in range(self.COUNT):
             cell = PeekCell(self)
+            cell.clicked.connect(lambda s=slot: self.chosen.emit(s))
             grid.addWidget(cell, slot // 3, slot % 3)
             self.cells.append(cell)
         for index in range(3):
@@ -809,6 +819,7 @@ class SinglePlayer(QWidget):
     # le lecteur servait a examiner un fichier ; quand il sert a trier, revoir
     # indefiniment ce qu'on vient de voir est exactement ce qu'on ne veut pas.
     finished = Signal()
+    peekRequested = Signal()     # clic droit sur l'image : les neuf instants
 
     # Cinq reperes suffisent a se reperer dans une video : un cinquieme, deux
     # cinquiemes, et ainsi de suite. Dix prenaient deux fois plus de place pour
@@ -933,7 +944,7 @@ class SinglePlayer(QWidget):
                 lambda _dur, d=deck: self._on_deck_position(d, d.player.position()))
 
         self.hover_timer = QTimer(self)
-        self.hover_timer.setInterval(90)
+        self.hover_timer.setInterval(30)
         self.hover_timer.timeout.connect(self._poll_hover)
         self.hovered_slot = -1
 
@@ -1273,6 +1284,11 @@ class SinglePlayer(QWidget):
         if event.button() == Qt.LeftButton:
             return self._scrub_press(event)
         # Le clic droit remet l'image à sa taille : geste unique, sans menu.
+        if event.button() == Qt.RightButton and self.zoom <= 1.0:
+            # Le clic droit ouvre les neuf instants ; s'il y a un zoom, il le
+            # defait d'abord — un geste, un effet.
+            self.peekRequested.emit()
+            return
         if event.button() == Qt.RightButton and self.zoom > 1.0:
             self.reset_zoom()
             self.position_label.setText("×1")

@@ -419,8 +419,15 @@ class MainWindow(QMainWindow):
         selectors.addWidget(self.tree_button)
         selectors.addWidget(self.mute_button)
         selectors.addWidget(self.more_button)
-        layout.addLayout(selectors)
-        layout.addLayout(header_row)
+        # Les deux rangees du haut dans un seul widget : le plein ecran du
+        # mur et le cinema doivent pouvoir tout effacer d'un geste.
+        self.top_bar = QWidget(sort_page)
+        top_box = QVBoxLayout(self.top_bar)
+        top_box.setContentsMargins(0, 0, 0, 0)
+        top_box.setSpacing(6)
+        top_box.addLayout(selectors)
+        top_box.addLayout(header_row)
+        layout.addWidget(self.top_bar)
 
         self.controls = ControlBar(COLUMN_CHOICES, sort_page)
         self.controls.changed.connect(self.on_controls_changed)
@@ -533,8 +540,8 @@ class MainWindow(QMainWindow):
         picked_row.addWidget(self.picked_label)
         picked_row.addStretch(1)
         for text, tip, slot in (
-            ("▶  Tout lire", "Ouvre les vidéos cochées dans le lecteur du système",
-             self.play_picked),
+            ("▶  Lire ensemble", "Les vidéos cochées, toutes à la fois, sur le mur",
+             self.wall_picked),
             ("Déplacer…", "Cliquez ensuite un dossier de l'arborescence",
              self.move_picked_hint),
             ("Supprimer", "Écarte les vidéos cochées", self.delete_picked),
@@ -578,6 +585,8 @@ class MainWindow(QMainWindow):
             self.cfg["thumb_count"], self.cfg["scroll_seconds"], self.viewer
         )
         self.single.finished.connect(self.on_video_finished)
+        self.single.peekRequested.connect(self.peek_toggle)
+        self.single.peek.chosen.connect(self.peek_seek)
         self.board = BoardView(
             self.cfg["preview_seconds"], self.cfg["board_columns"], self.viewer
         )
@@ -598,7 +607,9 @@ class MainWindow(QMainWindow):
         self.wall.countChanged.connect(self.set_wall_count)
         self.wall.orientationChanged.connect(self.set_wall_orientation)
         self.wall.fullscreenRequested.connect(self.toggle_wall_fullscreen)
+        self.wall.exitRequested.connect(lambda: self.toggle_wall_fullscreen(False))
         self.wall_full = False
+        self._wall_pinned: list = []
         self.viewer.addWidget(self.board)
         self.viewer.addWidget(self.wall)
         # L'image, et dessous une seule rangee : fleche, barre d'avancement,
@@ -1954,6 +1965,24 @@ class MainWindow(QMainWindow):
     def peek_hide(self) -> None:
         self.single.peek_end()
 
+    def peek_toggle(self) -> None:
+        """Clic droit : les neuf instants s'ouvrent, un second clic les referme."""
+        if self.single.peeking:
+            self.peek_hide()
+        else:
+            self.peek_show()
+
+    def peek_seek(self, slot: int) -> None:
+        """Une case cliquee : la lecture saute a cet instant, la mosaique se ferme."""
+        item = self.current
+        if item is None:
+            return
+        plan = self.plans.get(f"peek@{item.item_id}") or []
+        if 0 <= slot < len(plan):
+            self.single.player.setPosition(int(plan[slot][1] * 1000))
+            self.single.player.play()
+        self.peek_hide()
+
     def save_search(self) -> None:
         """Retient la recherche en cours sous un nom, avec son tri et « Non vus »."""
         query = self.controls.include.text().strip()
@@ -2485,6 +2514,7 @@ class MainWindow(QMainWindow):
         self.wall.shuffle_all()
 
     def set_wall_orientation(self, orientation: str) -> None:
+        self._wall_pinned = []
         self.cfg["wall_orientation"] = orientation
         self.cfg.save_soon()
         self.wall.set_orientation(orientation)
@@ -2493,8 +2523,9 @@ class MainWindow(QMainWindow):
     def toggle_wall_fullscreen(self, on: bool | None = None) -> None:
         """Le mur seul, sur tout l'écran. Échap ramène tout le reste."""
         self.wall_full = (not self.wall_full) if on is None else bool(on)
-        chrome = (self.crumbs, self.tabs, self.controls, self.commands,
-                  self.progress, self.stars, self.item_card, self.nav_row)
+        chrome = (self.top_bar, self.crumbs, self.tabs, self.controls,
+                  self.commands, self.progress, self.stars, self.item_card,
+                  self.nav_row, self.picked_bar)
         if self.wall_full:
             self._wall_kept = (self.tree.isVisible(), self.aside.isVisible(),
                                self.windowState())
@@ -2504,6 +2535,7 @@ class MainWindow(QMainWindow):
             self.aside.hide()
             self.wall.set_bare(True)
             self.showFullScreen()
+            self.activateWindow()
         else:
             tree, aside, state = getattr(self, "_wall_kept", (False, False, None))
             self.wall.set_bare(False)
@@ -2518,46 +2550,61 @@ class MainWindow(QMainWindow):
             self._apply_selectors()
         self.setFocus()
 
-    def vertical_pool(self) -> list:
-        """Les vidéos de l'orientation choisie, filtrées par la recherche en cours.
+    def vertical_pool(self) -> tuple:
+        """(vivier, nombre d'orientation inconnue) pour le mur.
 
-        « Connues » veut dire : dont la résolution a déjà été relevée. On ne
-        sonde rien ici — mille sondages sur un partage réseau feraient attendre
-        plusieurs minutes pour remplir trois cadres. Le vivier s'étoffe de
-        lui-même à mesure qu'on parcourt les vignettes.
+        Toute la collection, pas seulement ce que l'onglet affiche : le mur
+        ne montrait qu'une video quand on l'ouvrait depuis un petit dossier.
+        On n'ecarte que ce qu'on **sait** etre de l'autre orientation ; ce
+        qui n'a pas encore ete sonde reste dans le vivier, et la legende le
+        dit — un mur vide n'apprend rien.
         """
         from .index import INDEX
         terms = self._terms((self.criteria or {}).get(
             "include", self.cfg["filter_include"]))
+        wanted = self.cfg["wall_orientation"] or "vertical"
+        top = self.top_root()
+        videos = list(self._videos_from_items())
+        if top is not None:
+            try:
+                for item in cached_items(top, MODE_FOLDERS, self.cfg["expand_parents"]):
+                    videos.extend(item.videos)
+            except Exception:
+                pass
         found = []
+        unknown = 0
         seen = set()
-        for video in self._videos_from_items():
+        for video in videos:
             key = str(video)
             if key in seen:
                 continue
             seen.add(key)
             if terms and not any(term in key.lower() for term in terms):
                 continue
-            wanted = self.cfg["wall_orientation"] or "vertical"
             if wanted == "any":
                 found.append(key)
                 continue
-            info = INDEX.probe(video)
-            if not info:
+            info = INDEX.probe(video) or {}
+            width, height = info.get("width") or 0, info.get("height") or 0
+            if not (width and height):
+                found.append(key)
+                unknown += 1
                 continue
-            width = info.get("width") or 0
-            height = info.get("height") or 0
-            if wanted == "vertical" and height > width > 0:
+            kind = "vertical" if height > width else "horizontal"
+            if kind == wanted:
                 found.append(key)
-            elif wanted == "horizontal" and width >= height > 0:
-                found.append(key)
-        return found
+        return found, unknown
 
     def show_wall(self) -> None:
         """Remplit le mur avec ce que l'on connaît de vertical."""
         self.viewer.setCurrentWidget(self.wall)
-        self.wall.set_pool(self.vertical_pool())
-        self.wall.set_caption(len(self.wall.pool))
+        if self._wall_pinned:
+            self.wall.set_pool(self._wall_pinned)
+            self.wall.set_caption(len(self.wall.pool), pinned=True)
+        else:
+            pool, unknown = self.vertical_pool()
+            self.wall.set_pool(pool)
+            self.wall.set_caption(len(pool), unknown)
         self.item_title.setText(f"{len(self.wall.pool)} vidéo(s) pour le mur")
 
     def open_video_path(self, path: str) -> None:
@@ -2641,6 +2688,7 @@ class MainWindow(QMainWindow):
             if self.wall_full:
                 self.toggle_wall_fullscreen(False)
             self.wall.stop()
+            self._wall_pinned = []
         self._apply_selectors()
 
         if self.root is None:
@@ -2968,8 +3016,8 @@ class MainWindow(QMainWindow):
         """Ne laisse que l'image : tout le reste s'efface le temps de regarder."""
         self.cinema = (not self.cinema) if on is None else bool(on)
         self.cinema_button.setChecked(self.cinema)
-        for widget in (self.crumbs, self.tabs, self.controls, self.commands,
-                       self.progress, self.stars, self.nav_row):
+        for widget in (self.top_bar, self.crumbs, self.tabs, self.controls,
+                       self.commands, self.progress, self.stars, self.nav_row):
             widget.setVisible(not self.cinema)
         # La fiche reste, mais reduite a ce qui permet d'en sortir et de
         # continuer : sans cela, une fois entre dans le cinema, plus rien ne
@@ -3075,6 +3123,17 @@ class MainWindow(QMainWindow):
                     seen.add(key)
                     videos.append(Path(video))
         return videos
+
+    def wall_picked(self) -> None:
+        """Les videos cochees, lues ensemble sur le mur — jusqu'a dix."""
+        videos = [str(video) for video in self._picked_videos()]
+        if not videos:
+            return
+        self._wall_pinned = videos
+        self.board.clear_picked()
+        self.set_tab(TAB_SPLIT)
+        self.wall.set_pane_count(max(1, min(len(videos), 10)))
+        self.show_wall()
 
     def play_picked(self) -> None:
         """Écrit une liste de lecture et la confie au lecteur du système.
@@ -3849,6 +3908,8 @@ class MainWindow(QMainWindow):
         if key == Qt.Key_Escape:
             if self.wall_full:
                 return self.toggle_wall_fullscreen(False)
+            if self.single.peeking:
+                return self.peek_hide()
             if self.cinema:
                 # Echap sort d'abord du cinema : c'est le geste qu'on fait.
                 return self.toggle_cinema(False)

@@ -97,6 +97,8 @@ class BoardCard(QFrame):
         # Rejeter d'un clic, au coin oppose de la case a cocher. Garder, c'est
         # passer au suivant ; rejeter demandait jusqu'ici le clavier, ce qui
         # obligeait a lacher la souris a chaque decision.
+        # Conservee pour les branchements, mais plus jamais montree : la croix
+        # sur chaque vignette a ete retiree a la demande.
         self.discard = QPushButton("✕", self)
         self.discard.setObjectName("cardDiscard")
         self.discard.setToolTip("Écarter — récupérable dans la corbeille de session")
@@ -130,12 +132,7 @@ class BoardCard(QFrame):
         head = "" if item.kind == MODE_FOLDERS else (lead or self._resolution)
         name = elide(item.name, 38)
         line = f"{head}   ·   {name}" if head else name
-        if item.kind != MODE_FOLDERS:
-            # En vue a plat, toutes les videos de la collection se cotoient :
-            # sans son dossier, un nom de fichier ne dit plus d'ou il sort.
-            folder = item.path.parent.name
-            if folder:
-                line += f"\n{elide(folder, 34)}"
+        # Une seule ligne sous l'image : le dossier est dans l'infobulle.
         return line
 
     def _show_chip(self, text: str) -> None:
@@ -155,9 +152,7 @@ class BoardCard(QFrame):
         """Coche en haut a gauche de l'image, croix en haut a droite."""
         area = self.image.geometry()
         self.pick.move(area.left() + 6, area.top() + 6)
-        self.discard.move(area.right() - self.discard.width() - 6, area.top() + 6)
         self.pick.raise_()
-        self.discard.raise_()
 
     def handle_rect(self) -> QRect:
         """La bande du haut de l'image, en coordonnees globales."""
@@ -252,7 +247,6 @@ class BoardCard(QFrame):
         self._show_handles(hovered)
 
     def _show_handles(self, hovered: bool) -> None:
-        self.discard.setVisible(hovered)
         self.pick.setVisible(hovered or self.pick.isChecked())
         if hovered or self.pick.isChecked():
             self._place_handles()
@@ -309,15 +303,8 @@ class HoverHandles(QWidget):
         self.pick.setCursor(Qt.PointingHandCursor)
         self.pick.setFocusPolicy(Qt.NoFocus)
         self.pick.setFixedSize(20, 20)
-        self.discard = QPushButton("✕", self)
-        self.discard.setObjectName("cardDiscard")
-        self.discard.setToolTip("Écarter — récupérable dans la corbeille de session")
-        self.discard.setCursor(Qt.PointingHandCursor)
-        self.discard.setFocusPolicy(Qt.NoFocus)
-        self.discard.setFixedSize(22, 22)
         layout.addWidget(self.pick, 0, Qt.AlignTop)
         layout.addStretch(1)
-        layout.addWidget(self.discard, 0, Qt.AlignTop)
         self.card = None
         self.hide()
 
@@ -330,8 +317,7 @@ class HoverHandles(QWidget):
             self.pick.blockSignals(False)
         if self.geometry() != rect:
             self.setGeometry(rect)
-            self.setMask(QRegion(self.pick.geometry()).united(
-                QRegion(self.discard.geometry())))
+            self.setMask(QRegion(self.pick.geometry()))
         if self.isHidden():
             self.show()
         self.raise_()
@@ -450,7 +436,6 @@ class BoardView(QWidget):
 
         self.floating = HoverHandles(self.window())
         self.floating.pick.toggled.connect(self._float_picked)
-        self.floating.discard.clicked.connect(self._float_discard)
         # Le fantome : Qt livre parfois une image qui appartient encore au
         # fichier precedent, juste apres le changement de source. Deux
         # verrous, comme dans la fiche : rien avant que le nouveau media soit
@@ -462,11 +447,6 @@ class BoardView(QWidget):
         self.blackout_timer.setSingleShot(True)
         self.blackout_timer.setInterval(160)
         self.blackout_timer.timeout.connect(self._end_blackout)
-        self.dwell_timer = QTimer(self)
-        self.dwell_timer.setSingleShot(True)
-        self.dwell_timer.setInterval(140)
-        self.dwell_timer.timeout.connect(self._dwell_elapsed)
-        self._dwell_target = -1
         self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(80)
         self.hover_timer.timeout.connect(self._poll_hover)
@@ -777,11 +757,8 @@ class BoardView(QWidget):
             return
         self.cards[found].set_hovered(True)
         self.floating.attach(self.cards[found], self.cards[found].handle_rect())
-        # Traverser la planche ne doit pas charger une video par carte
-        # croisee : on attend que la souris se pose. Le lecteur ne part que
-        # si elle est encore sur la meme carte apres ce court delai.
-        self._dwell_target = found
-        self.dwell_timer.start()
+        # Sans delai : la video part des que la souris est sur la carte.
+        self._play(found)
 
     def _float_picked(self, on: bool) -> None:
         card = self.floating.card
@@ -793,11 +770,6 @@ class BoardView(QWidget):
         card = self.floating.card
         if card is not None:
             card.discarded.emit(card.index)
-
-    def _dwell_elapsed(self) -> None:
-        found = self._dwell_target
-        if found != -1 and found == self.hovered and found < len(self.cards):
-            self._play(found)
 
     def _blank(self) -> None:
         """Cache l'apercu et efface ce qu'il restait de l'image precedente."""

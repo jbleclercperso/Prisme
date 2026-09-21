@@ -36,8 +36,9 @@ SHORTCUTS = [
         ("Ctrl+P", "basculer entre la planche et la fiche"),
         ("Ctrl+M", "couper ou rendre le son"),
         ("Ctrl+molette", "zoomer dans l'image"),
-        ("Maj (maintenue)", "neuf instants de la vidéo en mosaïque, "
-                            "avec les neuf premières destinations"),
+        ("Clic droit sur l'image, ou Maj", "neuf instants en mosaïque, avec les "
+                                            "neuf premières destinations ; "
+                                            "cliquer une case y va"),
         ("Glisser sur l'image", "avancer ou reculer : toute la largeur, toute la durée"),
         ("Clic sur l'image", "pause, reprise"),
         ("Clic droit sur une vignette", "l'ouvrir à côté, sans quitter la planche"),
