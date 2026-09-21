@@ -17,8 +17,8 @@ from PySide6.QtCore import QUrl, Qt, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
-    QWidget,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
+    QVBoxLayout, QWidget,
 )
 
 from .scan import human_duration
@@ -28,6 +28,23 @@ from .widgets import elide
 # presque exactement. Quatre les amincissent au point qu'on ne distingue plus
 # grand-chose.
 DEFAULT_PANES = 3
+# Les nombres qui font un rectangle. Cinq ou sept n'en font pas.
+PANE_CHOICES = (2, 3, 4, 6, 8, 9, 10)
+ORIENTATIONS = (("vertical", "Verticales"), ("horizontal", "Horizontales"),
+                ("any", "Toutes"))
+
+
+def grid_for(count: int, orientation: str) -> tuple:
+    """(rangees, colonnes) pour `count` panneaux.
+
+    Des videos verticales se rangent sur une ligne tant qu'elles restent
+    lisibles ; des horizontales preferent le carre.
+    """
+    if orientation == "vertical":
+        rows = 1 if count <= 5 else 2
+    else:
+        rows = {2: 1, 3: 1, 4: 2, 6: 2, 8: 2, 9: 3, 10: 2}.get(count, 2)
+    return rows, -(-count // rows)
 
 SPLIT_STYLE = """
 QFrame#splitPane { background: #0b0d10; border: 1px solid #242a33;
@@ -38,6 +55,8 @@ QPushButton#splitButton { background: #1a1f27; border: 1px solid #2b323d;
                           color: #b9c2cd; font-size: 12px; }
 QPushButton#splitButton:hover { color: #ffffff; border-color: #39414d; }
 QLabel#splitEmpty { color: #6f7885; font-size: 13px; }
+QPushButton#splitButton[chosen="true"] { color: #ffffff; background: #242a33;
+                                          border-color: #5a6474; }
 """
 
 
@@ -82,9 +101,11 @@ class SplitPane(QFrame):
         self.remaining.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.remaining.hide()
 
-        bar = QHBoxLayout()
+        self.bar = QWidget(self)
+        bar = QHBoxLayout(self.bar)
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(6)
+        self.bare = False
         self.name = QLabel("—", self)
         self.name.setObjectName("splitName")
         # Sans cela, un nom de fichier long imposait sa largeur au panneau, donc
@@ -101,7 +122,7 @@ class SplitPane(QFrame):
             button.setFocusPolicy(Qt.NoFocus)
             button.clicked.connect(slot)
             bar.addWidget(button)
-        layout.addLayout(bar)
+        layout.addWidget(self.bar)
 
         # Pas de sortie audio : trois videos qui parlent en meme temps ne
         # s'ecoutent pas, elles se regardent.
@@ -118,6 +139,21 @@ class SplitPane(QFrame):
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
         self._place()
+
+    def set_bare(self, bare: bool) -> None:
+        """Sans sa barre : en plein ecran, elle ne revient qu'au survol."""
+        self.bare = bare
+        self.bar.setVisible(not bare)
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        if self.bare:
+            self.bar.show()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        if self.bare:
+            self.bar.hide()
 
     def clear(self) -> None:
         self.video_path = ""
@@ -209,13 +245,18 @@ class SplitWall(QWidget):
     """Le mur entier : quelques panneaux, et un vivier où puiser."""
 
     opened = Signal(str)
+    countChanged = Signal(int)
+    orientationChanged = Signal(str)
+    fullscreenRequested = Signal()
 
     def __init__(self, panes: int = DEFAULT_PANES, scroll_seconds: int = 5,
-                 parent=None):
+                 parent=None, orientation: str = "vertical"):
         super().__init__(parent)
         self.setStyleSheet(SPLIT_STYLE)
         self.pool: list = []
         self.shown: list = []
+        self.scroll_seconds = scroll_seconds
+        self.orientation = orientation
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -237,27 +278,108 @@ class SplitWall(QWidget):
 
         # La taille du vivier, dite au-dessus des panneaux : on veut savoir
         # dans combien de videos le hasard pioche, surtout apres un filtre.
-        self.caption = QLabel("", self)
+        # Une ligne de reglages : combien, lesquelles, et le plein ecran.
+        self.controls = QWidget(self)
+        controls = QHBoxLayout(self.controls)
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(4)
+        self.caption = QLabel("", self.controls)
         self.caption.setObjectName("splitName")
-        outer.addWidget(self.caption)
+        self.caption.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        controls.addWidget(self.caption, 1)
+        self.count_buttons: dict = {}
+        for count in PANE_CHOICES:
+            button = QPushButton(str(count), self.controls)
+            button.setObjectName("splitButton")
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setToolTip(f"{count} vidéos à la fois")
+            button.clicked.connect(lambda _c=False, n=count: self.countChanged.emit(n))
+            controls.addWidget(button)
+            self.count_buttons[count] = button
+        controls.addSpacing(10)
+        self.orientation_buttons: dict = {}
+        for key, label in ORIENTATIONS:
+            button = QPushButton(label, self.controls)
+            button.setObjectName("splitButton")
+            button.setFocusPolicy(Qt.NoFocus)
+            button.clicked.connect(
+                lambda _c=False, k=key: self.orientationChanged.emit(k))
+            controls.addWidget(button)
+            self.orientation_buttons[key] = button
+        controls.addSpacing(10)
+        full = QPushButton("⛶ Plein écran", self.controls)
+        full.setObjectName("splitButton")
+        full.setFocusPolicy(Qt.NoFocus)
+        full.setToolTip("Le mur seul, sur tout l'écran — Échap pour revenir")
+        full.clicked.connect(self.fullscreenRequested)
+        controls.addWidget(full)
+        outer.addWidget(self.controls)
 
         self.row = QWidget(self)
-        row_layout = QHBoxLayout(self.row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(8)
+        self.grid = QGridLayout(self.row)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setSpacing(8)
         self.panes: list = []
-        for index in range(panes):
-            pane = SplitPane(index, scroll_seconds, self.row)
-            pane.wants_next.connect(self.refill_one)
-            pane.opened.connect(self.opened)
-            row_layout.addWidget(pane, 1)
-            self.panes.append(pane)
+        self.set_pane_count(panes)
         self.row.hide()
         outer.addWidget(self.row, 1)
+        self._mark_choices()
+
+    def _mark_choices(self) -> None:
+        for count, button in self.count_buttons.items():
+            button.setProperty("chosen", "true" if count == len(self.panes) else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+        for key, button in self.orientation_buttons.items():
+            button.setProperty("chosen", "true" if key == self.orientation else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def set_orientation(self, orientation: str) -> None:
+        self.orientation = orientation
+        self._lay_out()
+
+    def set_pane_count(self, count: int) -> None:
+        """Autant de panneaux que demande, en gardant ceux qui existent."""
+        count = max(1, count)
+        while len(self.panes) > count:
+            pane = self.panes.pop()
+            pane.clear()
+            self.grid.removeWidget(pane)
+            pane.deleteLater()
+        while len(self.panes) < count:
+            pane = SplitPane(len(self.panes), self.scroll_seconds, self.row)
+            pane.wants_next.connect(self.refill_one)
+            pane.opened.connect(self.opened)
+            pane.set_bare(self.panes[0].bare if self.panes else False)
+            self.panes.append(pane)
+        self._lay_out()
+
+    def _lay_out(self) -> None:
+        rows, cols = grid_for(len(self.panes), self.orientation)
+        for pane in self.panes:
+            self.grid.removeWidget(pane)
+        for index, pane in enumerate(self.panes):
+            # Plusieurs rangees : chacune doit pouvoir tenir dans l'ecran.
+            pane.stage.setMinimumHeight(240 if rows == 1 else 120)
+            self.grid.addWidget(pane, index // cols, index % cols)
+        for row in range(rows):
+            self.grid.setRowStretch(row, 1)
+        for col in range(cols):
+            self.grid.setColumnStretch(col, 1)
+        self._mark_choices()
+
+    def set_bare(self, bare: bool) -> None:
+        """Rien que les videos : ni reglages, ni barres de panneau."""
+        self.controls.setVisible(not bare)
+        for pane in self.panes:
+            pane.set_bare(bare)
 
     def set_caption(self, count: int) -> None:
+        kind = {"vertical": "verticale(s) connue(s)",
+                "horizontal": "horizontale(s) connue(s)"}.get(self.orientation, "")
         self.caption.setText(
-            f"{count} vidéo(s) verticale(s) connue(s) — le mur y pioche au hasard"
+            f"{count} vidéo(s) {kind} — le mur y pioche au hasard".replace("  ", " ")
             if count else "")
 
     # -- vivier ----------------------------------------------------------

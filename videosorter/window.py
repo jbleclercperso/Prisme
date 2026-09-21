@@ -534,8 +534,13 @@ class MainWindow(QMainWindow):
         self.viewer.addWidget(self.grid)
         self.viewer.addWidget(self.single)
         self.wall = SplitWall(
-            DEFAULT_PANES, self.cfg["scroll_seconds"], self.viewer)
+            self.cfg["wall_panes"] or DEFAULT_PANES, self.cfg["scroll_seconds"],
+            self.viewer, self.cfg["wall_orientation"] or "vertical")
         self.wall.opened.connect(self.open_video_path)
+        self.wall.countChanged.connect(self.set_wall_count)
+        self.wall.orientationChanged.connect(self.set_wall_orientation)
+        self.wall.fullscreenRequested.connect(self.toggle_wall_fullscreen)
+        self.wall_full = False
         self.viewer.addWidget(self.board)
         self.viewer.addWidget(self.wall)
         middle.addWidget(self.viewer, 1)
@@ -2120,8 +2125,48 @@ class MainWindow(QMainWindow):
         self._show_counts()
         return True
 
+    def set_wall_count(self, count: int) -> None:
+        self.cfg["wall_panes"] = count
+        self.cfg.save_soon()
+        self.wall.set_pane_count(count)
+        self.wall.shuffle_all()
+
+    def set_wall_orientation(self, orientation: str) -> None:
+        self.cfg["wall_orientation"] = orientation
+        self.cfg.save_soon()
+        self.wall.set_orientation(orientation)
+        self.show_wall()
+
+    def toggle_wall_fullscreen(self, on: bool | None = None) -> None:
+        """Le mur seul, sur tout l'écran. Échap ramène tout le reste."""
+        self.wall_full = (not self.wall_full) if on is None else bool(on)
+        chrome = (self.crumbs, self.tabs, self.controls, self.commands,
+                  self.progress, self.stars, self.item_card)
+        if self.wall_full:
+            self._wall_kept = (self.tree.isVisible(), self.aside.isVisible(),
+                               self.windowState())
+            for widget in chrome:
+                widget.hide()
+            self.tree.hide()
+            self.aside.hide()
+            self.wall.set_bare(True)
+            self.showFullScreen()
+        else:
+            tree, aside, state = getattr(self, "_wall_kept", (False, False, None))
+            self.wall.set_bare(False)
+            for widget in chrome:
+                widget.show()
+            self.tree.setVisible(tree)
+            self.aside.setVisible(aside)
+            if state is not None:
+                self.setWindowState(state)
+            else:
+                self.showNormal()
+            self._apply_selectors()
+        self.setFocus()
+
     def vertical_pool(self) -> list:
-        """Les vidéos verticales connues, filtrées par la recherche en cours.
+        """Les vidéos de l'orientation choisie, filtrées par la recherche en cours.
 
         « Connues » veut dire : dont la résolution a déjà été relevée. On ne
         sonde rien ici — mille sondages sur un partage réseau feraient attendre
@@ -2140,12 +2185,18 @@ class MainWindow(QMainWindow):
             seen.add(key)
             if terms and not any(term in key.lower() for term in terms):
                 continue
+            wanted = self.cfg["wall_orientation"] or "vertical"
+            if wanted == "any":
+                found.append(key)
+                continue
             info = INDEX.probe(video)
             if not info:
                 continue
             width = info.get("width") or 0
             height = info.get("height") or 0
-            if height > width > 0:
+            if wanted == "vertical" and height > width > 0:
+                found.append(key)
+            elif wanted == "horizontal" and width >= height > 0:
                 found.append(key)
         return found
 
@@ -2154,7 +2205,7 @@ class MainWindow(QMainWindow):
         self.viewer.setCurrentWidget(self.wall)
         self.wall.set_pool(self.vertical_pool())
         self.wall.set_caption(len(self.wall.pool))
-        self.item_title.setText(f"{len(self.wall.pool)} vidéo(s) verticale(s)")
+        self.item_title.setText(f"{len(self.wall.pool)} vidéo(s) pour le mur")
 
     def open_video_path(self, path: str) -> None:
         """Ouvre dans la fiche une vidéo désignée par son chemin."""
@@ -2234,6 +2285,8 @@ class MainWindow(QMainWindow):
         # lenteur qu'on sentait sous le doigt.
         self._hush_players()
         if tab != TAB_SPLIT:
+            if self.wall_full:
+                self.toggle_wall_fullscreen(False)
             self.wall.stop()
         self._apply_selectors()
 
@@ -3363,6 +3416,8 @@ class MainWindow(QMainWindow):
             if key == Qt.Key_E:
                 return self.reveal_current()
             if key == Qt.Key_J:
+                if self.tab == TAB_SPLIT:
+                    return self.toggle_wall_fullscreen()
                 return self.toggle_cinema()
             if key == Qt.Key_M:
                 return self.toggle_mute()
@@ -3401,6 +3456,8 @@ class MainWindow(QMainWindow):
         if key == Qt.Key_Left:
             return self.show_item(self.index - 1)
         if key == Qt.Key_Escape:
+            if self.wall_full:
+                return self.toggle_wall_fullscreen(False)
             if self.cinema:
                 # Echap sort d'abord du cinema : c'est le geste qu'on fait.
                 return self.toggle_cinema(False)

@@ -31,6 +31,7 @@ SHORTCUTS = [
     ]),
     ("Regarder", [
         ("Ctrl+J", "cinéma : l'image seule, sans rien autour"),
+        ("Ctrl+J sur le mur", "le mur seul, plein écran — Échap pour revenir"),
         ("Ctrl+L", "planche contact : une ligne par vidéo"),
         ("Ctrl+P", "basculer entre la planche et la fiche"),
         ("Ctrl+M", "couper ou rendre le son"),
