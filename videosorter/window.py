@@ -234,7 +234,7 @@ class MainWindow(QMainWindow):
         self._refresh_mute()
         self._refresh_state()
         WATCH.setParent(self)
-        WATCH.start()
+        WATCH.start(str(cfg["root"] or ""))
         self._siblings_cache: dict = {}
         self.welcome.set_recent(cfg["recent_roots"])
         self.stack.setCurrentIndex(PAGE_WELCOME)
