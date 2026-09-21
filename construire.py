@@ -80,24 +80,16 @@ def build(complete: bool = False) -> int:
     for folder in (HERE / "build", HERE / "dist"):
         shutil.rmtree(folder, ignore_errors=True)
 
-    command = [
-        sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
-        "--name", "Prisme",
-        # Sans console : c'est une application à fenêtre, pas un outil en ligne.
-        "--windowed",
-        "--icon", str(HERE / "prisme.ico"),
-        # Le lecteur vidéo de Qt vit dans un greffon chargé au vol : sans
-        # cette mention, PyInstaller ne le voit pas et la fenêtre reste noire.
-        "--collect-all", "PySide6.QtMultimedia",
-        "--hidden-import", "PySide6.QtMultimediaWidgets",
-        "--hidden-import", "rapidfuzz",
-    ]
-    for name in EXCLUDES:
-        command += ["--exclude-module", name]
-    command.append(str(HERE / "main.py"))
+    spec = HERE / "Prisme.spec"
+    spec.write_text(SPEC.format(
+        here=str(HERE).replace("\\", "\\\\"),
+        excludes=repr(EXCLUDES),
+    ), encoding="utf-8")
 
     print("Construction…", flush=True)
-    code = subprocess.call(command, cwd=str(HERE))
+    code = subprocess.call(
+        [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(spec)],
+        cwd=str(HERE))
     if code != 0:
         return code
 
@@ -131,6 +123,40 @@ def build(complete: bool = False) -> int:
     print(f"\ndist/Prisme/      {weight / 1024 / 1024:.0f} Mo")
     print(f"dist/{name}   {archive.stat().st_size / 1024 / 1024:.0f} Mo")
     return 0
+
+
+# Deux executables pour un seul dossier : celui qu'on lance tous les jours,
+# sans console, et son jumeau bavard. Une application sans console qui echoue
+# au demarrage ne dit rien du tout — c'est le seul moyen de voir pourquoi.
+SPEC = r"""# -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+extra_datas, extra_binaries, extra_hidden = collect_all("PySide6.QtMultimedia")
+
+a = Analysis(
+    [r"{here}\main.py"],
+    pathex=[r"{here}"],
+    binaries=extra_binaries,
+    datas=extra_datas,
+    hiddenimports=extra_hidden + ["PySide6.QtMultimediaWidgets", "rapidfuzz"],
+    excludes={excludes},
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+
+fenetre = EXE(
+    pyz, a.scripts, [], exclude_binaries=True, name="Prisme",
+    console=False, icon=r"{here}\prisme.ico",
+)
+console = EXE(
+    pyz, a.scripts, [], exclude_binaries=True, name="Prisme-diagnostic",
+    console=True, icon=r"{here}\prisme.ico",
+)
+coll = COLLECT(
+    fenetre, console, a.binaries, a.datas, strip=False, upx=False,
+    name="Prisme",
+)
+"""
 
 
 LISEZMOI = """Prisme — tri rapide d'une collection vidéo
@@ -177,6 +203,18 @@ X:, ce doit être X: ici aussi.
 
 OÙ TROUVER TOUT ÇA
 Le menu ⋯ → « Où sont les vignettes » le dit, avec le compte des fichiers.
+
+SI RIEN NE SE LANCE
+Lancez « Prisme-diagnostic.exe » : c'est le même programme, mais avec une
+fenêtre noire qui affiche ce qui ne va pas. Le détail est aussi écrit
+dans « prisme-erreur.log », à côté du programme.
+
+Trois causes habituelles :
+  1. Windows a bloqué les fichiers venus du réseau. Clic droit sur
+     l'archive AVANT de la décompresser → Propriétés → cocher
+     « Débloquer » → Appliquer.
+  2. L'antivirus a mis Prisme.exe en quarantaine. Regardez son journal.
+  3. Un composant Windows manque. La fenêtre de diagnostic le nomme.
 
 LES RACCOURCIS
 Le menu ⋯ → « Raccourcis et recherche ».
