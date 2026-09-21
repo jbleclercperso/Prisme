@@ -226,6 +226,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._refresh_mute()
+        self._refresh_state()
         self.welcome.set_recent(cfg["recent_roots"])
         self.stack.setCurrentIndex(PAGE_WELCOME)
 
@@ -295,6 +296,21 @@ class MainWindow(QMainWindow):
         self.scan_button.setProperty("running", "false")
         self.scan_button.setFocusPolicy(Qt.NoFocus)
         self.scan_button.clicked.connect(self.toggle_scan)
+
+        # L'etat de la collection, toujours sous les yeux : combien de videos
+        # sont repertoriees, combien ont leur vignette, et de quand ca date.
+        # On ne devrait jamais avoir a se demander si « ca compte ».
+        self.state_button = QPushButton("", sort_page)
+        self.state_button.setObjectName("collectionState")
+        self.state_button.setFocusPolicy(Qt.NoFocus)
+        self.state_button.setCursor(Qt.PointingHandCursor)
+        # Son texte ne doit jamais dicter la largeur de la fenetre.
+        self.state_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.state_button.setStyleSheet(
+            "QPushButton#collectionState { background: transparent; border: 0;"
+            " color: #8b94a1; font-size: 12px; padding: 0 8px; }"
+            "QPushButton#collectionState:hover { color: #e9eef4; }")
+        self.state_button.clicked.connect(self.verify_collection)
 
         self.random_button = QPushButton("⚄  Aléatoire", sort_page)
         self.random_button.setObjectName("random")
@@ -398,6 +414,7 @@ class MainWindow(QMainWindow):
         selectors.addStretch(1)
         # « Analyser » vit dans le menu ; le hasard local va sous l'image.
         self.scan_button.hide()
+        selectors.addWidget(self.state_button)
         selectors.addWidget(self.random_button)
         selectors.addWidget(self.tree_button)
         selectors.addWidget(self.mute_button)
@@ -970,6 +987,60 @@ class MainWindow(QMainWindow):
         HelpDialog(self).exec()
         self.setFocus()
 
+    def _state(self) -> dict:
+        state = dict(self.cfg["collection"] or {})
+        self.cfg["collection"] = state
+        return state
+
+    def _note_state(self, **fields) -> None:
+        state = self._state()
+        state.update(fields)
+        self.cfg.save_soon()
+        self._refresh_state()
+
+    @staticmethod
+    def _stamp() -> str:
+        return datetime.now().strftime("%d/%m %H:%M")
+
+    @staticmethod
+    def _thousands(value: int) -> str:
+        return f"{value:,}".replace(",", " ")
+
+    def _refresh_state(self, live: str = "") -> None:
+        """« 106 903 vidéos · 41 230 vignettes (38 %) · analysé 21/09 14:32 »."""
+        state = self._state()
+        videos = int(state.get("videos") or 0)
+        thumbs = int(state.get("thumbs") or 0)
+        audited = int(state.get("audited") or 0)
+        parts = []
+        parts.append(f"{self._thousands(videos)} vidéos" if videos else "vidéos : ?")
+        if live:
+            parts.append(live)
+        elif audited:
+            pct = thumbs * 100 // max(1, audited)
+            parts.append(f"{self._thousands(thumbs)} vignettes ({pct} %)")
+        else:
+            parts.append("vignettes : ?")
+        when = state.get("scanned_at") or state.get("counted_at")
+        if when:
+            parts.append(f"analysé {when}")
+        self.state_button.setText("   ·   ".join(parts))
+        self.state_button.setToolTip(
+            "Ce que le logiciel sait de la collection :\n"
+            f"• vidéos répertoriées : {self._thousands(videos) if videos else 'pas encore comptées'}"
+            f"{' (' + state['counted_at'] + ')' if state.get('counted_at') else ''}\n"
+            f"• vignettes déjà faites : {self._thousands(thumbs) if audited else 'pas encore vérifiées'}"
+            f"{' sur ' + self._thousands(audited) + ' (' + state['audited_at'] + ')' if audited and state.get('audited_at') else ''}\n"
+            f"• dernière analyse des dossiers : {state.get('scanned_at') or 'jamais'}\n\n"
+            "Cliquer : recompter les vidéos, puis vérifier les vignettes.")
+
+    def verify_collection(self) -> None:
+        """Un clic : compter, puis verifier les vignettes. Les deux chiffres qui tranchent."""
+        if self.root is None:
+            return
+        self._audit_after_count = True
+        self.count_videos()
+
     def count_videos(self) -> None:
         """Compte les videos sous la racine, et le dit en clair."""
         if self.root is None or self.counter is not None:
@@ -977,17 +1048,23 @@ class MainWindow(QMainWindow):
         top = self.top_root()
         self.counter = VideoCount(top, self.cfg["skip_hidden"], self)
         self.counter.progress.connect(
-            lambda n: self.show_banner(f"Comptage… {n} vidéo(s)", "info"))
+            lambda n: (self.show_banner(f"Comptage… {n} vidéo(s)", "info"),
+                       self._refresh_state(f"comptage {n}…")))
         self.counter.counted.connect(lambda n: self._told_count(top, n))
         self.counter.start()
         self.show_banner(f"Comptage des vidéos sous {top}…", "info")
 
     def _told_count(self, top, total: int) -> None:
         self.counter = None
+        if self.origin is None or Path(top) == Path(self.origin):
+            self._note_state(videos=total, counted_at=self._stamp())
         self.show_banner(
             f"{total} vidéo(s) sous {top}. "
             f"C'est ce nombre que la préparation des vignettes doit atteindre.",
             "info")
+        if getattr(self, "_audit_after_count", False):
+            self._audit_after_count = False
+            self.audit_thumbs()
 
     def audit_thumbs(self) -> None:
         """Dit combien de videos ont deja leur vignette, et combien n'en ont pas.
@@ -1001,15 +1078,18 @@ class MainWindow(QMainWindow):
         self.audit = ThumbAudit(top, self.cfg["thumb_width"],
                                 self.cfg["skip_hidden"], self)
         self.audit.progress.connect(
-            lambda seen, ready: self.show_banner(
-                f"Vérification… {ready} vignette(s) sur {seen} vidéo(s)",
-                "info"))
+            lambda seen, ready: (
+                self.show_banner(
+                    f"Vérification… {ready} vignette(s) sur {seen} vidéo(s)",
+                    "info"),
+                self._refresh_state(f"vérification {ready} / {seen}")))
         self.audit.done.connect(lambda seen, ready: self._told_audit(seen, ready))
         self.audit.start()
         self.show_banner("Vérification des vignettes déjà fabriquées…", "info")
 
     def _told_audit(self, seen: int, ready: int) -> None:
         self.audit = None
+        self._note_state(thumbs=ready, audited=seen, audited_at=self._stamp())
         missing = max(0, seen - ready)
         if not seen:
             return self.show_banner("Aucune vidéo trouvée.", "error")
@@ -1175,6 +1255,8 @@ class MainWindow(QMainWindow):
 
     def on_backfill_progress(self, made: int, kept: int, total: int) -> None:
         self._name_backfill_action(made + kept, total)
+        self._refresh_state(f"préparation {self._thousands(made + kept)} / "
+                            f"{self._thousands(total)}")
         if self.scanning:
             return
         seen = made + kept
@@ -1191,6 +1273,13 @@ class MainWindow(QMainWindow):
 
     def on_backfill_done(self, made: int, kept: int, complete: bool) -> None:
         self.backfill = None
+        # Ce que la preparation a parcouru vaut une verification : chaque
+        # video vue a, ou n'a pas, sa vignette.
+        if made + kept:
+            self._note_state(thumbs=made + kept, audited=made + kept,
+                             audited_at=self._stamp())
+        else:
+            self._refresh_state()
         if not self.scanning:
             self.progress.hide()
             self.progress.setFormat("%v / %m analysés")
@@ -1641,6 +1730,11 @@ class MainWindow(QMainWindow):
         if mode == MODE_FOLDERS:
             self._plain_items = [i for i in self.all_items if not i.is_tag]
             self._plain_root = self.root
+            if self.origin is not None and Path(self.root) == Path(self.origin):
+                # L'analyse de la racine repertorie toute la collection : son
+                # total est la premiere reponse a « combien de videos ? ».
+                counted = sum(i.video_count for i in self._plain_items)
+                self._note_state(videos=counted, scanned_at=self._stamp())
         self._add_tag_items()
         self._show_counts()
         thread = self.scan_thread

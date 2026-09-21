@@ -2062,6 +2062,48 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(len(found) == 1 and {q.name for q in found[0][1]} == {"un.mp4", "deux.mp4"},
           f"les deux copies se retrouvent, la troisième non ({found})")
 
+    print("\n[63] État de la collection en haut, et noir au survol")
+    window.set_tab(TAB_FOLDERS)
+    window.origin = root
+    window.start_root(root, MODE_FOLDERS, new_origin=True)
+    # Les sections d'avant ont deplace des videos : on ne presume plus du compte.
+    check(wait_for(app, lambda: not window.scanning and len(window.items) >= 1, 60),
+          "analyse de la racine")
+    text = window.state_button.text()
+    state = window.cfg["collection"]
+    check(int(state.get("videos") or 0) > 0 and "vidéos" in text and "analysé" in text,
+          f"la racine analysée donne un compte et une date ({text!r})")
+    window._told_count(root, 19)
+    check(window.state_button.text().startswith("19 vidéos")
+          and window.cfg["collection"].get("counted_at"),
+          "le comptage met le nombre à jour")
+    window._told_audit(19, 5)
+    check("5 vignettes (26 %)" in window.state_button.text(),
+          f"la vérification dit combien de vignettes ({window.state_button.text()!r})")
+    window.on_backfill_progress(3, 2, 19)
+    check("préparation 5 / 19" in window.state_button.text(),
+          "la préparation s'affiche en direct")
+    window.on_backfill_done(3, 2, False)
+    check("5 vignettes" in window.state_button.text(), "et laisse son bilan")
+    window._audit_after_count = True
+    window._told_count(root, 19)
+    check(window.audit is not None, "un clic enchaîne comptage puis vérification")
+    wait_for(app, lambda: window.audit is None, 60)
+    check("Cliquer" in window.state_button.toolTip(), "l'infobulle explique")
+
+    window.toggle_board(True)
+    pump(app, 0.3)
+    b = window.board
+    b.hover_timer.stop()
+    b.hovered = 0
+    b._play(0)
+    check(b._blackout and b.video.isHidden(), "au survol, un noir franc d'abord")
+    check(wait_for(app, lambda: not b._blackout and b._loaded, 10), "le média se charge, le noir se lève")
+    check(wait_for(app, lambda: not b.video.isHidden(), 20), "puis l'image vient — la sienne")
+    b.stop()
+    b.hovered = -1
+    b.hover_timer.start()
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

@@ -60,6 +60,7 @@ DEFAULTS = {
     "tree_action": "send",       # clic dans l arborescence : send | go
     "tags": [],
     "last_item": "",             # dernier element regarde, pour y revenir
+    "collection": {},            # videos, vignettes, dates : l'etat affiche en haut
     "only_unseen": False,        # ne montrer que ce qui reste a voir
     "orientations": ["vertical", "horizontal"],  # ce qu'on veut voir
     "folder_min": 0,             # dossiers d'au moins tant de videos (0 : tous)

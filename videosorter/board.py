@@ -451,6 +451,17 @@ class BoardView(QWidget):
         self.floating = HoverHandles(self.window())
         self.floating.pick.toggled.connect(self._float_picked)
         self.floating.discard.clicked.connect(self._float_discard)
+        # Le fantome : Qt livre parfois une image qui appartient encore au
+        # fichier precedent, juste apres le changement de source. Deux
+        # verrous, comme dans la fiche : rien avant que le nouveau media soit
+        # charge, et rien avant un court noir — l'image ne revient qu'une
+        # fois les deux leves.
+        self._loaded = False
+        self._blackout = False
+        self.blackout_timer = QTimer(self)
+        self.blackout_timer.setSingleShot(True)
+        self.blackout_timer.setInterval(160)
+        self.blackout_timer.timeout.connect(self._end_blackout)
         self.dwell_timer = QTimer(self)
         self.dwell_timer.setSingleShot(True)
         self.dwell_timer.setInterval(140)
@@ -799,7 +810,7 @@ class BoardView(QWidget):
 
     def _on_frame(self, frame) -> None:
         """Premiere image du media survole : c'est maintenant qu'on l'affiche."""
-        if not self._awaiting_frame or self.hovered == -1:
+        if not self._awaiting_frame or self.hovered == -1 or not self._loaded:
             return
         try:
             valid = frame.isValid()
@@ -808,7 +819,13 @@ class BoardView(QWidget):
         if not valid:
             return
         self._awaiting_frame = False
-        self.video.show()
+        if not self._blackout:
+            self.video.show()
+
+    def _end_blackout(self) -> None:
+        self._blackout = False
+        if not self._awaiting_frame and self.hovered != -1 and self._loaded:
+            self.video.show()
 
     def _play(self, position: int) -> None:
         card = self.cards[position]
@@ -824,9 +841,12 @@ class BoardView(QWidget):
         self._pending_seek = self._segment_start
         url = QUrl.fromLocalFile(card.video)
         self._awaiting_frame = True
+        self._blackout = True
+        self.blackout_timer.start()
         if self.player.source() == url:
             self.player.setPosition(self._segment_start)
         else:
+            self._loaded = False
             self.player.setSource(url)
         self.player.play()
 
@@ -834,6 +854,7 @@ class BoardView(QWidget):
         loaded = (QMediaPlayer.MediaStatus.LoadedMedia,
                   QMediaPlayer.MediaStatus.BufferedMedia)
         if status in loaded:
+            self._loaded = True
             if self._pending_seek:
                 self.player.setPosition(self._pending_seek)
                 self._pending_seek = 0
