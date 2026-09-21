@@ -2308,6 +2308,44 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     scan2.start()
     check(wait_for(app, lambda: "seen" in got2, 60) and got2["seen"] == 0, "et jamais deux")
 
+    print("\n[68] Prisme : le nom, l'icône, la reprise du cache")
+    import videosorter.config as _cfgmod
+    from videosorter.config import APP_NAME
+    from videosorter.widgets import app_icon
+
+    check(APP_NAME == "Prisme", f"l'application s'appelle Prisme (obtenu {APP_NAME!r})")
+    check(window.windowTitle() == APP_NAME, "la fenêtre le porte")
+    check(not window.windowIcon().isNull(), "et elle a une icône")
+    drawn = app_icon(64)
+    check(not drawn.isNull() and drawn.pixmap(64, 64).size().width() == 64,
+          "l'icône se dessine à la taille demandée")
+    # Dessinee, donc nette a toute taille : Windows en reclame plusieurs.
+    check(not app_icon(16).isNull() and not app_icon(256).isNull(),
+          "à toutes les tailles que Windows réclame")
+
+    # La reprise : l'ancien dossier est renomme, pas recopie ni perdu.
+    from videosorter.config import adopt_old_cache
+    bench = base / "_migration"
+    shutil.rmtree(bench, ignore_errors=True)
+    old = bench / "VideoSorter"
+    (old / "thumbs" / "ab").mkdir(parents=True)
+    (old / "thumbs" / "ab" / "abcd.jpg").write_bytes(b"x")
+    (old / "index.db").write_bytes(b"y")
+    kept_local, kept_dir = _cfgmod._LOCAL, _cfgmod.APP_DIR
+    _cfgmod._LOCAL, _cfgmod.APP_DIR = bench, bench / "Prisme"
+    try:
+        taken = adopt_old_cache()
+        check(bool(taken) and not old.exists(), "l'ancien dossier est repris")
+        check((bench / "Prisme" / "thumbs" / "ab" / "abcd.jpg").exists()
+              and (bench / "Prisme" / "index.db").exists(),
+              "avec ses vignettes et son index")
+        check(adopt_old_cache() == "", "et une seconde fois ne fait rien")
+        # Un dossier neuf deja present : on n'ecrase rien.
+        (bench / "VideoSorter").mkdir()
+        check(adopt_old_cache() == "", "ni quand le nouveau existe déjà")
+    finally:
+        _cfgmod._LOCAL, _cfgmod.APP_DIR = kept_local, kept_dir
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

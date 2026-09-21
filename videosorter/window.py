@@ -21,7 +21,7 @@ from .dupes import DuplicateScan, ImageDuplicateScan
 from .help import HelpDialog
 from .board import COLUMN_CHOICES, BoardView
 from .actions import ActionError, HistoryEntry
-from .config import APP_DIR, Config
+from .config import APP_DIR, APP_NAME, Config
 from .header import (
     CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, TAB_FOLDERS,
     TAB_SPLIT, TAB_TAGS, TAB_VIDEOS, TABS, VIEW_BROWSE, VIEW_EDIT, Breadcrumb, Chips,
@@ -55,7 +55,7 @@ from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
-    PeekOverlay, RadialMenu, draw_icon,
+    PeekOverlay, RadialMenu, app_icon, draw_icon,
     STYLESHEET, CommandBar, DestinationsDialog, PreviewGrid, SinglePlayer,
     StarStrip, TagsDialog, TrashDialog,
 )
@@ -76,7 +76,7 @@ class WelcomePage(QWidget):
         layout.setContentsMargins(60, 50, 60, 50)
         layout.setSpacing(14)
 
-        title = QLabel("VideoSorter", self)
+        title = QLabel(APP_NAME, self)
         title.setObjectName("title")
         subtitle = QLabel(
             "Choisissez un dossier racine. S'il contient des sous-dossiers, ils sont "
@@ -135,7 +135,8 @@ class MainWindow(QMainWindow):
     def __init__(self, cfg: Config):
         super().__init__()
         self.cfg = cfg
-        self.setWindowTitle("VideoSorter")
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(app_icon())
         self.resize(cfg["window"].get("w", 1400), cfg["window"].get("h", 900))
         self.setStyleSheet(STYLESHEET + HEADER_STYLE)
 
@@ -4319,7 +4320,7 @@ class MainWindow(QMainWindow):
                 "fermeture dès qu'ils sont terminés.",
                 "", 0, 0, self,
             )
-            waiter.setWindowTitle("VideoSorter")
+            waiter.setWindowTitle(APP_NAME)
             waiter.setCancelButton(None)
             waiter.setMinimumDuration(0)
             waiter.show()
@@ -4352,7 +4353,7 @@ def check_tools(parent=None) -> bool:
         return True
     QMessageBox.critical(
         parent, "ffmpeg introuvable",
-        "VideoSorter a besoin de ffmpeg et ffprobe pour fabriquer les aperçus.\n\n"
+        f"{APP_NAME} a besoin de ffmpeg et ffprobe pour fabriquer les aperçus.\n\n"
         "Installez-les (winget install Gyan.FFmpeg) ou renseignez leur chemin "
         "dans le fichier de configuration.",
     )

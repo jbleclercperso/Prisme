@@ -5,8 +5,29 @@ import json
 import os
 from pathlib import Path
 
-APP_NAME = "VideoSorter"
-APP_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / APP_NAME
+APP_NAME = "Prisme"
+# Le logiciel s'est appele VideoSorter. Son cache pese plus d'un gigaoctet de
+# vignettes et un index de vingt-six mega : on le reprend tel quel au premier
+# lancement, au lieu de tout refabriquer.
+_OLD_NAME = "VideoSorter"
+_LOCAL = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+APP_DIR = _LOCAL / APP_NAME
+
+
+def adopt_old_cache() -> str:
+    """Renomme l'ancien dossier, si le nouveau n'existe pas encore.
+
+    Rend le chemin repris, ou une chaine vide. Un echec n'est pas grave : on
+    repart d'un cache vide, ce qui coute du temps mais ne perd rien.
+    """
+    old = _LOCAL / _OLD_NAME
+    if APP_DIR.exists() or not old.is_dir():
+        return ""
+    try:
+        old.rename(APP_DIR)
+    except OSError:
+        return ""
+    return str(old)
 CONFIG_PATH = APP_DIR / "config.json"
 THUMB_DIR = APP_DIR / "thumbs"
 INDEX_PATH = APP_DIR / "index.db"

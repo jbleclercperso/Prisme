@@ -37,7 +37,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-USER_AGENT = "VideoSorterBot/1.0 (+usage personnel ; recherche de contenu video)"
+USER_AGENT = "PrismeBot/1.0 (+usage personnel ; recherche de contenu video)"
 REQUEST_TIMEOUT = 10
 MAX_PAGE_BYTES = 3_000_000
 DOMAIN_DELAY = 0.6  # secondes entre deux requetes vers le meme domaine

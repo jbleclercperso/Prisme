@@ -646,6 +646,45 @@ QLabel#peekCaption { color: #e9eef4; font-size: 12px; font-weight: 600; }
 """
 
 
+def app_icon(size: int = 256) -> QIcon:
+    """Le prisme : un rai entre, un triangle le decompose, trois rais sortent.
+
+    Dessinee plutot que chargee : pas de fichier a livrer, et l'icone reste
+    nette a toutes les tailles que Windows demande.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    s = size / 64.0
+
+    # Le fond : un carre sombre aux coins arrondis, comme les autres icones
+    # de la barre des taches.
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor("#11151b"))
+    painter.drawRoundedRect(0, 0, size, size, 12 * s, 12 * s)
+
+    # Le rai qui entre, blanc, par la gauche.
+    painter.setPen(QPen(QColor("#e9eef4"), 3 * s, Qt.SolidLine, Qt.RoundCap))
+    painter.drawLine(int(6 * s), int(30 * s), int(24 * s), int(30 * s))
+
+    # Les trois rais qui sortent, ecartes en eventail.
+    for color, dy in (("#e2645c", -9), ("#d8c05a", 0), ("#5aa9d8", 9)):
+        painter.setPen(QPen(QColor(color), 3 * s, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(int(40 * s), int(32 * s),
+                         int(58 * s), int((36 + dy) * s))
+
+    # Le prisme lui-meme : un triangle clair, pose sur la pointe du haut.
+    triangle = QPolygonF([QPointF(32 * s, 12 * s), QPointF(48 * s, 46 * s),
+                          QPointF(16 * s, 46 * s)])
+    painter.setPen(QPen(QColor("#8b94a1"), 2.5 * s, Qt.SolidLine,
+                        Qt.SquareCap, Qt.RoundJoin))
+    painter.setBrush(QColor(233, 238, 244, 26))
+    painter.drawPolygon(triangle)
+    painter.end()
+    return QIcon(pixmap)
+
+
 def draw_icon(kind: str, on: bool = True, size: int = 20,
               color: str = "#d5dbe3") -> QIcon:
     """Icones dessinees plutot que des emojis : nettes, sobres, et lisibles.
