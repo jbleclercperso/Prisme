@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import actions
-from .backfill import ThumbAudit, ThumbBackfill, VideoCount
+from .backfill import TitleScan, ThumbAudit, ThumbBackfill, VideoCount
 from .dupes import DuplicateScan, ImageDuplicateScan
 from .help import HelpDialog
 from .board import COLUMN_CHOICES, BoardView
@@ -31,7 +31,7 @@ from .header import (
 from . import media
 from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
-from .tagging import MIN_BUCKET, build_tag_items, top_words
+from .tagging import MIN_BUCKET, TagsThread, build_tag_items, top_words
 from .split import DEFAULT_PANES, SplitWall
 from .perf import LOG as STALL_LOG, WATCH, mark
 from .query import matches_text
@@ -194,6 +194,10 @@ class MainWindow(QMainWindow):
 
         self.transfers = TransferQueue(self)
         self._commands_signature = None
+        self._top_tags = None          # ((racine, nb videos), items) deja calcules
+        self._tags_thread = None
+        self._tags_key = None
+        self.titles_scan = None
         self._resume_id = cfg["last_item"] or ""
         # Le compteur de session : combien de decisions, depuis quand.
         self._session_started = time.monotonic()
@@ -366,6 +370,7 @@ class MainWindow(QMainWindow):
             ("Préparer toutes les vignettes", self.toggle_backfill),
             ("Compter les vidéos", self.count_videos),
             ("État des vignettes", self.audit_thumbs),
+            ("Analyser les titres des métadonnées", self.scan_titles),
             ("Chercher les doublons (même taille)", self.find_duplicates),
             ("Chercher les doublons (même image)",
              lambda: self.find_duplicates(by_image=True)),
@@ -1737,7 +1742,47 @@ class MainWindow(QMainWindow):
         # Deux familles : les mots qu'on a saisis, et ceux que les noms de
         # fichiers repetent d'eux-memes. Les seconds ne demandent aucune saisie
         # et decrivent souvent mieux la collection que ce qu'on aurait pense.
-        words = self.tags if self.tag_family == "mine" else top_words(videos)
+        if self.tag_family != "mine":
+            key = (str(self.root), len(videos))
+            cached = self._top_tags
+            if cached is not None and cached[0] == key:
+                found = cached[1]
+            else:
+                if self._tags_thread is None or self._tags_key != key:
+                    self._tags_key = key
+                    self._tags_thread = TagsThread(videos, INDEX.titles, self)
+                    self._tags_thread.ready.connect(self._on_top_tags)
+                    self._tags_thread.start()
+                    self.show_banner("Mots fréquents : calcul en cours…", "info")
+                self.all_items = []
+                self.items = []
+                if self.browsing:
+                    self.refresh_board()
+                self.item_title.setText("Calcul des mots fréquents…")
+                self.item_subtitle.setText("")
+                self._show_counts()
+                return
+            if not found:
+                self.all_items = []
+                self.items = []
+                if self.browsing:
+                    self.refresh_board()
+                self.item_title.setText("Aucun mot-clé")
+                self.item_subtitle.setText(
+                    "Aucun mot ne revient assez souvent dans ces noms de fichiers.")
+                self._show_counts()
+                self.update_counter()
+                return
+            self.all_items = found if self.tab == TAB_TAGS else found + plain
+            self.items = [item for item in self.all_items if self._matches(item)]
+            self.apply_sort()
+            self.start_harvest()
+            if self.browsing:
+                self.refresh_board()
+            self._show_counts()
+            self.update_counter()
+            return
+        words = self.tags
         if not words:
             # Aucun mot-cle : la liste se vide **et l'affichage suit**. Il
             # restait auparavant sur les categories precedentes, si bien que
@@ -1783,6 +1828,7 @@ class MainWindow(QMainWindow):
         if mode == MODE_FOLDERS:
             self._plain_items = [i for i in self.all_items if not i.is_tag]
             self._plain_root = self.root
+            self._top_tags = None
             if self.origin is not None and Path(self.root) == Path(self.origin):
                 # L'analyse de la racine repertorie toute la collection : son
                 # total est la premiere reponse a « combien de videos ? ».
@@ -2983,6 +3029,41 @@ class MainWindow(QMainWindow):
         elif self.items:
             self.show_item(self.index)
         self.setFocus()
+
+    def _on_top_tags(self, found: list) -> None:
+        self._top_tags = (self._tags_key, found)
+        self._tags_thread = None
+        if self.tab == TAB_TAGS and self.tag_family != "mine" and not self.scanning:
+            self._add_tag_items()
+
+    def scan_titles(self) -> None:
+        """Lit le titre des metadonnees de toute la collection, en fond."""
+        if self.titles_scan is not None:
+            self.titles_scan.stop()
+            self.show_banner("Analyse des titres : arrêt demandé…", "quiet")
+            return
+        if self.root is None:
+            return
+        top = self.top_root()
+        self.titles_scan = TitleScan(top, self.cfg["skip_hidden"], self)
+        self.titles_scan.progress.connect(
+            lambda done, total: self._refresh_state(
+                f"titres {self._thousands(done)} / {self._thousands(total)}"))
+        self.titles_scan.done.connect(self._told_titles)
+        self.titles_scan.start()
+        self.show_banner(
+            f"Lecture des titres sous {top} — des heures s'il le faut, rien "
+            "n'est redemandé à la relance. Recliquer arrête.", "info")
+
+    def _told_titles(self, seen: int, found: int) -> None:
+        self.titles_scan = None
+        self._top_tags = None
+        self._refresh_state()
+        self.show_banner(
+            f"Titres : {seen} vidéo(s) sondée(s), {found} avec un titre dans "
+            "leurs métadonnées. Les mots fréquents en tiennent compte.", "done")
+        if self.tab == TAB_TAGS and self.tag_family != "mine":
+            self._add_tag_items()
 
     def set_tag_family(self, family: str) -> None:
         """Mes propres mots-clés, ou ceux que les noms de fichiers répètent."""

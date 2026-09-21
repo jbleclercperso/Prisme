@@ -1330,7 +1330,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.4)
     tops = [i for i in window.all_items if i.is_tag]
     check(bool(tops), f"les mots fréquents forment des dossiers ({len(tops)})")
-    check(any(i.path.name == "plage" for i in tops),
+    check(any(i.path.name.lower() == "plage" for i in tops),
           f"« plage » en fait partie ({[i.path.name for i in tops][:5]})")
     check(window.tag_chips.buttons["top"].property("chosen") == "true",
           "et la pastille le montre")
@@ -2262,6 +2262,51 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         check(window.cfg["thumb_count"] == 4 and window.grid.visible_count <= 4,
               f"quatre aperçus à la fois ({window.grid.visible_count})")
         window.set_thumb_count(10)
+
+    print("\n[67] Mots fréquents : un mot, toutes ses vidéos, les titres aussi")
+    from videosorter.tagging import TagsThread, frequent_tag_items, word_index
+    from videosorter.backfill import TitleScan
+    from videosorter.media import title_from
+    names = [Path("C:/x/house party.mp4"), Path("C:/x/House.mp4"),
+             Path("C:/x/beach the house.mp4"), Path("C:/x/beach.mp4"),
+             Path("C:/x/IMG_4521.mp4"), Path("C:/x/s01e02.mp4")]
+    index = word_index(names, {str(names[4]): "House Music Beach"})
+    check(len(index.get("house", [])) == 4, f"« house » réunit toutes ses vidéos, titre compris ({len(index.get('house', []))})")
+    check(len(index.get("beach", [])) == 3, "« beach » aussi, et une vidéo va dans plusieurs mots")
+    check("the" not in index and "img" not in index and "s01e02" not in index,
+          "ni mots vides, ni jetons, ni chiffres")
+    items = frequent_tag_items(names, {str(names[4]): "House Music Beach"})
+    check([i.path.name for i in items[:2]] == ["House", "Beach"], f"classés du plus porté au moins ({[i.path.name for i in items]})")
+    check(items[0].is_tag and items[0].video_count == 4, "et ce sont des dossiers virtuels")
+    out = {}
+    worker = TagsThread(names, {})
+    worker.ready.connect(lambda found: out.update(found=found))
+    worker.start()
+    check(wait_for(app, lambda: "found" in out, 20), "le calcul se fait hors du fil d'interface")
+    check(out["found"] and out["found"][0].path.name == "House", "avec le même résultat")
+
+    check(title_from({"format": {"tags": {"TITLE": "  Été 2019 "}}}) == "Été 2019", "le titre se lit quelle que soit sa casse")
+    check(title_from({"format": {}}) == "", "et vaut vide sans métadonnée")
+    INDEX.put_title("C:/x/y.mp4", "", "Un titre")
+    check(INDEX.title_of("C:/x/y.mp4") == "Un titre" and INDEX.has_title("C:/x/y.mp4"), "le titre est retenu")
+    INDEX.reopen(base / "_appdata" / "index.db")
+    check(INDEX.title_of("C:/x/y.mp4") == "Un titre", "et survit à une réouverture")
+    # Ces clips ont deja ete sondes plus haut, donc leur titre est connu : on
+    # l'oublie pour que l'analyse ait quelque chose a faire.
+    for video in (audite / "lot").glob("*.mp4"):
+        INDEX.titles.pop(str(video), None)
+    got = {}
+    scan = TitleScan(audite / "lot", True)
+    scan.done.connect(lambda seen, found: got.update(seen=seen, found=found))
+    scan.start()
+    check(wait_for(app, lambda: "seen" in got, 120), "l'analyse des titres parcourt le dossier")
+    check(got["seen"] == 3 and all(INDEX.has_title(v) for v in (audite / "lot").glob("*.mp4")),
+          f"chaque vidéo est sondée une fois ({got})")
+    scan2 = TitleScan(audite / "lot", True)
+    got2 = {}
+    scan2.done.connect(lambda seen, found: got2.update(seen=seen))
+    scan2.start()
+    check(wait_for(app, lambda: "seen" in got2, 60) and got2["seen"] == 0, "et jamais deux")
 
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]

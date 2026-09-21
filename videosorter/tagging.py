@@ -15,12 +15,17 @@ from pathlib import Path
 import re
 from collections import Counter
 
+from PySide6.QtCore import QThread, Signal
+
 from .scan import MODE_FOLDERS, Item
 
 # Mots de grammaire, et jetons techniques que porte tout nom de fichier : ils
 # reviennent partout, donc ne distinguent rien. Anglais et francais melanges,
 # les collections l'etant aussi.
 STOP_WORDS = {
+    # jetons d'appareils et d'outils
+    "img", "dsc", "pxl", "vid", "mvi", "gopro", "dji", "screen", "record",
+    "recording", "capture", "export", "output", "render", "trim", "converted",
     # extensions et jargon de fichier
     "mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "mpg", "mpeg", "m4v",
     "video", "videos", "vid", "clip", "clips", "movie", "movies", "film",
@@ -65,13 +70,88 @@ _CAMEL = re.compile(r"(?<=[a-z\u00df-\u00ff])(?=[A-Z\u00c0-\u00de])")
 _DIGIT = re.compile(r"(?<=\d)(?=[A-Za-z])|(?<=[A-Za-z])(?=\d)")
 
 
-def words_of(name: str):
-    """Les mots d'un nom de fichier, un par un."""
-    for chunk in _BREAK.split(Path(name).stem):
+def words_of_text(text: str):
+    """Les mots d'un texte quelconque — un titre de metadonnees, par exemple."""
+    for chunk in _BREAK.split(text):
         for piece in _CAMEL.split(chunk):
             for word in _DIGIT.split(piece):
                 if word:
                     yield word
+
+
+def words_of(name: str):
+    """Les mots d'un nom de fichier, un par un."""
+    yield from words_of_text(Path(name).stem)
+
+
+# Un mot, c'est des lettres : « s01e02 », « 4k », « 1080 » n'en sont pas.
+_ALPHA = re.compile(r"^[a-z\u00df-\u00ff]+$")
+
+
+def _keep(folded: str) -> bool:
+    return (MIN_WORD <= len(folded) <= MAX_WORD and folded not in STOP_WORDS
+            and _ALPHA.match(folded) is not None)
+
+
+def word_index(videos: list, titles: dict | None = None) -> dict:
+    """mot → videos qui le portent, en **un seul passage** sur les noms.
+
+    L'ancienne version testait chaque mot contre chaque nom : cent mots sur
+    cent mille noms, dix millions de comparaisons, vingt secondes d'onglet
+    fige. Ici chaque nom est decoupe une fois, et chaque video va dans
+    **tous** ses mots — « House » reunit bien toutes les videos qui disent
+    house. Les titres des metadonnees, quand on les connait, comptent aussi :
+    un nom de fichier n'est parfois qu'une suite de caracteres, et le vrai
+    titre est dedans.
+    """
+    titles = titles or {}
+    index: dict = {}
+    for video in videos:
+        key = str(video)
+        seen = set()
+        sources = [Path(key).stem]
+        extra = titles.get(key)
+        if extra:
+            sources.append(extra)
+        for source in sources:
+            for word in words_of_text(source):
+                folded = fold(word)
+                if folded in seen or not _keep(folded):
+                    continue
+                seen.add(folded)
+                index.setdefault(folded, []).append(video)
+    return index
+
+
+def frequent_tag_items(videos: list, titles: dict | None = None,
+                       limit: int = 100, minimum: int = 2) -> list:
+    """Les `limit` mots les plus portes, chacun avec toutes ses videos."""
+    index = word_index(videos, titles)
+    ranked = sorted(index.items(), key=lambda pair: (-len(pair[1]), pair[0]))
+    items = []
+    for word, found in ranked[:limit]:
+        if len(found) < minimum:
+            break
+        paths = sorted((Path(video) for video in found), key=lambda p: str(p).lower())
+        item = Item(path=Path(word.capitalize()), kind=MODE_FOLDERS, videos=paths,
+                    video_count=len(paths), file_count=len(paths))
+        item.is_tag = True
+        items.append(item)
+    return items
+
+
+class TagsThread(QThread):
+    """Calcule les mots frequents hors du fil d'interface : l'onglet reste vivant."""
+
+    ready = Signal(list)
+
+    def __init__(self, videos: list, titles: dict, parent=None):
+        super().__init__(parent)
+        self.videos = list(videos)
+        self.titles = dict(titles)
+
+    def run(self) -> None:
+        self.ready.emit(frequent_tag_items(self.videos, self.titles))
 
 
 def top_words(videos: list, limit: int = 100, minimum: int = 2) -> list:

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+import json
 import os
 
 from .config import APP_DIR, VIDEO_EXTS
@@ -267,3 +268,67 @@ class ThumbAudit(QThread):
                     self.progress.emit(seen, ready)
                     last = now
         self.done.emit(seen, ready)
+
+
+class TitleScan(QThread):
+    """Lit le titre des metadonnees de chaque video qui n'a pas encore ete sondee.
+
+    Des heures s'il le faut : un ffprobe par video, huit de front, et rien
+    n'est redemande a la relance — ce qui a ete lu est dans l'index. Les mots
+    frequents en tiennent compte des la fin.
+    """
+
+    WORKERS = 8
+    progress = Signal(int, int)      # faits, total
+    done = Signal(int, int)          # sondes, avec un titre
+
+    def __init__(self, root: Path, skip_hidden: bool = True, parent=None):
+        super().__init__(parent)
+        self.root = Path(root)
+        self.skip_hidden = skip_hidden
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def _one(self, video) -> int:
+        """1 si un titre a ete trouve, 0 sinon, -1 si l'on n'a rien pu lire."""
+        from .index import INDEX
+        from .media import PROBE_LIMITS, Tools, _run, title_from
+        from .stamps import stamp_of
+        if self._stop or not Tools.ffprobe:
+            return -1
+        code, out = _run([Tools.ffprobe, "-v", "error"] + PROBE_LIMITS + [
+            "-print_format", "json", "-show_entries", "format_tags", str(video)])
+        if code != 0 or not out:
+            return -1
+        try:
+            title = title_from(json.loads(out))
+        except ValueError:
+            return -1
+        INDEX.put_title(video, stamp_of(str(video)) or "", title)
+        return 1 if title else 0
+
+    def run(self) -> None:
+        from .index import INDEX
+        todo = [video for video in walk_videos(self.root, self.skip_hidden)
+                if not INDEX.has_title(video)]
+        if self._stop:
+            return self.done.emit(0, 0)
+        total = len(todo)
+        found = 0
+        seen = 0
+        last = 0.0
+        with ThreadPoolExecutor(max_workers=self.WORKERS) as pool:
+            for outcome in pool.map(self._one, todo):
+                seen += 1
+                if outcome == 1:
+                    found += 1
+                now = time.monotonic()
+                if now - last >= 0.3:
+                    self.progress.emit(seen, total)
+                    last = now
+                if self._stop:
+                    break
+        self.progress.emit(seen, total)
+        self.done.emit(seen, found)

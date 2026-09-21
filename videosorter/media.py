@@ -169,9 +169,19 @@ def probe(path: Path) -> dict:
                     pass
             break
         info["ok"] = info["width"] > 0 or info["duration"] > 0
+        INDEX.put_title(path, stamp, title_from(data))
 
     INDEX.put_probe(path, stamp, info)
     return info
+
+
+def title_from(data: dict) -> str:
+    """Le titre porte par le conteneur, s'il y en a un — quel que soit sa casse."""
+    tags = (data.get("format") or {}).get("tags") or {}
+    for key, value in tags.items():
+        if str(key).lower() == "title" and str(value).strip():
+            return str(value).strip()
+    return ""
 
 
 # ---------------------------------------------------------------------------

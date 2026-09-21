@@ -60,6 +60,11 @@ CREATE TABLE IF NOT EXISTS listings(
     stamp REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (root, mode)
 );
+CREATE TABLE IF NOT EXISTS titles(
+    path  TEXT PRIMARY KEY,
+    stamp TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS seen(
     id TEXT PRIMARY KEY,
     at REAL NOT NULL DEFAULT 0
@@ -132,6 +137,7 @@ class Index:
                 return
         self._load_probes()
         self._load_seen()
+        self._load_titles()
         self._migrate_json()
 
     def _sound(self) -> bool:
@@ -172,6 +178,38 @@ class Index:
             self.rebuilt = True
         except sqlite3.Error:
             self.db = None
+
+    def _load_titles(self) -> None:
+        self.titles: dict = {}
+        if self.db is None:
+            return
+        try:
+            for path, title in self.db.execute("SELECT path, title FROM titles"):
+                self.titles[path] = title
+        except sqlite3.Error:
+            pass
+
+    def put_title(self, path, stamp: str, title: str) -> None:
+        """Le titre des metadonnees — vide quand la video n'en porte pas, ce
+        qui vaut « sonde, rien trouve » et evite de le redemander."""
+        key = str(path)
+        self.titles[key] = title
+        if self.db is None:
+            return
+        with self.lock:
+            try:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO titles(path, stamp, title) VALUES (?,?,?)",
+                    (key, stamp or "", title or ""))
+                self.db.commit()
+            except sqlite3.Error:
+                pass
+
+    def has_title(self, path) -> bool:
+        return str(path) in self.titles
+
+    def title_of(self, path) -> str:
+        return self.titles.get(str(path), "")
 
     def _load_seen(self) -> None:
         self.seen = set()
@@ -539,6 +577,7 @@ class Index:
             return
         self._load_probes()
         self._load_seen()
+        self._load_titles()
         if migrate:
             self._migrate_json()
 
