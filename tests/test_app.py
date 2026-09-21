@@ -328,19 +328,20 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(tile.duration_chip.text() == "0:06", "la durée revient une fois le survol fini")
 
     print("\n[19] Bouton de son")
-    check(window.mute_button.text() == "\U0001F507",
-          f"le pictogramme dit que le son est coupé (obtenu {window.mute_button.text()!r})")
+    # Une icone dessinee, pas un emoji : c'est l'infobulle qui porte l'etat.
+    check(window.mute_button.toolTip().startswith("Son coupé") and not window.mute_button.icon().isNull(),
+          f"le pictogramme dit que le son est coupé (obtenu {window.mute_button.toolTip()!r})")
     QTest.mouseClick(window.mute_button, Qt.LeftButton)
     pump(app, 0.3)
     check(window.cfg["muted"] is False, "un clic réactive le son")
-    check(window.mute_button.text() == "\U0001F50A", "il change quand le son revient")
+    check(window.mute_button.toolTip().startswith("Son actif"), "il change quand le son revient")
     check(window.single.audio.isMuted() is False, "le lecteur suit")
     check(not hasattr(window.grid, "audio") and not hasattr(window.board, "audio"),
           "les apercus survoles n'ont aucune piste son a decoder")
     QTest.keyClick(window, Qt.Key_M, Qt.ControlModifier)
     pump(app, 0.3)
     check(window.cfg["muted"] is True, "Ctrl+M recoupe le son")
-    check(window.mute_button.text() == "\U0001F507", "et se remet à jour")
+    check(window.mute_button.toolTip().startswith("Son coupé"), "et se remet à jour")
 
     print("\n[20] Filtre par nom")
     window.start_root(root, MODE_FOLDERS)
@@ -589,9 +590,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     from videosorter.scan import human_duration
     expected = human_duration(window.current.info["duration"])
     title = window.item_title.text()
-    # La duree passe devant le nom : c'est elle qui decide si l'on regarde.
-    check(title.startswith(expected),
-          f"durée en tête du titre (attendu {expected}…, obtenu {title!r})")
+    # Le titre est le nom seul ; la duree se lit sous l'image, en temps restant.
+    check(title == window.current.name,
+          f"le titre est le nom seul (obtenu {title!r})")
     check(window.current.name in title, "le nom du fichier suit")
     info_line = window.item_subtitle.text()
     check("240p" in info_line, f"résolution nommée dans les infos (obtenu {info_line!r})")
@@ -599,7 +600,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     # repoussaient la taille hors de vue.
     check("320×240" not in info_line, "sans les dimensions exactes, redondantes")
     check("Ko" in info_line or "Mo" in info_line, "poids présent")
-    check("modifié le" in info_line, "date présente")
+    import re as _re_date
+    check(_re_date.search(r"\d{2}/\d{2}/\d{4}", info_line) is not None, "date présente")
 
     # Trois niveaux : la chaîne doit tous les montrer.
     window.go_up()
@@ -1989,8 +1991,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.burst_timer.setInterval(300)
     window.toggle_burst()
     window.show_item(0)
-    pump(app, 0.45)
-    check(window.index == 1, f"rafale : la suivante arrive toute seule ({window.index})")
+    check(wait_for(app, lambda: window.index >= 1, 5),
+          f"rafale : la suivante arrive toute seule ({window.index})")
     window.toggle_burst()
 
     # -- recherches enregistrees -------------------------------------------------

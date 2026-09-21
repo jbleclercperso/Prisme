@@ -8,7 +8,9 @@ from pathlib import Path
 from PySide6.QtCore import (
     QPoint, QPointF, QRect, QSize, QTimer, QUrl, Qt, Signal,
 )
-from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap, QPolygonF
+from PySide6.QtGui import (
+    QColor, QCursor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -643,6 +645,51 @@ QLabel#peekCaption { color: #e9eef4; font-size: 12px; font-weight: 600; }
 """
 
 
+def draw_icon(kind: str, on: bool = True, size: int = 20,
+              color: str = "#d5dbe3") -> QIcon:
+    """Icones dessinees plutot que des emojis : nettes, sobres, et lisibles.
+
+    « speaker » : un haut-parleur, barre au milieu quand le son est coupe.
+    « tree » : un petit schema d'arborescence. « up » : un chevron large.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(color), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    painter.setPen(pen)
+    s = size / 20.0
+    if kind == "speaker":
+        body = QPainterPath()
+        body.moveTo(3 * s, 8 * s)
+        body.lineTo(6.5 * s, 8 * s)
+        body.lineTo(11 * s, 4 * s)
+        body.lineTo(11 * s, 16 * s)
+        body.lineTo(6.5 * s, 12 * s)
+        body.lineTo(3 * s, 12 * s)
+        body.closeSubpath()
+        painter.fillPath(body, QColor(color))
+        if on:
+            painter.drawArc(int(9 * s), int(6 * s), int(8 * s), int(8 * s), -50 * 16, 100 * 16)
+            painter.drawArc(int(9 * s), int(3 * s), int(13 * s), int(14 * s), -45 * 16, 90 * 16)
+        else:
+            painter.setPen(QPen(QColor("#e26d76"), 2.6, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(int(14 * s), int(7 * s), int(14 * s), int(13 * s))
+    elif kind == "tree":
+        painter.drawLine(int(5 * s), int(3 * s), int(5 * s), int(15 * s))
+        for y in (6, 10.5, 15):
+            painter.drawLine(int(5 * s), int(y * s), int(9 * s), int(y * s))
+            painter.setBrush(QColor(color))
+            painter.drawRoundedRect(int(9 * s), int((y - 2) * s), int(7 * s), int(4 * s), 1, 1)
+    elif kind == "up":
+        pen.setWidthF(2.8)
+        painter.setPen(pen)
+        painter.drawPolyline(QPolygonF([QPointF(3 * s, 13 * s), QPointF(10 * s, 6 * s),
+                                        QPointF(17 * s, 13 * s)]))
+    painter.end()
+    return QIcon(pixmap)
+
+
 class PeekCell(QFrame):
     """Une case du peek : un instant de la video, et la destination qui va avec."""
 
@@ -866,7 +913,6 @@ class SinglePlayer(QWidget):
         strip.setFixedWidth(176)
         layout.addWidget(strip)
         self.strip = strip
-        outer.addWidget(self.under, 0)
 
         # Le widget garde a l ecran la derniere image rendue : en passant d une
         # video a l autre, on voyait donc un instant celle d avant. On le cache

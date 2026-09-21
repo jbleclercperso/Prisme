@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import random
 
-from PySide6.QtCore import QPoint, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QCursor, QPixmap
+from PySide6.QtCore import QPoint, QRect, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QCursor, QPixmap, QRegion
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -84,9 +84,6 @@ class BoardCard(QFrame):
         # des que le lecteur d'apercu s'affichait — il couvre l'image, et sous
         # Windows sa fenetre native passe devant tout. Elles etaient visibles
         # une demi-seconde, puis inatteignables.
-        handles = QHBoxLayout()
-        handles.setContentsMargins(0, 0, 0, 0)
-        handles.setSpacing(6)
         self.pick = QCheckBox(self)
         self.pick.setObjectName("cardPick")
         self.pick.setCursor(Qt.PointingHandCursor)
@@ -108,10 +105,12 @@ class BoardCard(QFrame):
         self.discard.setFixedSize(22, 22)
         self.discard.clicked.connect(
             lambda _c=False: self.discarded.emit(self.index))
-        handles.addWidget(self.pick, 0)
-        handles.addWidget(self.meta, 1)
-        handles.addWidget(self.discard, 0)
-        layout.addLayout(handles)
+        # Rien que le nom sous l'image : la ligne doit etre la plus courte
+        # possible, chaque pixel rendu va a la video. Coche et croix se posent
+        # sur l'image, en haut, et n'apparaissent qu'au survol ou cochees.
+        layout.addWidget(self.meta)
+        self.pick.hide()
+        self.discard.hide()
 
         # Sans cela, un clic tombant sur l'image ou le texte n'atteindrait pas
         # la carte : seules ses marges auraient repondu.
@@ -151,6 +150,20 @@ class BoardCard(QFrame):
         chip = self.duration_chip
         area = self.image.geometry()
         chip.move(area.right() - chip.width() - 8, area.top() + 8)
+
+    def _place_handles(self) -> None:
+        """Coche en haut a gauche de l'image, croix en haut a droite."""
+        area = self.image.geometry()
+        self.pick.move(area.left() + 6, area.top() + 6)
+        self.discard.move(area.right() - self.discard.width() - 6, area.top() + 6)
+        self.pick.raise_()
+        self.discard.raise_()
+
+    def handle_rect(self) -> QRect:
+        """La bande du haut de l'image, en coordonnees globales."""
+        area = self.image.geometry()
+        top_left = self.mapToGlobal(area.topLeft())
+        return QRect(top_left.x(), top_left.y(), area.width(), 34)
 
     def set_item(self, item, stars: int) -> None:
         self.item = item
@@ -239,7 +252,10 @@ class BoardCard(QFrame):
         self._show_handles(hovered)
 
     def _show_handles(self, hovered: bool) -> None:
-        """Conserve : les poignees vivent desormais dans la ligne de texte."""
+        self.discard.setVisible(hovered)
+        self.pick.setVisible(hovered or self.pick.isChecked())
+        if hovered or self.pick.isChecked():
+            self._place_handles()
 
     def set_picked(self, picked: bool) -> None:
         """Pose ou retire la coche sans reemettre le signal."""
@@ -248,13 +264,14 @@ class BoardCard(QFrame):
         self.pick.blockSignals(False)
         self.pick.setVisible(picked or self.property("hovered") == "true")
         if self.pick.isVisible():
-            self.pick.raise_()
+            self._place_handles()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._rescale()
         if not self.duration_chip.isHidden():
             self._place_chip()
+        self._place_handles()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -267,6 +284,61 @@ class BoardCard(QFrame):
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton and self.video:
             self.played.emit(self.index)
+
+
+class HoverHandles(QWidget):
+    """Coche et croix flottantes, au-dessus de la carte survolee.
+
+    Le lecteur d'apercu est une fenetre native : il passe devant tout ce qu'on
+    pose dans la carte, et la coche devenait inatteignable des que la video
+    demarrait. Une fenetre-outil sans cadre, elle, reste devant. Seuls ses
+    deux boutons recoivent la souris : le reste de la bande est transparent
+    et laisse passer les clics vers la carte.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint
+                         | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 0)
+        layout.setSpacing(0)
+        self.pick = QCheckBox(self)
+        self.pick.setObjectName("cardPick")
+        self.pick.setCursor(Qt.PointingHandCursor)
+        self.pick.setFocusPolicy(Qt.NoFocus)
+        self.pick.setFixedSize(20, 20)
+        self.discard = QPushButton("✕", self)
+        self.discard.setObjectName("cardDiscard")
+        self.discard.setToolTip("Écarter — récupérable dans la corbeille de session")
+        self.discard.setCursor(Qt.PointingHandCursor)
+        self.discard.setFocusPolicy(Qt.NoFocus)
+        self.discard.setFixedSize(22, 22)
+        layout.addWidget(self.pick, 0, Qt.AlignTop)
+        layout.addStretch(1)
+        layout.addWidget(self.discard, 0, Qt.AlignTop)
+        self.card = None
+        self.hide()
+
+    def attach(self, card, rect: QRect) -> None:
+        """Se pose sur cette carte, et relaie ses gestes a ses propres poignees."""
+        if self.card is not card:
+            self.card = card
+            self.pick.blockSignals(True)
+            self.pick.setChecked(card.pick.isChecked())
+            self.pick.blockSignals(False)
+        if self.geometry() != rect:
+            self.setGeometry(rect)
+            self.setMask(QRegion(self.pick.geometry()).united(
+                QRegion(self.discard.geometry())))
+        if self.isHidden():
+            self.show()
+        self.raise_()
+
+    def detach(self) -> None:
+        self.card = None
+        self.hide()
 
 
 class BoardView(QWidget):
@@ -376,6 +448,9 @@ class BoardView(QWidget):
         # fallait viser le titre.
         self.video.mouseReleaseEvent = self._video_clicked
 
+        self.floating = HoverHandles(self.window())
+        self.floating.pick.toggled.connect(self._float_picked)
+        self.floating.discard.clicked.connect(self._float_discard)
         self.dwell_timer = QTimer(self)
         self.dwell_timer.setSingleShot(True)
         self.dwell_timer.setInterval(140)
@@ -391,6 +466,7 @@ class BoardView(QWidget):
         self.hover_timer.start()
 
     def hideEvent(self, event):
+        self.floating.detach()
         super().hideEvent(event)
         self.hover_timer.stop()
         self.stop()
@@ -416,6 +492,8 @@ class BoardView(QWidget):
         reconstruire ferait clignoter la planche et redemanderait des vignettes
         déjà obtenues.
         """
+        self.floating.detach()
+        self.hovered = -1
         self.stop()
         previous = self.items
         same_head = bool(previous) and bool(items) and previous[:1] == items[:1]
@@ -673,6 +751,9 @@ class BoardView(QWidget):
                 found = position
                 break
         if found == self.hovered:
+            if found != -1:
+                # La fenetre principale a pu bouger, la planche defiler.
+                self.floating.attach(self.cards[found], self.cards[found].handle_rect())
             return
         if self.hovered != -1 and self.hovered < len(self.cards):
             self.cards[self.hovered].set_hovered(False)
@@ -680,14 +761,27 @@ class BoardView(QWidget):
         self.remaining.hide()
         self.hovered = found
         if found == -1:
+            self.floating.detach()
             self.stop()
             return
         self.cards[found].set_hovered(True)
+        self.floating.attach(self.cards[found], self.cards[found].handle_rect())
         # Traverser la planche ne doit pas charger une video par carte
         # croisee : on attend que la souris se pose. Le lecteur ne part que
         # si elle est encore sur la meme carte apres ce court delai.
         self._dwell_target = found
         self.dwell_timer.start()
+
+    def _float_picked(self, on: bool) -> None:
+        card = self.floating.card
+        if card is not None:
+            # Par la coche de la carte : c'est elle qui est branchee au reste.
+            card.pick.setChecked(on)
+
+    def _float_discard(self) -> None:
+        card = self.floating.card
+        if card is not None:
+            card.discarded.emit(card.index)
 
     def _dwell_elapsed(self) -> None:
         found = self._dwell_target

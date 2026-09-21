@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtGui import QIntValidator
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
@@ -334,10 +335,41 @@ class ControlBar(QWidget):
                 self.unseen.property("chosen") != "true"))
         row.addWidget(self.unseen)
 
+        # Verticales, horizontales : les deux cochees par defaut, on en ote
+        # une pour ne voir que l'autre. Ce qu'on ne sait pas encore passe.
+        self.orientation_buttons: dict = {}
+        for key, text in (("vertical", "Verticales"), ("horizontal", "Horizontales")):
+            button = QPushButton(text, self)
+            button.setObjectName("sortChip")
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setProperty("chosen", "true")
+            button.setToolTip("Cliquer pour ne plus voir ces vidéos, "
+                              "recliquer pour les revoir")
+            button.clicked.connect(lambda _c=False, k=key: self._toggle_orientation(k))
+            row.addWidget(button)
+            self.orientation_buttons[key] = button
+
+        # Dossiers d'au moins, d'au plus tant de videos. Visible en onglet
+        # Dossiers seulement.
+        self.folder_min = QLineEdit(self)
+        self.folder_min.setObjectName("bound")
+        self.folder_min.setPlaceholderText("≥ vidéos")
+        self.folder_min.setFixedWidth(68)
+        self.folder_min.setValidator(QIntValidator(0, 999999, self))
+        self.folder_max = QLineEdit(self)
+        self.folder_max.setObjectName("bound")
+        self.folder_max.setPlaceholderText("≤ vidéos")
+        self.folder_max.setFixedWidth(68)
+        self.folder_max.setValidator(QIntValidator(0, 999999, self))
+        for field in (self.folder_min, self.folder_max):
+            field.setToolTip("Ne garder que les dossiers qui comptent au moins, "
+                             "au plus, ce nombre de vidéos")
+            field.textChanged.connect(lambda _t: self.timer.start())
+            row.addWidget(field)
+
         self.random_here = _button("⚄", self.randomHere.emit)
-        self.random_here.setFixedWidth(32)
-        self.random_here.setToolTip("Une vidéo au hasard parmi celles d'ici")
-        row.addWidget(self.random_here)
+        self.random_here.hide()
 
         # La densite se regle comme on regle un zoom : deux boutons et le
         # chiffre entre eux. Une liste deroulante et son etiquette « par rangee »
@@ -391,10 +423,52 @@ class ControlBar(QWidget):
         )
 
     # -- lecture ---------------------------------------------------------
+    def _toggle_orientation(self, key: str) -> None:
+        button = self.orientation_buttons[key]
+        chosen = button.property("chosen") != "true"
+        if not chosen and all(
+                b.property("chosen") != "true" for k, b in
+                self.orientation_buttons.items() if k != key):
+            # En decocher une quand l'autre l'est deja : on ne verrait plus
+            # rien. On bascule donc sur l'autre.
+            for k, b in self.orientation_buttons.items():
+                self._mark(b, k != key)
+        else:
+            self._mark(button, chosen)
+        self.changed.emit()
+
+    @staticmethod
+    def _mark(button, on: bool) -> None:
+        button.setProperty("chosen", "true" if on else "false")
+        button.style().unpolish(button)
+        button.style().polish(button)
+
+    def orientations(self) -> list:
+        return [k for k, b in self.orientation_buttons.items()
+                if b.property("chosen") == "true"]
+
+    def set_orientations(self, keys) -> None:
+        keys = set(keys or ()) or {"vertical", "horizontal"}
+        for key, button in self.orientation_buttons.items():
+            self._mark(button, key in keys)
+
+    def set_folder_bounds(self, low: int, high: int) -> None:
+        for field, value in ((self.folder_min, low), (self.folder_max, high)):
+            field.blockSignals(True)
+            field.setText(str(value) if value else "")
+            field.blockSignals(False)
+
+    def set_folder_fields_visible(self, on: bool) -> None:
+        self.folder_min.setVisible(on)
+        self.folder_max.setVisible(on)
+
     def criteria(self) -> dict:
         return {
             "include": self.include.text(),
             "exclude": self.exclude.text(),
+            "orientations": self.orientations(),
+            "folder_min": int(self.folder_min.text() or 0),
+            "folder_max": int(self.folder_max.text() or 0),
             "duration_op": "",
             "duration_s": 0.0,
             "resolution_op": "gte",

@@ -53,7 +53,7 @@ from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
-    PeekOverlay,
+    PeekOverlay, draw_icon,
     STYLESHEET, CommandBar, DestinationsDialog, PreviewGrid, SinglePlayer,
     StarStrip, TagsDialog, TrashDialog,
 )
@@ -225,6 +225,7 @@ class MainWindow(QMainWindow):
         self.preview.info_ready.connect(self.on_info_ready)
 
         self._build_ui()
+        self._refresh_mute()
         self.welcome.set_recent(cfg["recent_roots"])
         self.stack.setCurrentIndex(PAGE_WELCOME)
 
@@ -280,7 +281,9 @@ class MainWindow(QMainWindow):
         # Remonter d'un cran, d'ou qu'on soit. `go_up` ne savait revenir que
         # par ou l'on etait descendu : arrive par un mot-cle, par l'historique
         # ou par une racine choisie, la pile etait vide et rien ne remontait.
-        self.up_button = QPushButton("↑", sort_page)
+        self.up_button = QPushButton("", sort_page)
+        self.up_button.setIcon(draw_icon("up"))
+        self.up_button.setIconSize(QSize(20, 20))
         self.up_button.setObjectName("up")
         self.up_button.setFixedWidth(34)
         self.up_button.setToolTip("Remonter au dossier parent   (Ctrl+↑)")
@@ -309,13 +312,18 @@ class MainWindow(QMainWindow):
 
         # L'arborescence se montrait et se cachait depuis un menu : un reglage
         # qu'on bascule sans arret n'a rien a faire derriere trois clics.
-        self.tree_button = QPushButton("Arborescence", sort_page)
+        self.tree_button = QPushButton("", sort_page)
+        self.tree_button.setIcon(draw_icon("tree"))
+        self.tree_button.setIconSize(QSize(20, 20))
+        self.tree_button.setFixedWidth(42)
         self.tree_button.setCheckable(True)
         self.tree_button.setToolTip("Afficher le panneau des dossiers   (Ctrl+T)")
         self.tree_button.setFocusPolicy(Qt.NoFocus)
         self.tree_button.clicked.connect(lambda checked: self.toggle_tree(checked))
 
-        self.mute_button = QPushButton("🔇", sort_page)
+        self.mute_button = QPushButton("", sort_page)
+        self.mute_button.setIconSize(QSize(20, 20))
+        self.mute_button.setIcon(draw_icon("speaker", on=not self.cfg["muted"]))
         self.mute_button.setFixedWidth(42)
         self.mute_button.setFocusPolicy(Qt.NoFocus)
         self.mute_button.clicked.connect(self.toggle_mute)
@@ -388,9 +396,9 @@ class MainWindow(QMainWindow):
 
         selectors.addWidget(self.up_button)
         selectors.addStretch(1)
-        selectors.addWidget(self.scan_button)
+        # « Analyser » vit dans le menu ; le hasard local va sous l'image.
+        self.scan_button.hide()
         selectors.addWidget(self.random_button)
-        selectors.addWidget(self.random_here_button)
         selectors.addWidget(self.tree_button)
         selectors.addWidget(self.mute_button)
         selectors.addWidget(self.more_button)
@@ -403,6 +411,9 @@ class MainWindow(QMainWindow):
         self.controls.sortChanged.connect(self.set_sort)
         self.controls.unseenChanged.connect(self.set_only_unseen)
         self.controls.set_unseen(bool(self.cfg["only_unseen"]))
+        self.controls.set_orientations(self.cfg["orientations"])
+        self.controls.set_folder_bounds(int(self.cfg["folder_min"] or 0),
+                                        int(self.cfg["folder_max"] or 0))
         self.controls.columnsChanged.connect(self.set_board_columns)
         self.controls.previousPage.connect(lambda: self.change_page(-1))
         self.controls.nextPage.connect(lambda: self.change_page(1))
@@ -486,8 +497,6 @@ class MainWindow(QMainWindow):
         self.enter_button.setToolTip("Trier le contenu de ce dossier   (Ctrl+↓)")
         self.enter_button.setFocusPolicy(Qt.NoFocus)
         self.enter_button.clicked.connect(self.enter_current)
-        header_layout.addWidget(self.prev_button, 0)
-        header_layout.addWidget(self.next_button, 0)
         header_layout.addWidget(self.contact_button, 0)
         header_layout.addWidget(self.cinema_button, 0)
         header_layout.addWidget(self.enter_button, 0)
@@ -575,7 +584,24 @@ class MainWindow(QMainWindow):
         self.wall_full = False
         self.viewer.addWidget(self.board)
         self.viewer.addWidget(self.wall)
-        middle.addWidget(self.viewer, 1)
+        # L'image, et dessous une seule rangee : fleche, barre d'avancement,
+        # hasard local, fleche. Les fleches quittent l'entete, qui n'en est
+        # que plus courte.
+        center = QWidget(sort_page)
+        center_box = QVBoxLayout(center)
+        center_box.setContentsMargins(0, 0, 0, 0)
+        center_box.setSpacing(4)
+        center_box.addWidget(self.viewer, 1)
+        self.nav_row = QWidget(center)
+        nav = QHBoxLayout(self.nav_row)
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(8)
+        nav.addWidget(self.prev_button, 0)
+        nav.addWidget(self.single.under, 1)
+        nav.addWidget(self.random_here_button, 0)
+        nav.addWidget(self.next_button, 0)
+        center_box.addWidget(self.nav_row, 0)
+        middle.addWidget(center, 1)
 
         # Le lecteur de cote : on y envoie une video d'un clic droit, et la
         # planche continue de vivre a gauche — on peut changer de page, cocher,
@@ -692,10 +718,28 @@ class MainWindow(QMainWindow):
         start = self.cfg["root"] or str(Path.home())
         chosen = QFileDialog.getExistingDirectory(self, "Choisir le dossier racine", start)
         if chosen:
-            self.start_root(Path(chosen))
+            self.start_root(Path(chosen), new_origin=True)
+
+    def _under_origin(self, path) -> bool:
+        if self.origin is None or path is None:
+            return False
+        try:
+            Path(path).relative_to(self.origin)
+            return True
+        except ValueError:
+            return False
+
+    def top_root(self):
+        """La racine du fil : celle qu'on a choisie, tant qu'on est dessous."""
+        if self.root is None:
+            return None
+        if self._under_origin(self.root):
+            return Path(self.origin)
+        return Path(self.levels[0]["root"]) if self.levels else Path(self.root)
 
     def start_root(self, root: Path | None, mode: str = "",
                    reset_levels: bool = True, restore_id: str = "",
+                   new_origin: bool = False,
                    force: bool = False) -> None:
         if root is None or not Path(root).is_dir():
             QMessageBox.warning(self, "Dossier introuvable", f"{root} n'existe plus.")
@@ -710,8 +754,12 @@ class MainWindow(QMainWindow):
             del self.visited[:-40]
         if reset_levels:
             self.levels = []
-            # Choisir une racine, c'est poser l'origine du fil d'Ariane.
-            self.origin = Path(root)
+            # L'origine du fil d'Ariane est la racine qu'on a choisie. Elle ne
+            # bouge que si l'on en sort : la reposer a chaque analyse la
+            # ramenait au sous-dossier courant, et « remonter » n'avait plus
+            # de haut — c'est ce qui balançait vers autre chose.
+            if new_origin or self.origin is None or not self._under_origin(root):
+                self.origin = Path(root)
         self._restore_id = restore_id
         self.root = Path(root)
         # Un mode impose doit reconduire le selecteur, sinon l'entete annonce
@@ -752,7 +800,7 @@ class MainWindow(QMainWindow):
                  if indexed else [])
 
         self.preview.tune_for(self.root)
-        self.trash.set_base(self.levels[0]["root"] if self.levels else self.root)
+        self.trash.set_base(self.top_root())
         self.cfg.push_recent_root(str(self.root))
         self.cfg.save()
         self.welcome.set_recent(self.cfg["recent_roots"])
@@ -926,7 +974,7 @@ class MainWindow(QMainWindow):
         """Compte les videos sous la racine, et le dit en clair."""
         if self.root is None or self.counter is not None:
             return
-        top = Path(self.levels[0]["root"]) if self.levels else self.root
+        top = self.top_root()
         self.counter = VideoCount(top, self.cfg["skip_hidden"], self)
         self.counter.progress.connect(
             lambda n: self.show_banner(f"Comptage… {n} vidéo(s)", "info"))
@@ -949,7 +997,7 @@ class MainWindow(QMainWindow):
         """
         if self.root is None or self.audit is not None:
             return
-        top = Path(self.levels[0]["root"]) if self.levels else self.root
+        top = self.top_root()
         self.audit = ThumbAudit(top, self.cfg["thumb_width"],
                                 self.cfg["skip_hidden"], self)
         self.audit.progress.connect(
@@ -986,7 +1034,7 @@ class MainWindow(QMainWindow):
             return
         if self.root is None:
             return
-        top = Path(self.levels[0]["root"]) if self.levels else self.root
+        top = self.top_root()
         self._dupes_by_image = by_image
         if by_image:
             # Sur les vignettes deja faites : rien n'est relu sur le partage.
@@ -1063,7 +1111,7 @@ class MainWindow(QMainWindow):
             return
         if self.root is None:
             return
-        top = Path(self.levels[0]["root"]) if self.levels else self.root
+        top = self.top_root()
         self.backfill = ThumbBackfill(top, self.cfg["thumb_width"],
                                       self.cfg["skip_hidden"], self)
         self.backfill.counting.connect(self.on_backfill_counting)
@@ -1248,7 +1296,7 @@ class MainWindow(QMainWindow):
         self.start_harvest()
         self._apply_selectors()
         self.crumbs.set_path(
-            Path(self.levels[0]["root"]) if self.levels else self.root, self.root
+            self.top_root(), self.root
         )
         # Un mot-cle n'est pas un dossier : sans ce rappel, le fil d'Ariane
         # restait sur la racine et l'on ne savait plus ce qu'on regardait.
@@ -1267,8 +1315,25 @@ class MainWindow(QMainWindow):
             return
         if self.root is None:
             return
-        parent = Path(self.root).parent
-        if parent == self.root or not parent.is_dir():
+        here = Path(self.root)
+        origin = Path(self.origin) if self.origin is not None else None
+        if origin is not None and here == origin:
+            self.show_banner("Déjà au sommet.", "quiet")
+            return
+        parent = here.parent
+        # Un dossier de tete (« + ») se traverse, il ne se visite pas : on
+        # passe au-dessus. Et l'on ne sort jamais de la racine choisie —
+        # c'est ce qui « balançait vers autre chose ».
+        while parent != origin and PARENT_PREFIX and parent.name.startswith(PARENT_PREFIX):
+            if parent.parent == parent:
+                break
+            parent = parent.parent
+        if origin is not None:
+            try:
+                parent.relative_to(origin)
+            except ValueError:
+                parent = origin
+        if parent == here or not parent.is_dir():
             self.show_banner("Déjà au sommet.", "quiet")
             return
         self.start_root(parent, self.mode_for_content(),
@@ -1633,7 +1698,7 @@ class MainWindow(QMainWindow):
         En mode fichier, le seul nom du dossier parent ne suffit pas à se situer :
         plusieurs dossiers portent souvent le même nom à des endroits différents.
         """
-        top = Path(self.levels[0]["root"] if self.levels else (self.root or item.path))
+        top = (self.top_root() or item.path)
         parts = []
         current = Path(item.path).parent
         while True:
@@ -1672,20 +1737,15 @@ class MainWindow(QMainWindow):
             item.info = info
             # La durée rejoint le titre : c'est ce qu'on veut savoir en premier
             # d'une vidéo, et la ligne d'informations est déjà chargée.
-            duration = human_duration(info["duration"]) if info.get("duration") else ""
-            # La duree d'abord : c'est elle qui decide si l'on regarde. Puis
-            # le nom. Les dimensions exactes ne disent rien de plus que
-            # « 1080p » et repoussaient la taille hors de vue.
-            self.item_title.setText(
-                f"{duration}   ·   {item.name}" if duration else item.name)
+            # Le nom, et dessous, en gris : la definition en « p », le poids,
+            # la date. Ni codec ni dimensions exactes — on ne trie pas la-dessus.
+            self.item_title.setText(item.name)
             parts = []
             if info.get("height"):
                 parts.append(human_resolution(info["height"]))
             parts.append(human_size(item.size))
-            if info.get("codec"):
-                parts.append(info["codec"])
         if item.mtime:
-            parts.append("modifié le " + datetime.fromtimestamp(item.mtime).strftime("%d/%m/%Y"))
+            parts.append(datetime.fromtimestamp(item.mtime).strftime("%d/%m/%Y"))
         self.item_subtitle.setText("   ·   ".join(parts))
 
     def _remember_item(self, item) -> None:
@@ -1896,7 +1956,7 @@ class MainWindow(QMainWindow):
         # videos de la collection se cotoient, le seul nom du fichier ne disait
         # plus du tout d'ou il sortait — et ses segments restent cliquables,
         # donc il sert aussi a y retourner.
-        top = Path(self.levels[0]["root"]) if self.levels else (self.root or item.path)
+        top = (self.top_root() or item.path)
         folder = Path(item.path) if item.kind == MODE_FOLDERS else Path(item.path).parent
         try:
             folder.relative_to(top)
@@ -2340,7 +2400,7 @@ class MainWindow(QMainWindow):
         """Le mur seul, sur tout l'écran. Échap ramène tout le reste."""
         self.wall_full = (not self.wall_full) if on is None else bool(on)
         chrome = (self.crumbs, self.tabs, self.controls, self.commands,
-                  self.progress, self.stars, self.item_card)
+                  self.progress, self.stars, self.item_card, self.nav_row)
         if self.wall_full:
             self._wall_kept = (self.tree.isVisible(), self.aside.isVisible(),
                                self.windowState())
@@ -2508,7 +2568,7 @@ class MainWindow(QMainWindow):
             if not self.restore_folders():
                 self._add_tag_items()
 
-        top = Path(self.levels[0]["root"]) if self.levels else self.root
+        top = self.top_root()
         if tab == TAB_SPLIT:
             # Le mur ne change ni de dossier ni de mode : il regarde autrement
             # ce que l'on a deja sous la main.
@@ -2626,8 +2686,15 @@ class MainWindow(QMainWindow):
         self.up_button.setEnabled(
             bool(self.levels) or (root is not None
                                   and Path(root).parent != Path(root)))
+        # Le hasard local ne vaut que devant un dossier : devant une seule
+        # video, il la relancait, ce qui n'a aucun sens.
         self.random_here_button.setVisible(
-            item is not None and bool(item.videos) and not self.browsing)
+            self.browsing or (item is not None and item.kind == MODE_FOLDERS
+                              and bool(item.videos)))
+        self.nav_row.setVisible(self.tab != TAB_SPLIT and not self.cinema)
+        self.single.under.setVisible(
+            not self.browsing and item is not None and item.kind != MODE_FOLDERS)
+        self.controls.set_folder_fields_visible(self.tab == TAB_FOLDERS)
 
     def _origin_for(self, current):
         """Le plus haut dossier dont `current` descend : la racine du fil."""
@@ -2690,7 +2757,7 @@ class MainWindow(QMainWindow):
         self.item_parent.setText(str(self.root) if self.root else "")
         self.item_title.setToolTip(str(self.root) if self.root else "")
         if self.root is not None:
-            top = Path(self.levels[0]["root"]) if self.levels else self.root
+            top = self.top_root()
             self.crumbs.set_path(top, self.root)
         self.item_subtitle.setText("")
         self.stars.hide()
@@ -2808,7 +2875,7 @@ class MainWindow(QMainWindow):
         self.cinema = (not self.cinema) if on is None else bool(on)
         self.cinema_button.setChecked(self.cinema)
         for widget in (self.crumbs, self.tabs, self.controls, self.commands,
-                       self.progress, self.stars):
+                       self.progress, self.stars, self.nav_row):
             widget.setVisible(not self.cinema)
         # La fiche reste, mais reduite a ce qui permet d'en sortir et de
         # continuer : sans cela, une fois entre dans le cinema, plus rien ne
@@ -3155,6 +3222,23 @@ class MainWindow(QMainWindow):
         if stars_min >= 0 and self.ratings.get(item.path) < stars_min:
             return False
 
+        if item.kind == MODE_FOLDERS and not item.is_tag:
+            low = rules.get("folder_min") or 0
+            high = rules.get("folder_max") or 0
+            if low and item.video_count < low:
+                return False
+            if high and item.video_count > high:
+                return False
+        else:
+            wanted = rules.get("orientations")
+            if wanted is not None and len(wanted) == 1:
+                info = INDEX.probe(item.path) or {}
+                width, height = info.get("width") or 0, info.get("height") or 0
+                if width and height:
+                    kind = "vertical" if height > width else "horizontal"
+                    if kind not in wanted:
+                        return False
+
         needs_media = rules.get("duration_op") or rules.get("resolution", 0) > 0
         if not needs_media:
             return True
@@ -3190,6 +3274,9 @@ class MainWindow(QMainWindow):
         """Un reglage a bouge : on refiltre, puis on reclasse."""
         rules = self.controls.criteria()
         self.criteria = rules
+        self.cfg["orientations"] = list(rules.get("orientations") or [])
+        self.cfg["folder_min"] = int(rules.get("folder_min") or 0)
+        self.cfg["folder_max"] = int(rules.get("folder_max") or 0)
         self.cfg["filter_include"] = rules["include"]
         self.cfg["filter_exclude"] = rules["exclude"]
         self.cfg.save()
@@ -3445,7 +3532,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_mute(self) -> None:
         muted = self.cfg["muted"]
-        self.mute_button.setText("🔇" if muted else "🔊")
+        self.mute_button.setIcon(draw_icon("speaker", on=not muted))
         self.mute_button.setToolTip(
             "Son coupé — cliquer pour l'activer   (Ctrl+M)" if muted
             else "Son actif — cliquer pour le couper   (Ctrl+M)"

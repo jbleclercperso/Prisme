@@ -61,6 +61,9 @@ DEFAULTS = {
     "tags": [],
     "last_item": "",             # dernier element regarde, pour y revenir
     "only_unseen": False,        # ne montrer que ce qui reste a voir
+    "orientations": ["vertical", "horizontal"],  # ce qu'on veut voir
+    "folder_min": 0,             # dossiers d'au moins tant de videos (0 : tous)
+    "folder_max": 0,             # d'au plus tant (0 : sans limite)
     "searches": [],              # recherches enregistrees : nom, requete, tri, non-vus, onglet
     "burst": False,              # rafale : passer tout seul apres quelques secondes
     "wall_panes": 3,             # panneaux du mur
