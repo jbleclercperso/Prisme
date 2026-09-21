@@ -635,6 +635,34 @@ class PreviewGrid(QWidget):
         event.accept()
 
 
+class _Deck:
+    """Un lecteur complet : la surface, le moteur, le son.
+
+    La fiche en a deux. Pendant qu'on regarde une video, la suivante se charge
+    dans l'autre jusqu'a sa premiere image, puis attend. Passer a la suivante
+    revient alors a echanger les deux : ni noir, ni attente reseau, et plus
+    d'image fantome puisque chaque surface n'a jamais montre qu'un fichier.
+    """
+
+    def __init__(self, area):
+        self.video = QVideoWidget(area)
+        self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.video.hide()
+        self.audio = QAudioOutput(area)
+        self.player = QMediaPlayer(area)
+        self.player.setVideoOutput(self.video)
+        self.player.setAudioOutput(self.audio)
+        self.path = ""
+        self.primed = False      # une image de `path` est arrivee sur la surface
+
+    def clear(self) -> None:
+        self.player.stop()
+        self.player.setSource(QUrl())
+        self.video.hide()
+        self.path = ""
+        self.primed = False
+
+
 class SinglePlayer(QWidget):
     """Mode fichier : la vidéo courante est lue en grand, avec une pellicule."""
 
@@ -677,8 +705,9 @@ class SinglePlayer(QWidget):
         self.video_area = QWidget(top)
         self.video_area.setObjectName("videoArea")
         self.video_area.setMinimumHeight(320)
-        self.video = QVideoWidget(self.video_area)
-        self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.decks = [_Deck(self.video_area), _Deck(self.video_area)]
+        self._active = 0
+        self._muted = False
         layout.addWidget(self.video_area, 1)
 
         self.zoom = 1.0
@@ -735,10 +764,6 @@ class SinglePlayer(QWidget):
         self.strip = strip
         outer.addWidget(self.under, 0)
 
-        self.audio = QAudioOutput(self)
-        self.player = QMediaPlayer(self)
-        self.player.setVideoOutput(self.video)
-        self.player.setAudioOutput(self.audio)
         # Le widget garde a l ecran la derniere image rendue : en passant d une
         # video a l autre, on voyait donc un instant celle d avant. On le cache
         # et l on vide sa surface jusqu a la premiere image de la nouvelle.
@@ -747,11 +772,15 @@ class SinglePlayer(QWidget):
         self.blackout_timer = QTimer(self)
         self.blackout_timer.setSingleShot(True)
         self.blackout_timer.timeout.connect(self._end_blackout)
-        self.video.videoSink().videoFrameChanged.connect(self._on_frame)
-        self.player.mediaStatusChanged.connect(self._on_status)
-        self.player.positionChanged.connect(self._on_position)
-        self.player.durationChanged.connect(lambda _d: self._on_position(
-            self.player.position()))
+        for deck in self.decks:
+            deck.video.videoSink().videoFrameChanged.connect(
+                lambda frame, d=deck: self._on_frame(d, frame))
+            deck.player.mediaStatusChanged.connect(
+                lambda status, d=deck: self._on_status(d, status))
+            deck.player.positionChanged.connect(
+                lambda pos, d=deck: self._on_deck_position(d, pos))
+            deck.player.durationChanged.connect(
+                lambda _dur, d=deck: self._on_deck_position(d, d.player.position()))
 
         self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(90)
@@ -761,6 +790,41 @@ class SinglePlayer(QWidget):
         self.position_timer = QTimer(self)
         self.position_timer.setSingleShot(True)
         self.position_timer.timeout.connect(self.position_label.hide)
+
+    # Le code de la fiche parle d'« un » lecteur : c'est toujours celui qui
+    # joue. L'autre est la reserve.
+    @property
+    def player(self):
+        return self.decks[self._active].player
+
+    @property
+    def video(self):
+        return self.decks[self._active].video
+
+    @property
+    def audio(self):
+        return self.decks[self._active].audio
+
+    @property
+    def spare(self):
+        return self.decks[1 - self._active]
+
+    def preload(self, path: str) -> None:
+        """Charge `path` dans la reserve, jusqu'a sa premiere image, puis attend."""
+        spare = self.spare
+        if spare.path == path:
+            return
+        spare.path = path
+        spare.primed = False
+        spare.audio.setMuted(True)
+        spare.video.hide()
+        spare.player.setSource(QUrl.fromLocalFile(path))
+        spare.player.play()
+
+    def release(self) -> None:
+        """Lache les deux fichiers : avant de deplacer ou supprimer."""
+        for deck in self.decks:
+            deck.clear()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -776,13 +840,35 @@ class SinglePlayer(QWidget):
         self.strip.hide()
 
     def set_muted(self, muted: bool) -> None:
+        self._muted = muted
         self.audio.setMuted(muted)
 
     def set_item(self, path: str, message: str = "…") -> None:
-        self.reset_zoom()
         for tile in self.tiles:
             tile.reset()
             tile.placeholder.setText(message)
+        spare = self.spare
+        if spare.path == path:
+            # La suivante etait deja prete : on echange, sans rien attendre.
+            old = self.decks[self._active]
+            self._active = 1 - self._active
+            old.clear()
+            self.blackout_timer.stop()
+            self._blackout = False
+            self.reset_zoom()
+            spare.audio.setMuted(self._muted)
+            if spare.primed:
+                self._awaiting_frame = False
+                spare.video.show()
+            else:
+                self._awaiting_frame = True
+            spare.player.setPosition(0)
+            spare.player.play()
+            return
+        self.reset_zoom()
+        deck = self.decks[self._active]
+        deck.path = path
+        deck.primed = False
         # Attendre la premiere image ne suffisait pas : Qt en livre parfois une
         # qui appartient encore au fichier precedent, et l'on voyait passer une
         # image subliminale. On impose donc un noir franc, court mais entier :
@@ -790,27 +876,37 @@ class SinglePlayer(QWidget):
         # nouveau fichier arrivee.
         self._awaiting_frame = True
         self._blackout = True
-        self.video.hide()
+        deck.video.hide()
         try:
-            self.video.videoSink().setVideoFrame(QVideoFrame())
+            deck.video.videoSink().setVideoFrame(QVideoFrame())
         except (RuntimeError, TypeError):
             pass
         self.blackout_timer.start(180)
-        self.player.setSource(QUrl.fromLocalFile(path))
-        self.player.play()
+        deck.player.setSource(QUrl.fromLocalFile(path))
+        deck.player.play()
 
-    def _on_frame(self, frame) -> None:
-        """Premiere image du nouveau fichier : on la retient jusqu au bout du noir."""
-        if not self._awaiting_frame:
-            return
+    def _on_frame(self, deck, frame) -> None:
+        """Premiere image d'un fichier : la reserve s'arrete dessus, la fiche l'attend."""
         try:
             if not frame.isValid():
                 return
         except (RuntimeError, AttributeError):
             pass
+        if deck is self.spare:
+            if not deck.primed:
+                deck.primed = True
+                deck.player.pause()
+            return
+        deck.primed = True
+        if not self._awaiting_frame:
+            return
         self._awaiting_frame = False
         if not self._blackout:
-            self.video.show()
+            deck.video.show()
+
+    def _on_deck_position(self, deck, position: int) -> None:
+        if deck is self.decks[self._active]:
+            self._on_position(position)
 
     def _end_blackout(self) -> None:
         self._blackout = False
@@ -830,7 +926,9 @@ class SinglePlayer(QWidget):
         if 0 <= slot < len(self.tiles):
             self.tiles[slot].set_failed()
 
-    def _on_status(self, status) -> None:
+    def _on_status(self, deck, status) -> None:
+        if deck is not self.decks[self._active]:
+            return
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             if self.loop:
                 self.player.setPosition(0)
@@ -932,7 +1030,9 @@ class SinglePlayer(QWidget):
         # Le point visé doit rester au même endroit à l'écran après l'agrandissement.
         left = int(self.zoom_focus.x() * (area.width() - width))
         top = int(self.zoom_focus.y() * (area.height() - height))
-        self.video.setGeometry(left, top, width, height)
+        # Les deux surfaces, pour que la reserve soit deja en place a l'echange.
+        for deck in self.decks:
+            deck.video.setGeometry(left, top, width, height)
 
     def reset_zoom(self) -> None:
         self.zoom = 1.0
@@ -977,6 +1077,9 @@ class SinglePlayer(QWidget):
 
     def stop(self) -> None:
         self.player.stop()
+        # Une reserve qui continue de tenir un fichier pendant qu'on fait
+        # autre chose n'a plus de sens ; on la lache.
+        self.spare.clear()
 
 
 class FilterEdit(QLineEdit):

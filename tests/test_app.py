@@ -1837,6 +1837,56 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           f"après préparation, les trois sont prêtes ({after})")
     check(after.get("seen") == 3, "et le total ne bouge pas")
 
+    print("\n[61] Double lecteur, reprise, sauvegarde différée")
+    import json as _json
+    # Les trois clips de l'audit : « flat » a ete vide par les sections d'avant.
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(audite / "lot", MODE_FLAT)
+    check(wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60),
+          f"trois clips a plat ({len(window.items)})")
+    window.toggle_board(False)
+    pump(app, 0.3)
+    sp = window.single
+    window.show_item(0)
+    pump(app, 0.2)
+    nxt = str(window.items[1].path)
+    check(sp.spare.path == nxt, "la vidéo suivante part en réserve")
+    check(wait_for(app, lambda: sp.spare.primed, 20),
+          "et s'arrête sur sa première image")
+    window.show_item(1)
+    check(not sp._blackout and not sp.video.isHidden(),
+          "flèche : l'image est là, sans noir")
+    check(Path(sp.player.source().toLocalFile()) == Path(nxt),
+          "le lecteur actif lit bien la suivante")
+    pump(app, 0.3)
+    check(sp.spare.path == str(window.items[2].path), "et la réserve recharge")
+    window.show_item(0)
+    check(sp._blackout, "en arrière, le chemin classique avec son noir")
+
+    wanted = window.items[2].item_id
+    window._resume_id = wanted
+    window._resume_hop = False
+    window.set_tab(TAB_VIDEOS)
+    pump(app, 0.3)
+    check(window._resume_id == "" and window.items[window.index].item_id == wanted,
+          "reprise sur le dernier élément regardé")
+    deep = next(iter(sorted(root.rglob("*.mp4"))))
+    window._resume_id = str(deep)
+    window._resume_hop = False
+    window.start_root(root, MODE_FOLDERS)
+    check(wait_for(app, lambda: not window.scanning and window._resume_id == "", 60),
+          "la racine ne le contient pas : on descend une fois")
+    check(window.root == deep.parent, "dans son dossier")
+
+    window.cfg["tab"] = "zzz"
+    window.cfg.save_soon()
+    read = lambda: _json.loads(window.cfg.path.read_text(encoding="utf-8")).get("tab")
+    check(read() != "zzz", "la sauvegarde différée n'écrit pas tout de suite")
+    pump(app, 0.7)
+    check(read() == "zzz", "mais une demi-seconde plus tard")
+    window.cfg["tab"] = TAB_FOLDERS
+    window.cfg.save()
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

@@ -79,6 +79,7 @@ class Config:
 
     def __init__(self, path: Path = CONFIG_PATH):
         self.path = path
+        self._timer = None
         self.data = json.loads(json.dumps(DEFAULTS))
         self.load()
 
@@ -117,7 +118,25 @@ class Config:
         if moved:
             self.save()
 
+    def save_soon(self) -> None:
+        """Ecrit dans un instant, une fois pour toutes les modifications.
+
+        Chaque onglet, chaque fiche ecrivait le fichier sur-le-champ. On
+        regroupe : la derniere demande l'emporte, une demi-seconde plus tard.
+        """
+        from PySide6.QtCore import QCoreApplication, QTimer
+        if QCoreApplication.instance() is None:
+            return self.save()
+        if self._timer is None:
+            self._timer = QTimer()
+            self._timer.setSingleShot(True)
+            self._timer.setInterval(500)
+            self._timer.timeout.connect(self.save)
+        self._timer.start()
+
     def save(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
         APP_DIR.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data, indent=2, ensure_ascii=False), encoding="utf-8")

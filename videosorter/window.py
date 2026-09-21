@@ -33,6 +33,15 @@ from .ratings import Ratings
 from .tagging import MIN_BUCKET, build_tag_items, top_words
 from .split import DEFAULT_PANES, SplitWall
 from .query import matches_text
+
+# Les tons du bandeau d'etat. Ils etaient ecrits en dur a chaque appel, avec
+# sept teintes pour quatre intentions.
+BANNER_TONES = {
+    "info": "#22303f",     # ce qui se passe
+    "quiet": "#2a2f38",    # ce qui n'a rien donne
+    "done": "#1f3326",     # ce qui a abouti
+    "error": "#3a2226",    # ce qui a echoue
+}
 from .scan import (
     MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, Item, RefreshThread,
     cached_items, detect_mode, human_duration, human_resolution, human_size,
@@ -182,6 +191,9 @@ class MainWindow(QMainWindow):
 
         self.transfers = TransferQueue(self)
         self._commands_signature = None
+        self._resume_id = cfg["last_item"] or ""
+        self._resume_hop = False
+        self._flat_cache: dict = {}
         self.transfers.finished.connect(self.on_transfer_finished)
         self.transfers.changed.connect(self.on_transfers_changed)
 
@@ -746,7 +758,7 @@ class MainWindow(QMainWindow):
             self._told_rebuild = True
             self.show_banner(
                 "L'index etait abime : il a ete refait. Cette analyse-ci sera "
-                "complete, les suivantes seront immediates.", "#3a3322")
+                "complete, les suivantes seront immediates.", "info")
 
         self.scanning = True
         self._scan_started = time.monotonic()
@@ -824,7 +836,7 @@ class MainWindow(QMainWindow):
     def open_trash(self) -> None:
         """Liste ce qui a été écarté, avec de quoi le remettre en place."""
         if not self.trash.count:
-            self.show_banner("La corbeille de session est vide", "#2a2f38")
+            self.show_banner("La corbeille de session est vide", "quiet")
             return
         dialog = TrashDialog(self.trash, self)
         dialog.exec()
@@ -880,17 +892,17 @@ class MainWindow(QMainWindow):
         top = Path(self.levels[0]["root"]) if self.levels else self.root
         self.counter = VideoCount(top, self.cfg["skip_hidden"], self)
         self.counter.progress.connect(
-            lambda n: self.show_banner(f"Comptage… {n} vidéo(s)", "#22303f"))
+            lambda n: self.show_banner(f"Comptage… {n} vidéo(s)", "info"))
         self.counter.counted.connect(lambda n: self._told_count(top, n))
         self.counter.start()
-        self.show_banner(f"Comptage des vidéos sous {top}…", "#22303f")
+        self.show_banner(f"Comptage des vidéos sous {top}…", "info")
 
     def _told_count(self, top, total: int) -> None:
         self.counter = None
         self.show_banner(
             f"{total} vidéo(s) sous {top}. "
             f"C'est ce nombre que la préparation des vignettes doit atteindre.",
-            "#22303f")
+            "info")
 
     def audit_thumbs(self) -> None:
         """Dit combien de videos ont deja leur vignette, et combien n'en ont pas.
@@ -906,23 +918,23 @@ class MainWindow(QMainWindow):
         self.audit.progress.connect(
             lambda seen, ready: self.show_banner(
                 f"Vérification… {ready} vignette(s) sur {seen} vidéo(s)",
-                "#22303f"))
+                "info"))
         self.audit.done.connect(lambda seen, ready: self._told_audit(seen, ready))
         self.audit.start()
-        self.show_banner("Vérification des vignettes déjà fabriquées…", "#22303f")
+        self.show_banner("Vérification des vignettes déjà fabriquées…", "info")
 
     def _told_audit(self, seen: int, ready: int) -> None:
         self.audit = None
         missing = max(0, seen - ready)
         if not seen:
-            return self.show_banner("Aucune vidéo trouvée.", "#3a2226")
+            return self.show_banner("Aucune vidéo trouvée.", "error")
         part = ready * 100 // seen
         self.show_banner(
             f"{ready} vignette(s) sur {seen} vidéo(s) — {part} %. "
             + (f"Il en manque {missing} : lancez « Préparer toutes les "
                f"vignettes »." if missing else
                "Tout est prêt : l'affichage ne fabrique plus rien."),
-            "#22303f" if missing else "#1f3326")
+            "info" if missing else "done")
 
     def find_duplicates(self) -> None:
         """Rassemble les vidéos de taille rigoureusement identique.
@@ -946,7 +958,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setFormat("recherche de doublons…")
         self.progress.show()
-        self.show_banner(f"Recherche de doublons sous {top}…", "#22303f")
+        self.show_banner(f"Recherche de doublons sous {top}…", "info")
 
     def on_dupes_progress(self, seen: int) -> None:
         if self.scanning:
@@ -959,7 +971,7 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         self.progress.setFormat("%v / %m analysés")
         if not groups:
-            self.show_banner("Aucun doublon trouvé.", "#22303f")
+            self.show_banner("Aucun doublon trouvé.", "info")
             return
         # Les membres d'un meme groupe se suivent : c'est ce qui permet de les
         # comparer d'un coup d'oeil au lieu de les chercher dans la liste.
@@ -987,7 +999,7 @@ class MainWindow(QMainWindow):
             f"{len(groups)} groupe(s) de doublons — {extra} fichier(s) en trop, "
             f"soit {human_size(gagne)} à récupérer. Cochez ce dont vous ne "
             f"voulez plus, puis « Supprimer » : tout part dans la corbeille de "
-            f"session et revient par Ctrl+Z.", "#22303f")
+            f"session et revient par Ctrl+Z.", "info")
 
     def toggle_backfill(self) -> None:
         """Lance, ou arrête, la fabrication de toutes les vignettes manquantes.
@@ -997,7 +1009,7 @@ class MainWindow(QMainWindow):
         """
         if self.backfill is not None:
             self.backfill.stop()
-            self.show_banner("Préparation des vignettes : arrêt demandé…", "#2a2f38")
+            self.show_banner("Préparation des vignettes : arrêt demandé…", "quiet")
             return
         if self.root is None:
             return
@@ -1017,7 +1029,7 @@ class MainWindow(QMainWindow):
         self.progress.show()
         self.show_banner(
             f"Préparation des vignettes de {top} — recensement des vidéos…",
-            "#22303f",
+            "info",
         )
 
     def _show_activity(self) -> None:
@@ -1093,14 +1105,14 @@ class MainWindow(QMainWindow):
         self.show_banner(
             f"Préparation {fin} : {made} vignette(s) fabriquée(s), "
             f"{kept} déjà présente(s). Compte rendu : {ThumbBackfill.LOG}",
-            "#22303f",
+            "info",
         )
 
     def refresh_root(self) -> None:
         """Relit tout le disque, sans se fier a l'analyse precedente."""
         if self.root is None:
             return
-        self.show_banner("Réanalyse complète en cours…", "#22303f")
+        self.show_banner("Réanalyse complète en cours…", "info")
         self.start_root(self.root, self.mode, reset_levels=False, force=True)
 
     def toggle_mode(self) -> None:
@@ -1126,7 +1138,7 @@ class MainWindow(QMainWindow):
             return self.open_tag(item)
         target = Path(item.path)
         if not target.is_dir():
-            self.show_banner(f"Introuvable : {item.name}", "#3a2226")
+            self.show_banner(f"Introuvable : {item.name}", "error")
             return
 
         if item.loose_only:
@@ -1148,7 +1160,7 @@ class MainWindow(QMainWindow):
     def go_back(self) -> bool:
         """Revient a l'endroit precedemment visite, quel qu'en soit le niveau."""
         if not self.visited:
-            self.show_banner("Rien avant cet endroit", "#2a2f38")
+            self.show_banner("Rien avant cet endroit", "quiet")
             return False
         previous = self.visited.pop()
         self.levels = list(previous["levels"])
@@ -1192,7 +1204,7 @@ class MainWindow(QMainWindow):
         # restait sur la racine et l'on ne savait plus ce qu'on regardait.
         self.crumbs.append_leaf(item.name)
         self.show_banner(
-            f"{len(self.items)} vidéo(s) portant « {item.path.name} »", "#22303f"
+            f"{len(self.items)} vidéo(s) portant « {item.path.name} »", "info"
         )
         if self.browsing:
             self.refresh_board()
@@ -1207,7 +1219,7 @@ class MainWindow(QMainWindow):
             return
         parent = Path(self.root).parent
         if parent == self.root or not parent.is_dir():
-            self.show_banner("Déjà au sommet.", "#2a2f38")
+            self.show_banner("Déjà au sommet.", "quiet")
             return
         self.start_root(parent, self.mode_for_content(),
                         restore_id=str(self.root))
@@ -1277,7 +1289,7 @@ class MainWindow(QMainWindow):
         if made:
             self.show_banner(
                 f"✓ {made} aperçu(s) préparés d'avance. Les revoir est "
-                f"désormais immédiat.", "#1f3326")
+                f"désormais immédiat.", "done")
 
     def _refresh_scan_button(self) -> None:
         """Dit sans ambiguite si une analyse tourne, et ou elle en est.
@@ -1324,7 +1336,7 @@ class MainWindow(QMainWindow):
             self.stop_scan()
             self.progress.hide()
             self.show_banner("Analyse interrompue. Ce qui a été lu est gardé.",
-                             "#3a3322")
+                             "info")
             self.update_counter()
             return
         if getattr(self, "_harvest", (0, 0))[1]:
@@ -1332,7 +1344,7 @@ class MainWindow(QMainWindow):
             self._harvest = (0, 0)
             self._refresh_scan_button()
             self.show_banner("Préparation des aperçus interrompue. Ceux qui "
-                             "sont faits restent faits.", "#3a3322")
+                             "sont faits restent faits.", "info")
             return
         if self.root is not None:
             self.start_root(self.root, self.mode, reset_levels=False,
@@ -1523,7 +1535,7 @@ class MainWindow(QMainWindow):
             self.show_banner(
                 f"✓ Analyse terminée en {elapsed:.0f} s — {total} élément(s), "
                 f"{thread.rescanned} mis à jour, {thread.reused} inchangé(s).",
-                "#1f3326" if not thread.rescanned else "#22303f",
+                "done" if not thread.rescanned else "info",
             )
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(total)
@@ -1537,6 +1549,7 @@ class MainWindow(QMainWindow):
             self.grid.set_no_videos("—")
         else:
             self.update_counter()
+        self.resume_last()
 
     # ------------------------------------------------------------------
     # Affichage de l'élément courant
@@ -1634,6 +1647,47 @@ class MainWindow(QMainWindow):
         if item is not None and not item.is_tag:
             self.cfg["last_item"] = item.item_id
             self.cfg["root"] = str(self.root) if self.root else ""
+            self.cfg.save_soon()
+
+    def resume_last(self) -> bool:
+        """Revient sur le dernier element regarde, s'il est dans la liste.
+
+        `last_item` etait ecrit a chaque fiche et jamais relu : sur cent mille
+        videos, retrouver son point d'arret a la main etait une corvee
+        quotidienne. On ne le fait qu'une fois par lancement, a la premiere
+        liste qui le contient.
+        """
+        wanted = self._resume_id
+        if not wanted:
+            return False
+        for position, item in enumerate(self.items):
+            if item.item_id == wanted:
+                self._resume_id = ""
+                self.index = position
+                if self.browsing:
+                    self.board.scroll_to(position)
+                else:
+                    self.show_item(position)
+                self.show_banner(f"Reprise : {item.name}", "quiet")
+                return True
+        # Pas dans cette liste. Si c'est une video d'un sous-dossier de la
+        # racine, on y descend — une seule fois : au-dela, ce serait une
+        # surprise des heures plus tard, au detour d'un autre dossier.
+        if self._resume_hop or self.root is None or self.scanning:
+            self._resume_id = ""
+            return False
+        self._resume_hop = True
+        parent = Path(wanted.split("|")[0]).parent
+        try:
+            parent.relative_to(self.root)
+        except ValueError:
+            self._resume_id = ""
+            return False
+        if parent != self.root and parent.is_dir():
+            self.jump_to(str(parent))
+        else:
+            self._resume_id = ""
+        return False
 
     def _rebuild_commands(self, force: bool = False) -> None:
         """Refait la barre des touches seulement quand elle a change.
@@ -1676,9 +1730,9 @@ class MainWindow(QMainWindow):
         self.crumbs.set_path(top, folder)
 
         if item.pending:
-            self.show_banner(f"Transfert en cours vers {item.status_detail}…", "#2a3340")
+            self.show_banner(f"Transfert en cours vers {item.status_detail}…", "info")
         elif item.processed:
-            tone = "#22331f" if item.status == "moved" else "#3a2226"
+            tone = "done" if item.status == "moved" else "error"
             self.show_banner(f"Déjà traité : {item.status_detail}", tone)
 
         self._apply_selectors()
@@ -1709,6 +1763,11 @@ class MainWindow(QMainWindow):
                 nxt = self.items[self.index + offset]
                 keep.add(self._plan_key(nxt, self.page_of(nxt)))
                 self._request_previews(nxt, current=False)
+                if (offset == 1 and item.kind != MODE_FOLDERS
+                        and nxt.kind != MODE_FOLDERS and not nxt.locked):
+                    # La suivante se charge des maintenant dans le lecteur de
+                    # reserve : la fleche ne montrera plus de noir.
+                    self.single.preload(str(nxt.path))
         # Uniquement hors planche : les vignettes de la planche portent des
         # cles « board@… » que cet ensemble ne contient jamais, et les annuler
         # revenait a vider la planche de ses images a chaque fois qu'une fiche
@@ -1957,7 +2016,9 @@ class MainWindow(QMainWindow):
     def _update_page_bar(self) -> None:
         self._show_counts()
 
-    def show_banner(self, text: str, color: str = "#22303f") -> None:
+    def show_banner(self, text: str, tone: str = "info") -> None:
+        """Un bandeau, quatre tons : info, quiet, done, error. Rien d'autre."""
+        color = BANNER_TONES.get(tone, BANNER_TONES["info"])
         self.banner.setText(text)
         self.banner.setStyleSheet(f"background: {color}; color: #e9eef4;")
         self.banner.show()
@@ -1987,6 +2048,7 @@ class MainWindow(QMainWindow):
                        self.board.player, self.aside_player.player):
             player.stop()
             player.setSource(QUrl())
+        self.single.release()
         for pane in self.wall.panes:
             pane.stop()
         self.grid.video.hide()
@@ -2119,8 +2181,20 @@ class MainWindow(QMainWindow):
         if not videos:
             self.start_root(self.root, MODE_FLAT, reset_levels=False)
             return
-        self.all_items = [Item(path=Path(video), kind=MODE_FILES, videos=[video],
-                               video_count=1, file_count=1) for video in videos]
+        # Les memes objets d'une visite a l'autre : en refaire cent mille a
+        # chaque onglet coutait une demi-seconde, et perdait au passage ce
+        # qu'on avait decide d'eux.
+        cache = self._flat_cache
+        fresh = {}
+        for video in videos:
+            key = str(video)
+            item = cache.get(key)
+            if item is None:
+                item = Item(path=Path(video), kind=MODE_FILES, videos=[video],
+                            video_count=1, file_count=1)
+            fresh[key] = item
+        self._flat_cache = fresh
+        self.all_items = list(fresh.values())
         self.items = [i for i in self.all_items if self._matches(i)]
         self.mode = MODE_FLAT
         self.apply_sort()
@@ -2153,7 +2227,7 @@ class MainWindow(QMainWindow):
         self.cfg["tab"] = tab
         self.cfg["content"] = self.content
         self.cfg["view"] = self.view
-        self.cfg.save()
+        self.cfg.save_soon()
         # On ne deplace aucun fichier ici : inutile de relacher les verrous,
         # et surtout d'attendre les ffmpeg en cours. `_release_media` bloquait
         # le fil de l'interface jusqu'a 1,2 s a chaque onglet — c'etait la
@@ -2205,6 +2279,7 @@ class MainWindow(QMainWindow):
                 self.refresh_board()
             elif self.items:
                 self.show_item(0)
+            self.resume_last()
             self.setFocus()
             return
         if top != self.root or self.mode != mode or tab == TAB_TAGS:
@@ -2331,7 +2406,7 @@ class MainWindow(QMainWindow):
         if self.root is not None and target == self.root:
             return
         if not target.is_dir():
-            self.show_banner(f"Introuvable : {target}", "#3a2226")
+            self.show_banner(f"Introuvable : {target}", "error")
             return
         kept = []
         for level in self.levels:
@@ -2365,10 +2440,7 @@ class MainWindow(QMainWindow):
         if self.root is not None:
             top = Path(self.levels[0]["root"]) if self.levels else self.root
             self.crumbs.set_path(top, self.root)
-        self.item_subtitle.setText(
-            "Survolez une carte pour la lire, cliquez pour l'ouvrir, "
-            "notez d'un clic sur les étoiles."
-        )
+        self.item_subtitle.setText("")
         self.stars.hide()
         # En planche, la barre de pages compte les cartes et non les apercus.
 
@@ -2536,7 +2608,7 @@ class MainWindow(QMainWindow):
         if self.index + 1 < len(self.items):
             self.show_item(self.index + 1)
         else:
-            self.show_banner("Dernière vidéo de la liste", "#2a2f38")
+            self.show_banner("Dernière vidéo de la liste", "quiet")
 
     def discard_at(self, position: int) -> None:
         """Écarte la vignette cliquée, sans quitter la planche.
@@ -2573,7 +2645,7 @@ class MainWindow(QMainWindow):
         try:
             subprocess.Popen(["explorer", "/select,", str(Path(item.path))])
         except OSError as exc:
-            self.show_banner(f"Explorateur indisponible : {exc}", "#3a2226")
+            self.show_banner(f"Explorateur indisponible : {exc}", "error")
 
     def clear_picked(self) -> None:
         self.board.clear_picked()
@@ -2610,9 +2682,9 @@ class MainWindow(QMainWindow):
             )
             os.startfile(str(playlist))
         except OSError as exc:
-            self.show_banner(f"Lecture impossible : {exc}", "#3a2226")
+            self.show_banner(f"Lecture impossible : {exc}", "error")
             return
-        self.show_banner(f"{len(videos)} vidéo(s) envoyée(s) au lecteur", "#22303f")
+        self.show_banner(f"{len(videos)} vidéo(s) envoyée(s) au lecteur", "info")
 
     def move_picked_hint(self) -> None:
         """Le deplacement groupe passe par l'arborescence : on l'ouvre."""
@@ -2620,7 +2692,7 @@ class MainWindow(QMainWindow):
             self.toggle_tree(True)
         self.tree.set_action("send")
         self.show_banner(
-            "Cliquez le dossier de destination dans l'arborescence.", "#22303f")
+            "Cliquez le dossier de destination dans l'arborescence.", "info")
 
     def delete_picked(self) -> None:
         for item in list(self.board.picked_items()):
@@ -2692,7 +2764,7 @@ class MainWindow(QMainWindow):
         self.ratings.flush()
         self.show_banner(
             f"« {item.name} » : {value} étoile(s)" if value
-            else f"« {item.name} » : note effacée", "#2a2f38",
+            else f"« {item.name} » : note effacée", "quiet",
         )
 
     def pick_random_here(self) -> None:
@@ -2701,11 +2773,11 @@ class MainWindow(QMainWindow):
         item = self.current
         pool = [str(video) for video in (item.videos if item else [])]
         if not pool:
-            self.show_banner("Aucune vidéo ici", "#2a2f38")
+            self.show_banner("Aucune vidéo ici", "quiet")
             return
         video = random.choice(pool)
         self.show_banner(
-            f"Au hasard dans « {item.name} » : {Path(video).name}", "#22303f"
+            f"Au hasard dans « {item.name} » : {Path(video).name}", "info"
         )
         self.play_in_app(video)
 
@@ -2722,11 +2794,11 @@ class MainWindow(QMainWindow):
                 continue
             pool.extend(str(video) for video in item.videos)
         if not pool:
-            self.show_banner("Aucune vidéo à tirer au sort", "#2a2f38")
+            self.show_banner("Aucune vidéo à tirer au sort", "quiet")
             return
         video = random.choice(pool)
         self.show_banner(
-            f"Au hasard parmi {len(pool)} vidéos : « {Path(video).name} »", "#22303f"
+            f"Au hasard parmi {len(pool)} vidéos : « {Path(video).name} »", "info"
         )
         self.play_in_app(video)
 
@@ -2758,7 +2830,7 @@ class MainWindow(QMainWindow):
             moved = self.move_picked({"path": path, "label": Path(path).name})
             self.show_banner(
                 f"{moved} élément(s) envoyé(s) vers « {Path(path).name} »",
-                "#22303f")
+                "info")
             return
         return self._on_tree_folder(path)
 
@@ -2933,11 +3005,11 @@ class MainWindow(QMainWindow):
         if not item.movable or Path(item.path).name.startswith(PARENT_PREFIX):
             self.show_banner(
                 "Un mot-clé ou un dossier de tête ne se supprime pas d'ici",
-                "#3a2226",
+                "error",
             )
             return
         if not Path(item.path).exists():
-            self.show_banner(f"Introuvable : {item.name}", "#3a2226")
+            self.show_banner(f"Introuvable : {item.name}", "error")
             return self.advance()
         self._release_media()
         item.status = "pending_delete"
@@ -2947,7 +3019,7 @@ class MainWindow(QMainWindow):
                      dest=self.trash.folder_for(item.path),
                      label="Corbeille", item_id=item.item_id),
             f"« {item.name} » → corbeille  ·  Ctrl+Z ou Ctrl+B pour la rouvrir",
-            "#3a2226",
+            "error",
         )
 
     def act_move(self, dest: dict) -> None:
@@ -2958,7 +3030,7 @@ class MainWindow(QMainWindow):
         label = dest.get("label") or dest_dir.name
         problem = self._move_objection(item, dest_dir)
         if problem:
-            self.show_banner(problem, "#3a2226")
+            self.show_banner(problem, "error")
             return
         self._release_media()
         item.status = "pending_move"
@@ -2966,7 +3038,7 @@ class MainWindow(QMainWindow):
         self._enqueue(
             Transfer(kind="move", src=item.path, dest=dest_dir,
                      label=label, item_id=item.item_id),
-            f"« {item.name} » → {label}", "#22331f",
+            f"« {item.name} » → {label}", "done",
         )
 
     def _move_objection(self, item, dest_dir: Path) -> str:
@@ -3011,7 +3083,7 @@ class MainWindow(QMainWindow):
             )
             return
         if not self.history:
-            self.show_banner("Rien à annuler", "#2a2f38")
+            self.show_banner("Rien à annuler", "quiet")
             return
         entry = self.history[-1]
         if not entry.reversible:
@@ -3029,7 +3101,7 @@ class MainWindow(QMainWindow):
             kind="undo", src=entry.dst or entry.src, entry=entry,
             label=entry.label, item_id=item.item_id if item else "",
         ))
-        self.show_banner(f"Restauration de « {Path(entry.src).name} »…", "#22303f")
+        self.show_banner(f"Restauration de « {Path(entry.src).name} »…", "info")
 
     def _item_by_path(self, path: Path):
         for item in self.all_items:
@@ -3047,7 +3119,7 @@ class MainWindow(QMainWindow):
             if item is not None:
                 item.status = ""
                 item.status_detail = ""
-            self.show_banner(f"Échec sur « {job.name} » : {job.error}", "#4a1f24")
+            self.show_banner(f"Échec sur « {job.name} » : {job.error}", "error")
             self.update_counter()
             return
 
@@ -3086,7 +3158,7 @@ class MainWindow(QMainWindow):
             key = "deleted" if getattr(entry, "action", "") == "delete" else "moved"
             self.stats[key] = max(0, self.stats[key] - 1)
             self.show_banner(
-                f"Annulé : « {Path(entry.src).name} » est revenu à sa place", "#22303f"
+                f"Annulé : « {Path(entry.src).name} » est revenu à sa place", "info"
             )
             if item is not None and self.current is item:
                 self.show_item(self.index)
@@ -3169,7 +3241,7 @@ class MainWindow(QMainWindow):
         item = self.current
         if item is not None and item.kind == MODE_FILES:
             return self.play_in_app(str(item.path))
-        self.show_banner("Survolez une vidéo, ou double-cliquez dessus", "#2a2f38")
+        self.show_banner("Survolez une vidéo, ou double-cliquez dessus", "quiet")
 
     def play_in_app(self, path: str, start_s: float = 0.0) -> None:
         """Ouvre la fiche de cette vidéo : son dossier, en mode fichier, sur elle.
@@ -3180,7 +3252,7 @@ class MainWindow(QMainWindow):
         """
         video = Path(path)
         if not path or not video.exists():
-            self.show_banner("Vidéo introuvable", "#3a2226")
+            self.show_banner("Vidéo introuvable", "error")
             return
         self.grid.stop()
         self.board.stop()
@@ -3233,7 +3305,7 @@ class MainWindow(QMainWindow):
             found = [i for i in self.all_items if i.is_tag]
             self.show_banner(
                 f"{len(found)} mot(s)-clé(s) sur {len(self.tags)} ont trouvé "
-                f"des vidéos", "#22303f")
+                f"des vidéos", "info")
         else:
             self.set_tab(TAB_TAGS)
         self.setFocus()
@@ -3380,7 +3452,7 @@ class MainWindow(QMainWindow):
         self.grid.set_muted(muted)
         self.single.set_muted(muted)
         self._refresh_mute()
-        self.show_banner("Son coupé" if muted else "Son activé", "#2a2f38")
+        self.show_banner("Son coupé" if muted else "Son activé", "quiet")
 
     def minimumSizeHint(self):
         """Plafonne ce que la fenetre exige, quoi qu'en disent ses pieces.
