@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS listings(
     stamp REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (root, mode)
 );
+CREATE TABLE IF NOT EXISTS seen(
+    id TEXT PRIMARY KEY,
+    at REAL NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS probes(
     path     TEXT PRIMARY KEY,
     stamp    TEXT NOT NULL DEFAULT '',
@@ -127,6 +131,7 @@ class Index:
             if self.db is None:
                 return
         self._load_probes()
+        self._load_seen()
         self._migrate_json()
 
     def _sound(self) -> bool:
@@ -167,6 +172,33 @@ class Index:
             self.rebuilt = True
         except sqlite3.Error:
             self.db = None
+
+    def _load_seen(self) -> None:
+        self.seen = set()
+        if self.db is None:
+            return
+        try:
+            self.seen = {row[0] for row in self.db.execute("SELECT id FROM seen")}
+        except sqlite3.Error:
+            pass
+
+    def mark_seen(self, item_id: str) -> None:
+        """Regarde plus de quelques secondes : on s'en souviendra."""
+        if item_id in self.seen:
+            return
+        self.seen.add(item_id)
+        if self.db is None:
+            return
+        with self.lock:
+            try:
+                self.db.execute("INSERT OR REPLACE INTO seen(id, at) VALUES (?, ?)",
+                                (item_id, time.time()))
+                self.db.commit()
+            except sqlite3.Error:
+                pass
+
+    def is_seen(self, item_id: str) -> bool:
+        return item_id in self.seen
 
     def _load_probes(self) -> None:
         if self.db is None:
@@ -506,6 +538,7 @@ class Index:
             self.db = None
             return
         self._load_probes()
+        self._load_seen()
         if migrate:
             self._migrate_json()
 

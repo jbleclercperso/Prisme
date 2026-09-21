@@ -60,6 +60,8 @@ DEFAULTS = {
     "tree_action": "send",       # clic dans l arborescence : send | go
     "tags": [],
     "last_item": "",             # dernier element regarde, pour y revenir
+    "only_unseen": False,        # ne montrer que ce qui reste a voir
+    "burst": False,              # rafale : passer tout seul apres quelques secondes
     "wall_panes": 3,             # panneaux du mur
     "wall_orientation": "vertical",  # ce qu'il y pioche : vertical | horizontal | any
     "thumbs_last_run": "",       # date de la derniere preparation menee a terme                  # mots-cles, un par ligne

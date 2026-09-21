@@ -287,6 +287,7 @@ class ControlBar(QWidget):
     nextPage = Signal()
     randomHere = Signal()
     released = Signal()
+    unseenChanged = Signal(bool)
 
     RESOLUTIONS = (
         ("toutes", 0), ("360p", 360), ("480p", 480), ("720p", 720),
@@ -318,6 +319,20 @@ class ControlBar(QWidget):
         self.sorts = SortChips(self)
         self.sorts.chosen.connect(self.sortChanged)
         row.addWidget(self.sorts)
+
+        # Ce qui reste a voir : ni decide, ni deja regarde. Au bout d'une
+        # semaine sur cent mille videos, c'est la seule vue qui compte.
+        self.unseen = QPushButton("Non vus", self)
+        self.unseen.setObjectName("sortChip")
+        self.unseen.setCursor(Qt.PointingHandCursor)
+        self.unseen.setFocusPolicy(Qt.NoFocus)
+        self.unseen.setProperty("chosen", "false")
+        self.unseen.setToolTip("Ne montrer que ce qui n'a été ni décidé, "
+                               "ni regardé plus de cinq secondes")
+        self.unseen.clicked.connect(
+            lambda _c=False: self.unseenChanged.emit(
+                self.unseen.property("chosen") != "true"))
+        row.addWidget(self.unseen)
 
         self.random_here = _button("⚄", self.randomHere.emit)
         self.random_here.setFixedWidth(32)
@@ -395,6 +410,11 @@ class ControlBar(QWidget):
 
     def set_sort(self, mode: str) -> None:
         self.sorts.set_value(mode)
+
+    def set_unseen(self, on: bool) -> None:
+        self.unseen.setProperty("chosen", "true" if on else "false")
+        self.unseen.style().unpolish(self.unseen)
+        self.unseen.style().polish(self.unseen)
 
     def _step_columns(self, step: int) -> None:
         """Une vignette plus grande, ou plus petite, d'un cran."""

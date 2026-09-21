@@ -36,6 +36,10 @@ SHORTCUTS = [
         ("Ctrl+P", "basculer entre la planche et la fiche"),
         ("Ctrl+M", "couper ou rendre le son"),
         ("Ctrl+molette", "zoomer dans l'image"),
+        ("Maj (maintenue)", "neuf instants de la vidéo en mosaïque, "
+                            "avec les neuf premières destinations"),
+        ("Glisser sur l'image", "avancer ou reculer : toute la largeur, toute la durée"),
+        ("Clic sur l'image", "pause, reprise"),
         ("Clic droit sur une vignette", "l'ouvrir à côté, sans quitter la planche"),
     ]),
     ("Choisir et agir", [
@@ -48,6 +52,8 @@ SHORTCUTS = [
         ("Ctrl+T", "afficher ou masquer l'arborescence"),
         ("Ctrl+F", "aller au champ de recherche"),
         ("Ctrl+R", "tout réanalyser"),
+        ("Chip « Non vus »", "ne garder que ce qui n'a été ni décidé ni regardé"),
+        ("⋯ → Rafale", "la suivante arrive toute seule après 8 s sans décision"),
     ]),
 ]
 

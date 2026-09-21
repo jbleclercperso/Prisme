@@ -635,6 +635,98 @@ class PreviewGrid(QWidget):
         event.accept()
 
 
+PEEK_STYLE = """
+QWidget#peekOverlay { background: rgba(8, 10, 13, 235); }
+QFrame#peekCell { background: #0e1116; border: 1px solid #242a33; border-radius: 6px; }
+QLabel#peekImage { color: #6f7885; }
+QLabel#peekCaption { color: #e9eef4; font-size: 12px; font-weight: 600; }
+"""
+
+
+class PeekCell(QFrame):
+    """Une case du peek : un instant de la video, et la destination qui va avec."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("peekCell")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(3)
+        self.image = QLabel("…", self)
+        self.image.setObjectName("peekImage")
+        self.image.setAlignment(Qt.AlignCenter)
+        self.image.setMinimumSize(80, 45)
+        self.image.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        layout.addWidget(self.image, 1)
+        self.caption = QLabel("", self)
+        self.caption.setObjectName("peekCaption")
+        self.caption.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.caption, 0)
+        self._pixmap: QPixmap | None = None
+
+    def reset(self, caption: str) -> None:
+        self._pixmap = None
+        self.image.setPixmap(QPixmap())
+        self.image.setText("…")
+        self.caption.setText(caption)
+
+    def set_thumb(self, path: str) -> None:
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            self.image.setText("—")
+            return
+        self._pixmap = pixmap
+        self.image.setText("")
+        self._rescale()
+
+    def _rescale(self) -> None:
+        if self._pixmap is not None:
+            self.image.setPixmap(self._pixmap.scaled(
+                self.image.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._rescale()
+
+
+class PeekOverlay(QWidget):
+    """Neuf instants de la video, en mosaique, le temps qu'on tient la touche.
+
+    La planche contact existait, mais elle etait modale : on y entrait, on en
+    sortait. Ici on jette un oeil et on relache — la lecture n'a pas bouge.
+    Chaque case porte l'une des neuf premieres destinations : on juge la video
+    entiere d'un regard, et la touche a presser est ecrite dessous.
+    """
+
+    COUNT = 9
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("peekOverlay")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(PEEK_STYLE)
+        grid = QGridLayout(self)
+        grid.setContentsMargins(8, 8, 8, 8)
+        grid.setSpacing(8)
+        self.cells: list = []
+        for slot in range(self.COUNT):
+            cell = PeekCell(self)
+            grid.addWidget(cell, slot // 3, slot % 3)
+            self.cells.append(cell)
+        for index in range(3):
+            grid.setRowStretch(index, 1)
+            grid.setColumnStretch(index, 1)
+        self.hide()
+
+    def reset(self, captions: list) -> None:
+        for slot, cell in enumerate(self.cells):
+            cell.reset(captions[slot] if slot < len(captions) else "")
+
+    def set_thumb(self, slot: int, path: str) -> None:
+        if 0 <= slot < len(self.cells):
+            self.cells[slot].set_thumb(path)
+
+
 class _Deck:
     """Un lecteur complet : la surface, le moteur, le son.
 
@@ -708,6 +800,18 @@ class SinglePlayer(QWidget):
         self.decks = [_Deck(self.video_area), _Deck(self.video_area)]
         self._active = 0
         self._muted = False
+        self.peek = PeekOverlay(self.video_area)
+        self.peeking = False
+        # Le widget video de Windows avale les clics : on lui prend ses gestes
+        # a la source, comme la planche le fait deja.
+        for deck in self.decks:
+            deck.video.mousePressEvent = self._scrub_press
+            deck.video.mouseMoveEvent = self._scrub_move
+            deck.video.mouseReleaseEvent = self._scrub_release
+        self._scrub_x0 = None
+        self._scrub_pos0 = 0
+        self._scrubbing = False
+        self._zoomed_while_held = False
         layout.addWidget(self.video_area, 1)
 
         self.zoom = 1.0
@@ -820,6 +924,69 @@ class SinglePlayer(QWidget):
         spare.video.hide()
         spare.player.setSource(QUrl.fromLocalFile(path))
         spare.player.play()
+
+    def peek_begin(self, captions: list) -> None:
+        """Montre la mosaique par-dessus l'image, sans arreter la lecture."""
+        self.peeking = True
+        self.peek.reset(captions)
+        self.peek.setGeometry(self.video_area.rect())
+        for deck in self.decks:
+            deck.video.hide()
+        self.peek.show()
+        self.peek.raise_()
+
+    def peek_end(self) -> None:
+        if not self.peeking:
+            return
+        self.peeking = False
+        self.peek.hide()
+        deck = self.decks[self._active]
+        if deck.primed and not self._blackout:
+            deck.video.show()
+
+    def peek_thumb(self, slot: int, path: str) -> None:
+        self.peek.set_thumb(slot, path)
+
+    # -- scrub --------------------------------------------------------------
+    def _scrub_press(self, event) -> None:
+        if event.button() == Qt.LeftButton and self.player.source().isValid():
+            self._scrub_x0 = event.globalPosition().x()
+            self._scrub_pos0 = self.player.position()
+            self._scrubbing = False
+            self._zoomed_while_held = False
+            event.accept()
+            return
+        if event.button() == Qt.RightButton:
+            return self.mousePressEvent(event)
+
+    def _scrub_move(self, event) -> None:
+        """Glisser sur l'image : toute la largeur vaut toute la duree."""
+        if self._scrub_x0 is None or not (event.buttons() & Qt.LeftButton):
+            return
+        dx = event.globalPosition().x() - self._scrub_x0
+        if not self._scrubbing and abs(dx) < 6:
+            return
+        self._scrubbing = True
+        duration = self.player.duration()
+        width = max(1, self.video_area.width())
+        if duration <= 0:
+            return
+        target = int(self._scrub_pos0 + dx / width * duration)
+        target = max(0, min(duration - 500, target))
+        self.player.setPosition(target)
+        self._show_position(target)
+        event.accept()
+
+    def _scrub_release(self, event) -> None:
+        if event.button() != Qt.LeftButton or self._scrub_x0 is None:
+            return
+        was_click = not self._scrubbing and not self._zoomed_while_held
+        self._scrub_x0 = None
+        self._scrubbing = False
+        if was_click:
+            # Un clic sans glisser : pause ou reprise, comme sur le mur.
+            self.toggle_pause()
+        event.accept()
 
     def release(self) -> None:
         """Lache les deux fichiers : avant de deplacer ou supprimer."""
@@ -985,6 +1152,7 @@ class SinglePlayer(QWidget):
         Bouton gauche maintenu, ou Ctrl : zoomer là où pointe la souris.
         """
         if event.buttons() & Qt.LeftButton or event.modifiers() & Qt.ControlModifier:
+            self._zoomed_while_held = True
             return self._zoom_at(event)
         if not self.player.source().isValid():
             return super().wheelEvent(event)
@@ -1033,6 +1201,7 @@ class SinglePlayer(QWidget):
         # Les deux surfaces, pour que la reserve soit deja en place a l'echange.
         for deck in self.decks:
             deck.video.setGeometry(left, top, width, height)
+        self.peek.setGeometry(area)
 
     def reset_zoom(self) -> None:
         self.zoom = 1.0
@@ -1055,6 +1224,8 @@ class SinglePlayer(QWidget):
         self.position_timer.start(1800)
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            return self._scrub_press(event)
         # Le clic droit remet l'image à sa taille : geste unique, sans menu.
         if event.button() == Qt.RightButton and self.zoom > 1.0:
             self.reset_zoom()
@@ -1068,6 +1239,14 @@ class SinglePlayer(QWidget):
             self.position_timer.start(1200)
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        self._scrub_move(event)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._scrub_release(event)
+        super().mouseReleaseEvent(event)
 
     def toggle_pause(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:

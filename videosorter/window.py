@@ -53,6 +53,7 @@ from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
+    PeekOverlay,
     STYLESHEET, CommandBar, DestinationsDialog, PreviewGrid, SinglePlayer,
     StarStrip, TagsDialog, TrashDialog,
 )
@@ -192,6 +193,24 @@ class MainWindow(QMainWindow):
         self.transfers = TransferQueue(self)
         self._commands_signature = None
         self._resume_id = cfg["last_item"] or ""
+        # Le compteur de session : combien de decisions, depuis quand.
+        self._session_started = time.monotonic()
+        self._decisions = 0
+        self.session_timer = QTimer(self)
+        self.session_timer.setInterval(30000)
+        self.session_timer.timeout.connect(self._show_counts)
+        self.session_timer.start()
+        # Cinq secondes sur un element, et il compte comme vu.
+        self.seen_timer = QTimer(self)
+        self.seen_timer.setSingleShot(True)
+        self.seen_timer.setInterval(5000)
+        self.seen_timer.timeout.connect(self._mark_current_seen)
+        # La rafale : sans decision au bout de huit secondes, on passe.
+        self.burst_timer = QTimer(self)
+        self.burst_timer.setSingleShot(True)
+        self.burst_timer.setInterval(8000)
+        self.burst_timer.timeout.connect(self._burst_next)
+        self.peek_thumbs: dict = {}
         self._resume_hop = False
         self._flat_cache: dict = {}
         self.transfers.finished.connect(self.on_transfer_finished)
@@ -320,6 +339,8 @@ class MainWindow(QMainWindow):
             ("État des vignettes", self.audit_thumbs),
             ("Chercher les doublons", self.find_duplicates),
             ("-", None),
+            ("Rafale : passer tout seul après 8 s", self.toggle_burst),
+            ("-", None),
             ("Raccourcis et recherche…", self.show_help),
             ("Réanalyser tout le disque", self.refresh_root),
             ("Changer de racine…", self.choose_root),
@@ -371,6 +392,8 @@ class MainWindow(QMainWindow):
         self.controls.changed.connect(self.on_controls_changed)
         self.controls.released.connect(self.setFocus)
         self.controls.sortChanged.connect(self.set_sort)
+        self.controls.unseenChanged.connect(self.set_only_unseen)
+        self.controls.set_unseen(bool(self.cfg["only_unseen"]))
         self.controls.columnsChanged.connect(self.set_board_columns)
         self.controls.previousPage.connect(lambda: self.change_page(-1))
         self.controls.nextPage.connect(lambda: self.change_page(1))
@@ -1694,6 +1717,67 @@ class MainWindow(QMainWindow):
             self._resume_id = ""
         return False
 
+    def _mark_current_seen(self) -> None:
+        item = self.current
+        if item is not None and not self.browsing and not item.is_tag:
+            INDEX.mark_seen(item.item_id)
+
+    def _burst_next(self) -> None:
+        if (self.cfg["burst"] and not self.browsing and self.items
+                and self.index + 1 < len(self.items)):
+            self.show_item(self.index + 1)
+
+    def toggle_burst(self) -> None:
+        self.cfg["burst"] = not self.cfg["burst"]
+        self.cfg.save_soon()
+        if self.cfg["burst"]:
+            self.show_banner("Rafale : la suivante arrive toute seule après 8 s "
+                             "sans décision. Une décision, une flèche, et elle "
+                             "repart de zéro.", "info")
+            if not self.browsing and self.current is not None:
+                self.burst_timer.start()
+        else:
+            self.burst_timer.stop()
+            self.show_banner("Rafale arrêtée.", "quiet")
+
+    def set_only_unseen(self, on: bool) -> None:
+        self.cfg["only_unseen"] = bool(on)
+        self.cfg.save_soon()
+        self.controls.set_unseen(bool(on))
+        self.apply_filter(self.cfg["filter_include"], self.cfg["filter_exclude"])
+
+    def _note_decision(self) -> None:
+        self._decisions += 1
+        self.burst_timer.stop()
+
+    def peek_show(self) -> None:
+        """Maj maintenue : neuf instants, et les neuf premieres destinations."""
+        item = self.current
+        if (self.browsing or item is None or item.kind == MODE_FOLDERS
+                or item.locked or self.single.peeking):
+            return
+        captions = []
+        destinations = list(self.cfg.destinations)[:PeekOverlay.COUNT]
+        for slot in range(PeekOverlay.COUNT):
+            if slot < len(destinations):
+                dest = destinations[slot]
+                captions.append(f"{dest['key'].upper()}  ·  {dest['label']}")
+            else:
+                captions.append("")
+        self.single.peek_begin(captions)
+        key = f"peek@{item.item_id}"
+        ready = self.peek_thumbs.get(key)
+        if ready:
+            for slot, path in ready.items():
+                self.single.peek_thumb(slot, path)
+            return
+        if key not in self.plans:
+            self.preview.request_plan(key, [str(item.path)], PeekOverlay.COUNT,
+                                      page=0, one_per_video=False, urgent=True)
+
+    def peek_hide(self) -> None:
+        self.single.peek_end()
+
     def _rebuild_commands(self, force: bool = False) -> None:
         """Refait la barre des touches seulement quand elle a change.
 
@@ -1758,6 +1842,12 @@ class MainWindow(QMainWindow):
                 self.grid.set_no_videos("aucune vidéo")
         else:
             self.single.set_item(str(item.path), "…")
+        self.single.peek_end()
+        self.seen_timer.start()
+        if self.cfg["burst"] and item.kind != MODE_FOLDERS:
+            self.burst_timer.start()
+        else:
+            self.burst_timer.stop()
 
         self._sort_videos(item)
         self._request_previews(item, current=True)
@@ -1837,6 +1927,10 @@ class MainWindow(QMainWindow):
 
     def on_plan_ready(self, key: str, plan: list) -> None:
         self.plans[key] = plan
+        if key.startswith("peek@"):
+            for slot, entry in enumerate(plan):
+                self.preview.request_thumb(key, slot, entry[0], entry[1], True)
+            return
         if key.startswith("board@"):
             position = self._board_position_of(key)
             if position >= 0 and plan:
@@ -1863,6 +1957,8 @@ class MainWindow(QMainWindow):
     def on_info_ready(self, key: str, slot: int, duration: float,
                       height: int) -> None:
         """La durée et la résolution arrivent après l'image, et la complètent."""
+        if key.startswith("peek@"):
+            return
         if key.startswith("board@"):
             position = self._board_position_of(key)
             if position >= 0:
@@ -1879,6 +1975,13 @@ class MainWindow(QMainWindow):
             self.grid.set_info(slot, duration, height)
 
     def on_thumb_ready(self, key: str, slot: int, path: str) -> None:
+        if key.startswith("peek@"):
+            self.peek_thumbs.setdefault(key, {})[slot] = path
+            current = self.current
+            if (self.single.peeking and current is not None
+                    and key == f"peek@{current.item_id}"):
+                self.single.peek_thumb(slot, path)
+            return
         if key.startswith("board@"):
             position = self._board_position_of(key)
             if position >= 0:
@@ -1891,7 +1994,7 @@ class MainWindow(QMainWindow):
         viewer.set_thumb(slot, path)
 
     def on_thumb_failed(self, key: str, slot: int) -> None:
-        if key.startswith("board@"):
+        if key.startswith("board@") or key.startswith("peek@"):
             return
         current = self.current
         if current is None or key != self._current_key():
@@ -2014,9 +2117,19 @@ class MainWindow(QMainWindow):
         self.controls.set_page(
             f"{min(self.index + 1, total)} / {total}"
             + (f"  ·  {hidden} filtrés" if hidden else "")
-            + (f"  ·  {done} traités" if done else ""),
+            + (f"  ·  {done} traités" if done else "")
+            + self._session_text(),
             False, False,
         )
+
+    def _session_text(self) -> str:
+        """« 143 décisions · 41 min · 3,5/min » — ce qu'on a fait, depuis quand."""
+        if not self._decisions:
+            return ""
+        minutes = max(1.0, (time.monotonic() - self._session_started) / 60.0)
+        rate = self._decisions / minutes
+        return (f"  ·  {self._decisions} décision{'s' if self._decisions > 1 else ''}"
+                f" · {int(minutes)} min · {rate:.1f}/min").replace(".", ",")
 
     def _update_page_bar(self) -> None:
         self._show_counts()
@@ -2931,6 +3044,9 @@ class MainWindow(QMainWindow):
     def _matches(self, item) -> bool:
         if not self._sortable(item):
             return False
+        if self.cfg["only_unseen"] and not item.is_tag and (
+                item.status or INDEX.is_seen(item.item_id)):
+            return False
         rules = self.criteria or {}
         # Un seul champ, mais quelques mots de plus que les siens : « plage
         # -hiver », « plage or mer », « "saison 2" ». C'est ce qui a permis de
@@ -3124,6 +3240,7 @@ class MainWindow(QMainWindow):
         if item is not None and not item.processed and item.status != "skipped":
             item.status = "skipped"
             self.stats["skipped"] += 1
+            self._note_decision()
         self.advance()
 
     def act_undo(self) -> None:
@@ -3180,6 +3297,7 @@ class MainWindow(QMainWindow):
             if item is not None:
                 item.status = "deleted"
             self.stats["deleted"] += 1
+            self._note_decision()
             size = item.size if item is not None else 0
             self.trash.record(Path(job.src), job.result, size)
             self.ratings.rename(job.src, job.result)
@@ -3190,6 +3308,7 @@ class MainWindow(QMainWindow):
             if item is not None:
                 item.status = "moved"
             self.stats["moved"] += 1
+            self._note_decision()
             self.ratings.rename(job.src, job.result)
             self.history.append(
                 HistoryEntry("move", Path(job.src), job.result, job.label, True)
@@ -3198,6 +3317,7 @@ class MainWindow(QMainWindow):
             if item is not None:
                 item.status = "deleted"
             self.stats["deleted"] += 1
+            self._note_decision()
             self.history.append(
                 HistoryEntry("delete", Path(job.src), job.result, job.label, job.reversible)
             )
@@ -3447,6 +3567,10 @@ class MainWindow(QMainWindow):
                 return
             return super().keyPressEvent(event)
 
+        if key == Qt.Key_Shift:
+            if not event.isAutoRepeat():
+                self.peek_show()
+            return
         if key in (Qt.Key_Delete, Qt.Key_Backspace):
             return self.act_delete()
         if key == Qt.Key_Space:
@@ -3523,6 +3647,12 @@ class MainWindow(QMainWindow):
         """
         hint = super().minimumSizeHint()
         return QSize(min(hint.width(), 1100), min(hint.height(), 620))
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_Shift and not event.isAutoRepeat():
+            self.peek_hide()
+            return
+        super().keyReleaseEvent(event)
 
     def closeEvent(self, event):
         if self.backfill is not None:
