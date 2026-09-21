@@ -51,6 +51,7 @@ class BoardCard(QFrame):
         self.item = None
         self._resolution = ""
         self._pixmap: QPixmap | None = None
+        self._scaled_for = None
         self.setCursor(Qt.PointingHandCursor)
 
         layout = QVBoxLayout(self)
