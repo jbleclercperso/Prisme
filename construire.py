@@ -5,11 +5,16 @@ dans un dossier temporaire à **chaque** lancement — trois cents mégaoctets �
 recopier avant de voir la fenêtre. Le dossier, lui, démarre tout de suite, et
 se transporte aussi bien dans une archive.
 
-    python construire.py
+    python construire.py              le programme seul
+    python construire.py --complet    avec les vignettes deja fabriquees
 
-Le résultat est dans `dist/Prisme/`. ffmpeg n'y est pas : les deux binaires
-pèsent plus de quatre cents mégaoctets à eux seuls, et l'application dit
-clairement comment les installer si elle ne les trouve pas.
+Le résultat est dans `dist/Prisme/`. Avec `--complet`, le cache de cette
+machine y est copié dans `cache/` : le programme le trouve tout seul et
+retrouve les vignettes sur n'importe quel ordinateur, sans rien refabriquer.
+
+ffmpeg n'y est pas : les deux binaires pèsent plus de quatre cents mégaoctets
+à eux seuls, et l'application dit clairement comment les installer si elle ne
+les trouve pas.
 """
 from __future__ import annotations
 
@@ -36,7 +41,42 @@ EXCLUDES = [
 ]
 
 
-def build() -> int:
+def gather_cache(into: Path) -> tuple:
+    """Copie le cache de cette machine dans le paquet, pour qu'il voyage.
+
+    Les vignettes sont le bien le plus cher : des heures de fabrication sur
+    un partage reseau. Les emporter evite a l'autre ordinateur de tout
+    refaire. L'index les accompagne — durees, resolutions, plans, empreintes.
+    """
+    from videosorter.config import APP_DIR
+
+    source = APP_DIR
+    if not (source / "thumbs").is_dir():
+        older = source.parent / "VideoSorter"
+        if (older / "thumbs").is_dir():
+            source = older
+    if not source.is_dir():
+        return 0, 0
+
+    into.mkdir(parents=True, exist_ok=True)
+    count = weight = 0
+    # Ni les journaux ni la liste de lecture : ils ne disent rien de la
+    # collection et changent a chaque seance.
+    skip = {"gel.log", "preparation.log", "selection.m3u"}
+    for entry in source.rglob("*"):
+        if not entry.is_file() or entry.name in skip:
+            continue
+        target = into / entry.relative_to(source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(entry, target)
+        count += 1
+        weight += entry.stat().st_size
+        if count % 5000 == 0:
+            print(f"  {count} fichiers…", flush=True)
+    return count, weight
+
+
+def build(complete: bool = False) -> int:
     for folder in (HERE / "build", HERE / "dist"):
         shutil.rmtree(folder, ignore_errors=True)
 
@@ -67,16 +107,29 @@ def build() -> int:
         "X:\\_prisme\n", encoding="utf-8")
     (OUT / "LISEZ-MOI.txt").write_text(LISEZMOI, encoding="utf-8")
 
-    archive = HERE / "dist" / "Prisme.zip"
+    cached = 0
+    if complete:
+        print("Copie du cache…", flush=True)
+        cached, cache_weight = gather_cache(OUT / "cache")
+        print(f"  {cached} fichier(s), {cache_weight / 1024 / 1024:.0f} Mo")
+
+    name = "Prisme-complet.zip" if complete else "Prisme.zip"
+    archive = HERE / "dist" / name
     print("Compression…", flush=True)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for path in OUT.rglob("*"):
-            if path.is_file():
-                zf.write(path, Path("Prisme") / path.relative_to(OUT))
+            if not path.is_file():
+                continue
+            inside = Path("Prisme") / path.relative_to(OUT)
+            # Une vignette est deja compressee : la recomprimer prendrait des
+            # minutes pour gagner quelques pour cent.
+            how = (zipfile.ZIP_STORED if path.suffix.lower() in (".jpg", ".jpeg")
+                   else zipfile.ZIP_DEFLATED)
+            zf.write(path, inside, compress_type=how)
 
     weight = sum(f.stat().st_size for f in OUT.rglob("*") if f.is_file())
     print(f"\ndist/Prisme/      {weight / 1024 / 1024:.0f} Mo")
-    print(f"dist/Prisme.zip   {archive.stat().st_size / 1024 / 1024:.0f} Mo")
+    print(f"dist/{name}   {archive.stat().st_size / 1024 / 1024:.0f} Mo")
     return 0
 
 
@@ -114,6 +167,14 @@ c'est une base de données, et deux écritures simultanées par le réseau la
 fragiliseraient. Seules les vignettes se partagent — ce sont elles qui
 coûtent des heures.
 
+SI CE PAQUET CONTIENT UN DOSSIER « cache »
+Alors tout est déjà là : vignettes, durées, plans, empreintes, notes et
+réglages. Prisme s'en sert tout seul, sans rien refabriquer.
+
+Les vignettes sont retrouvées par le chemin de chaque vidéo : le partage
+doit donc porter la même lettre de lecteur qu'à la fabrication. Si c'était
+X:, ce doit être X: ici aussi.
+
 OÙ TROUVER TOUT ÇA
 Le menu ⋯ → « Où sont les vignettes » le dit, avec le compte des fichiers.
 
@@ -123,4 +184,4 @@ Le menu ⋯ → « Raccourcis et recherche ».
 
 
 if __name__ == "__main__":
-    sys.exit(build())
+    sys.exit(build("--complet" in sys.argv))

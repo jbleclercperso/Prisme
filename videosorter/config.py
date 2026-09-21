@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -15,22 +16,90 @@ _LOCAL = Path(os.environ.get("LOCALAPPDATA") or Path.home())
 APP_DIR = _LOCAL / APP_NAME
 
 
-def adopt_old_cache() -> str:
-    """Renomme l'ancien dossier, si le nouveau n'existe pas encore.
+def _has_thumbs(folder: Path) -> bool:
+    """Vrai si ce dossier porte de vraies vignettes — le seul bien qui compte.
 
-    Rend le chemin repris, ou une chaine vide. Un echec n'est pas grave : on
-    repart d'un cache vide, ce qui coute du temps mais ne perd rien.
+    On ne se fie pas a l'existence du dossier : il se cree tout seul des
+    qu'un module s'ouvre, bien avant qu'on ait pu decider quoi que ce soit.
+    C'est precisement ce qui avait fait echouer la premiere reprise.
+    """
+    thumbs = folder / "thumbs"
+    if not thumbs.is_dir():
+        return False
+    for _dirpath, _dirs, files in os.walk(thumbs):
+        if files:
+            return True
+    return False
+
+
+def adopt_old_cache() -> str:
+    """Reprend le cache de l'ancien nom, et **fusionne** avec celui-ci.
+
+    Une seule regle pour les vignettes : ce qui manque ici est deplace, ce
+    qui s'y trouve deja est laisse. C'est sans risque, puisqu'une vignette
+    porte le nom de son contenu — meme nom veut dire meme image.
+
+    Fichier par fichier, et non d'un seul renommage de dossier : un seul
+    fichier verrouille par une autre fenetre faisait echouer le tout, et
+    soixante-quinze mille vignettes restaient de l'autre cote. Ce qui ne
+    peut pas bouger aujourd'hui bougera au prochain lancement.
     """
     old = _LOCAL / _OLD_NAME
-    if APP_DIR.exists() or not old.is_dir():
+    if old == APP_DIR or not old.is_dir():
         return ""
+    moved = 0
     try:
-        old.rename(APP_DIR)
+        APP_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
         return ""
-    return str(old)
+
+    for entry in sorted(old.rglob("*")):
+        if not entry.is_file():
+            continue
+        target = APP_DIR / entry.relative_to(old)
+        if target.exists():
+            if "thumbs" in entry.relative_to(old).parts:
+                # Meme nom, donc meme image : une vignette porte le nom de
+                # son contenu. On retire le doublon plutot que de le laisser
+                # occuper la place, et le vieux dossier peut disparaitre.
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass
+                continue
+            # Reglages, notes, index : le plus recent gagne. Un import suffit
+            # a creer une ebauche ici, et elle ne doit pas primer sur ce qui
+            # a reellement servi la-bas.
+            try:
+                if entry.stat().st_mtime <= target.stat().st_mtime:
+                    continue
+                target.unlink()
+            except OSError:
+                continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            entry.rename(target)
+            moved += 1
+        except OSError:
+            continue            # verrouille : ce sera pour la prochaine fois
+
+    # Les dossiers vides s'en vont, du plus profond au plus haut.
+    for folder in sorted(old.rglob("*"), reverse=True):
+        if folder.is_dir():
+            try:
+                folder.rmdir()
+            except OSError:
+                pass
+    try:
+        old.rmdir()
+    except OSError:
+        pass
+    return str(old) if moved else ""
+
+
+ADOPTED = adopt_old_cache()
 CONFIG_PATH = APP_DIR / "config.json"
-def _chosen_cache() -> Path | None:
+def _chosen_cache() -> tuple:
     """Le cache designe ailleurs, s'il l'a ete.
 
     Deux ordinateurs qui regardent le meme partage fabriquent exactement les
@@ -38,15 +107,25 @@ def _chosen_cache() -> Path | None:
     date du fichier. Les mettre en commun evite au second de refaire le
     travail du premier — et c'est le travail le plus long de tous.
 
-    Deux facons de le designer, dans cet ordre : la variable d'environnement
-    PRISME_CACHE, ou un fichier `prisme.cache` pose a cote du programme, qui
-    ne contient qu'un chemin. Un fichier plutot qu'un reglage dans
+    Rend (dossier, portable). « Portable » veut dire : un dossier « cache »
+    pose a cote du programme, qui voyage avec lui — l'index y vit aussi.
+    Sinon la variable d'environnement PRISME_CACHE, ou un fichier
+    `prisme.cache` pose a cote du programme, qui ne contient qu'un chemin. Un fichier plutot qu'un reglage dans
     config.json : celui-ci vit deja dans le cache, et l'on ne peut pas y lire
     ou il se trouve.
     """
     told = os.environ.get("PRISME_CACHE", "").strip()
+    here = [Path(sys.argv[0]).resolve().parent, Path.cwd()]
     if not told:
-        for folder in (Path(sys.argv[0]).resolve().parent, Path.cwd()):
+        # Un dossier « cache » pose a cote du programme le rend portable :
+        # tout voyage ensemble, et rien ne depend de la machine. C'est ce que
+        # contient l'archive complete.
+        for folder in here:
+            beside = folder / "cache"
+            if beside.is_dir():
+                return beside, True
+    if not told:
+        for folder in here:
             note = folder / "prisme.cache"
             try:
                 if note.is_file():
@@ -56,16 +135,16 @@ def _chosen_cache() -> Path | None:
             except OSError:
                 continue
     if not told:
-        return None
+        return None, False
     try:
         chosen = Path(told).expanduser()
         chosen.mkdir(parents=True, exist_ok=True)
-        return chosen
+        return chosen, False
     except OSError:
-        return None
+        return None, False
 
 
-SHARED_DIR = _chosen_cache()
+SHARED_DIR, PORTABLE = _chosen_cache()
 if SHARED_DIR is not None:
     APP_DIR = SHARED_DIR
 
@@ -74,7 +153,11 @@ if SHARED_DIR is not None:
 # meme temps par le reseau la fragiliseraient. Il reste donc chez chacun,
 # sauf demande expresse.
 THUMB_DIR = APP_DIR / "thumbs"
-INDEX_PATH = (_LOCAL / APP_NAME / "index.db" if SHARED_DIR is not None
+# Un cache pose a cote du programme voyage entier : l'index l'accompagne.
+# Un cache designe sur un partage, lui, est peut-etre lu par deux machines a
+# la fois — l'index reste alors chez chacune.
+INDEX_PATH = (_LOCAL / APP_NAME / "index.db"
+              if SHARED_DIR is not None and not PORTABLE
               else APP_DIR / "index.db")
 # Anciens caches JSON, repris puis effaces par l'index au premier lancement.
 PROBE_CACHE_PATH = APP_DIR / "probe-cache.json"
