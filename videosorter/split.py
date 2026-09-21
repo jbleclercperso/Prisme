@@ -264,6 +264,7 @@ class SplitWall(QWidget):
     orientationChanged = Signal(str)
     fullscreenRequested = Signal()
     exitRequested = Signal()
+    unseenToggled = Signal(bool)
 
     def __init__(self, panes: int = DEFAULT_PANES, scroll_seconds: int = 5,
                  parent=None, orientation: str = "vertical"):
@@ -302,7 +303,8 @@ class SplitWall(QWidget):
         self.caption = QLabel("", self.controls)
         self.caption.setObjectName("splitName")
         self.caption.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        controls.addWidget(self.caption, 1)
+        self.caption.hide()
+        controls.addStretch(1)
         self.count_buttons: dict = {}
         for count in PANE_CHOICES:
             button = QPushButton(str(count), self.controls)
@@ -322,6 +324,16 @@ class SplitWall(QWidget):
                 lambda _c=False, k=key: self.orientationChanged.emit(k))
             controls.addWidget(button)
             self.orientation_buttons[key] = button
+        controls.addSpacing(10)
+        self.unseen = QPushButton("Non vus", self.controls)
+        self.unseen.setObjectName("splitButton")
+        self.unseen.setFocusPolicy(Qt.NoFocus)
+        self.unseen.setToolTip("Ne piocher que dans ce qui n'a été ni décidé, "
+                               "ni regardé plus de cinq secondes")
+        self.unseen.clicked.connect(
+            lambda _c=False: self.unseenToggled.emit(
+                self.unseen.property("chosen") != "true"))
+        controls.addWidget(self.unseen)
         controls.addSpacing(10)
         full = QPushButton("⛶ Plein écran", self.controls)
         full.setObjectName("splitButton")
@@ -355,6 +367,11 @@ class SplitWall(QWidget):
         self.row.hide()
         outer.addWidget(self.row, 1)
         self._mark_choices()
+
+    def set_unseen(self, on: bool) -> None:
+        self.unseen.setProperty("chosen", "true" if on else "false")
+        self.unseen.style().unpolish(self.unseen)
+        self.unseen.style().polish(self.unseen)
 
     def _mark_choices(self) -> None:
         for count, button in self.count_buttons.items():

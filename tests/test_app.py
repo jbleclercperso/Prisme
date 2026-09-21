@@ -2201,6 +2201,68 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(_perf.LOG.exists() and "test.sleep" in _perf.LOG.read_text(encoding="utf-8"),
           "avec l'action qui le précédait, dans le journal")
 
+    print("\n[66] Deux lignes, filtres lisibles, orientation stricte")
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(audite / "lot", MODE_FLAT)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
+    window.toggle_board(True)
+    window.clear_picked()
+    pump(app, 0.2)
+    check(window.picked_bar.parent() is not None and window.picked_bar.isHidden(),
+          "la barre de sélection attend en bout de la ligne des filtres")
+    window.board.pick_all(True)
+    pump(app, 0.2)
+    check(not window.picked_bar.isHidden(), "et paraît dès qu'on coche")
+    window.clear_picked()
+
+    check(window.controls.clear.isHidden(), "sans filtre, pas de « ✕ filtres »")
+    window.controls._toggle_orientation("horizontal")
+    pump(app, 0.3)
+    check(not window.controls.clear.isHidden() and "verticales" in window.controls.clear.toolTip(),
+          f"un filtre posé : le bouton dit lequel ({window.controls.clear.toolTip()!r})")
+    check(len(window.items) == 0, "strict : sans orientation connue, rien ne passe pour « Verticales »")
+    known = str(window.all_items[0].path)
+    INDEX.put_probe(known, "", {"duration": 8.0, "width": 720, "height": 1280, "codec": "", "ok": True})
+    window.on_controls_changed()
+    pump(app, 0.2)
+    check(len(window.items) == 1 and str(window.items[0].path) == known,
+          "et seule la verticale connue passe")
+    window.reset_filters()
+    pump(app, 0.2)
+    check(window.controls.clear.isHidden() and len(window.items) >= 3
+          and window.controls.orientations() == ["vertical", "horizontal"],
+          "« ✕ filtres » remet tout")
+
+    window.set_tab(TAB_SPLIT)
+    pump(app, 0.3)
+    check(window.controls.sorts.isHidden() and window.controls.unseen.isHidden()
+          and window.controls.wider.isHidden(), "sur le mur, la ligne des filtres se vide")
+    check(not window.item_card.isHidden() and window.wall.controls.parent() is window.item_card
+          and not window.wall.controls.isHidden(), "les réglages du mur sont sur la ligne du titre")
+    check("vidéo" in window.item_title.text(), "qui dit la taille du vivier")
+    window.wall.unseenToggled.emit(True)
+    pump(app, 0.3)
+    check(window.cfg["only_unseen"] is True and window.wall.unseen.property("chosen") == "true",
+          "« Non vus » du mur pose le réglage")
+    window.wall.unseenToggled.emit(False)
+    pump(app, 0.2)
+
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 1, 60)
+    window.toggle_board(False)
+    pump(app, 0.3)
+    folder_at = next((i for i, it in enumerate(window.items) if it.kind == MODE_FOLDERS), -1)
+    if folder_at >= 0:
+        window.show_item(folder_at)
+        pump(app, 0.3)
+        check(not window.grid_chips.isHidden(), "devant un dossier : les chips 2/4/6/8/10")
+        window.set_thumb_count(4)
+        pump(app, 0.4)
+        check(window.cfg["thumb_count"] == 4 and window.grid.visible_count <= 4,
+              f"quatre aperçus à la fois ({window.grid.visible_count})")
+        window.set_thumb_count(10)
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

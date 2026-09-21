@@ -444,6 +444,10 @@ class MainWindow(QMainWindow):
         self.controls.set_orientations(self.cfg["orientations"])
         self.controls.set_folder_bounds(int(self.cfg["folder_min"] or 0),
                                         int(self.cfg["folder_max"] or 0))
+        # Les criteres valent des le depart, pas seulement apres un premier
+        # clic sur un chip : sans cela, un filtre retenu d'une session a
+        # l'autre s'affichait coche mais ne filtrait rien.
+        self.criteria = self.controls.criteria()
         self.controls.columnsChanged.connect(self.set_board_columns)
         self.controls.previousPage.connect(lambda: self.change_page(-1))
         self.controls.nextPage.connect(lambda: self.change_page(1))
@@ -530,6 +534,23 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.contact_button, 0)
         header_layout.addWidget(self.cinema_button, 0)
         header_layout.addWidget(self.enter_button, 0)
+        # Dans un dossier : combien d'apercus a la fois. Meme geste que le mur.
+        self.grid_chips = QWidget(header)
+        grid_row = QHBoxLayout(self.grid_chips)
+        grid_row.setContentsMargins(0, 0, 0, 0)
+        grid_row.setSpacing(4)
+        self.grid_count_buttons: dict = {}
+        for count in (2, 4, 6, 8, 10):
+            button = QPushButton(str(count), self.grid_chips)
+            button.setObjectName("splitButton")
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setToolTip(f"{count} aperçus à la fois")
+            button.clicked.connect(lambda _c=False, n=count: self.set_thumb_count(n))
+            grid_row.addWidget(button)
+            self.grid_count_buttons[count] = button
+        self.grid_chips.hide()
+        header_layout.addWidget(self.grid_chips, 0)
+        self._mark_grid_count()
         # En planche, ce bloc repetait le fil d'Ariane et une phrase d'aide, sur
         # trois lignes, au detriment d'une rangee entiere de vignettes.
         self.item_card = header
@@ -539,7 +560,7 @@ class MainWindow(QMainWindow):
         # permanente occuperait une rangee pour ne rien dire la plupart du temps.
         self.picked_bar = QWidget(sort_page)
         picked_row = QHBoxLayout(self.picked_bar)
-        picked_row.setContentsMargins(12, 6, 12, 6)
+        picked_row.setContentsMargins(0, 0, 0, 0)
         picked_row.setSpacing(8)
         self.picked_label = QLabel("", self.picked_bar)
         self.picked_label.setObjectName("pending")
@@ -559,7 +580,9 @@ class MainWindow(QMainWindow):
             button.clicked.connect(slot)
             picked_row.addWidget(button)
         self.picked_bar.hide()
-        layout.addWidget(self.picked_bar)
+        # En bout de la ligne des filtres, pas sur une ligne a elle : une
+        # rangee de plus pour quatre boutons coutait une rangee de vignettes.
+        header_row.addWidget(self.picked_bar, 0)
 
         self.banner = QLabel("", sort_page)
         self.banner.setObjectName("statusBanner")
@@ -582,7 +605,7 @@ class MainWindow(QMainWindow):
 
         self.viewer = QStackedWidget(sort_page)
         self.grid = PreviewGrid(
-            self.cfg["thumb_count"], self.cfg["preview_seconds"],
+            max(10, self.cfg["thumb_count"]), self.cfg["preview_seconds"],
             self.cfg["scroll_seconds"], self.viewer,
         )
         self.grid.openRequested.connect(self.open_external)
@@ -617,6 +640,13 @@ class MainWindow(QMainWindow):
         self.wall.fullscreenRequested.connect(self.toggle_wall_fullscreen)
         self.wall.exitRequested.connect(lambda: self.toggle_wall_fullscreen(False))
         self.wall.siblingRequested.connect(self.wall_sibling)
+        self.wall.unseenToggled.connect(self._wall_unseen)
+        # Les reglages du mur — nombre, orientation, non vus, plein ecran — en
+        # bout de la ligne du titre, pas sur une ligne a eux.
+        self.wall.controls.setParent(self.item_card)
+        self.item_card.layout().addWidget(self.wall.controls, 0)
+        self.wall.controls.hide()
+        self.controls.clearRequested.connect(self.reset_filters)
         self.wall_full = False
         self._wall_pinned: list = []
         self.viewer.addWidget(self.board)
@@ -2400,6 +2430,7 @@ class MainWindow(QMainWindow):
 
     def _show_counts(self) -> None:
         """Une seule ligne dit ce qui est montre, ce qui est masque, et ou l'on en est."""
+        self.controls.set_filters(self._active_filters())
         hidden = (sum(1 for i in self.all_items if self._sortable(i))
                   - len(self.items))
         if self.browsing:
@@ -2537,6 +2568,61 @@ class MainWindow(QMainWindow):
         self._show_counts()
         return True
 
+    def _wall_unseen(self, on: bool) -> None:
+        self.cfg["only_unseen"] = bool(on)
+        self.cfg.save_soon()
+        self.controls.set_unseen(bool(on))
+        self.show_wall()
+
+    def set_thumb_count(self, count: int) -> None:
+        """Combien d'apercus a la fois dans un dossier : 2, 4, 6, 8 ou 10."""
+        count = max(1, min(10, int(count)))
+        if count == self.cfg["thumb_count"]:
+            return
+        self.cfg["thumb_count"] = count
+        self.cfg.save_soon()
+        self.plans = {}
+        self.pages = {}
+        self._mark_grid_count()
+        if not self.browsing and self.current is not None:
+            self.show_item(self.index)
+
+    def _mark_grid_count(self) -> None:
+        for count, button in self.grid_count_buttons.items():
+            button.setProperty("chosen", "true" if count == self.cfg["thumb_count"] else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def _active_filters(self) -> list:
+        """Ce qui masque des elements en ce moment, en clair."""
+        active = []
+        query = (self.criteria or {}).get("include", self.cfg["filter_include"])
+        if query:
+            active.append(f"recherche « {query} »")
+        if self.cfg["only_unseen"]:
+            active.append("non vus seulement")
+        chosen = self.controls.orientations()
+        if len(chosen) == 1:
+            active.append("verticales seulement" if chosen[0] == "vertical"
+                          else "horizontales seulement")
+        low, high = int(self.cfg["folder_min"] or 0), int(self.cfg["folder_max"] or 0)
+        if low:
+            active.append(f"dossiers d'au moins {low} vidéos")
+        if high:
+            active.append(f"dossiers d'au plus {high} vidéos")
+        return active
+
+    def reset_filters(self) -> None:
+        """Tout retirer d'un geste : recherche, non vus, orientation, bornes."""
+        self.controls.set_terms("", "")
+        self.controls.set_orientations(("vertical", "horizontal"))
+        self.controls.set_folder_bounds(0, 0)
+        self.cfg["only_unseen"] = False
+        self.controls.set_unseen(False)
+        self.wall.set_unseen(False)
+        self.on_controls_changed()
+        self.show_banner("Tous les filtres sont retirés.", "quiet")
+
     def set_wall_count(self, count: int) -> None:
         self.cfg["wall_panes"] = count
         self.cfg.save_soon()
@@ -2593,6 +2679,7 @@ class MainWindow(QMainWindow):
         terms = self._terms((self.criteria or {}).get(
             "include", self.cfg["filter_include"]))
         wanted = self.cfg["wall_orientation"] or "vertical"
+        only_unseen = bool(self.cfg["only_unseen"])
         top = self.top_root()
         videos = list(self._videos_from_items())
         if top is not None:
@@ -2610,6 +2697,8 @@ class MainWindow(QMainWindow):
                 continue
             seen.add(key)
             if terms and not any(term in key.lower() for term in terms):
+                continue
+            if only_unseen and INDEX.is_seen(key):
                 continue
             if wanted == "any":
                 found.append(key)
@@ -2685,7 +2774,10 @@ class MainWindow(QMainWindow):
                     pool = light
             self.wall.set_pool(pool)
             self.wall.set_caption(len(pool), unknown, heavy=heavy)
-        self.item_title.setText(f"{len(self.wall.pool)} vidéo(s) pour le mur")
+        self.wall.set_unseen(bool(self.cfg["only_unseen"]))
+        self.item_title.setText(self.wall.caption.text()
+                                or f"{len(self.wall.pool)} vidéo(s) pour le mur")
+        self.item_subtitle.setText("")
 
     def open_video_path(self, path: str) -> None:
         """Ouvre dans la fiche une vidéo désignée par son chemin."""
@@ -2894,9 +2986,15 @@ class MainWindow(QMainWindow):
         self.tag_chips.setVisible(self.tab == TAB_TAGS)
         self.tags_button.setVisible(self.tab == TAB_TAGS)
         self.controls.set_browsing(self.browsing)
-        # La fiche ne dit rien qu'on ne lise deja ailleurs quand on parcourt.
-        self.item_card.setVisible(not self.browsing)
+        self.controls.set_wall(self.tab == TAB_SPLIT)
+        # La fiche ne dit rien qu'on ne lise deja ailleurs quand on parcourt —
+        # sauf sur le mur, ou sa ligne porte les reglages.
+        self.item_card.setVisible(not self.browsing or self.tab == TAB_SPLIT)
+        self.wall.controls.setVisible(self.tab == TAB_SPLIT and not self.wall_full)
         item = self.current
+        self.grid_chips.setVisible(
+            not self.browsing and self.tab != TAB_SPLIT and item is not None
+            and item.kind == MODE_FOLDERS and not item.locked)
         item = self.current
         self.contact_button.setVisible(
             not self.browsing and item is not None
@@ -3475,12 +3573,16 @@ class MainWindow(QMainWindow):
         else:
             wanted = rules.get("orientations")
             if wanted is not None and len(wanted) == 1:
+                # Strict : ce dont on ignore l'orientation est ecarte aussi.
+                # Le laisser passer donnait « Verticales » plein
+                # d'horizontales — tout ce qui n'avait pas encore ete sonde.
                 info = INDEX.probe(item.path) or {}
                 width, height = info.get("width") or 0, info.get("height") or 0
-                if width and height:
-                    kind = "vertical" if height > width else "horizontal"
-                    if kind not in wanted:
-                        return False
+                if not (width and height):
+                    return False
+                kind = "vertical" if height > width else "horizontal"
+                if kind not in wanted:
+                    return False
 
         needs_media = rules.get("duration_op") or rules.get("resolution", 0) > 0
         if not needs_media:

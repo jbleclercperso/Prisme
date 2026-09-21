@@ -289,6 +289,7 @@ class ControlBar(QWidget):
     randomHere = Signal()
     released = Signal()
     unseenChanged = Signal(bool)
+    clearRequested = Signal()
 
     RESOLUTIONS = (
         ("toutes", 0), ("360p", 360), ("480p", 480), ("720p", 720),
@@ -393,6 +394,18 @@ class ControlBar(QWidget):
         self.columns = _combo([(n, str(n)) for n in columns_choices])
         self.columns.hide()
         self.columns_caption = self.columns_label
+        # Quand un filtre est pose, on doit pouvoir le voir et le defaire d'un
+        # geste : « 4 filtres » sans savoir lesquels, ni comment les oter,
+        # c'est ce qu'on nous a reproche.
+        self.clear = QPushButton("✕ filtres", self)
+        self.clear.setObjectName("sortChip")
+        self.clear.setCursor(Qt.PointingHandCursor)
+        self.clear.setFocusPolicy(Qt.NoFocus)
+        self.clear.setProperty("chosen", "true")
+        self.clear.clicked.connect(self.clearRequested)
+        self.clear.hide()
+        row.addWidget(self.clear)
+
         row.addWidget(self.wider)
         row.addWidget(self.columns_label)
         row.addWidget(self.tighter)
@@ -522,9 +535,32 @@ class ControlBar(QWidget):
 
     def set_browsing(self, browsing: bool) -> None:
         """La densité et la pagination ne valent qu'en parcours."""
+        self._browsing = browsing
         for widget in (self.wider, self.columns_label, self.tighter,
                        self.previous, self.next):
-            widget.setVisible(browsing)
+            widget.setVisible(browsing and not getattr(self, "_wall", False))
+
+    def set_wall(self, on: bool) -> None:
+        """Sur le mur, la ligne ne garde que la recherche : le reste ne s'y
+        applique pas, ou vit sur la ligne du dessous."""
+        self._wall = on
+        for widget in (self.sorts, self.unseen, self.clear,
+                       *self.orientation_buttons.values()):
+            widget.setVisible(not on)
+        if on:
+            self.folder_min.hide()
+            self.folder_max.hide()
+        self.set_browsing(getattr(self, "_browsing", True))
+
+    def set_filters(self, active: list) -> None:
+        """Montre « ✕ filtres » si quelque chose est pose, et dit quoi."""
+        if getattr(self, "_wall", False):
+            self.clear.hide()
+            return
+        self.clear.setVisible(bool(active))
+        self.clear.setToolTip("Retirer : " + " · ".join(active) if active else "")
+        self.count.setToolTip("Filtres actifs : " + " · ".join(active)
+                              if active else "")
 
     def reset(self) -> None:
         for field in (self.include, self.exclude):
