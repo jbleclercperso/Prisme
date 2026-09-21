@@ -2455,6 +2455,105 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(len([e for e in INDEX.all_sigs() if str(marks) in str(e[0])]) == 3,
           "et la base survit à une réouverture")
 
+    print("\n[70] La fenêtre tient sur un écran agrandi, le lecteur de côté se ferme")
+    # A 200 % sur un ecran de 1080p, il ne reste que 960 sur 540 points.
+    window.tree.hide()
+    window.aside.hide()
+    pump(app, 0.2)
+    need = window.layout().minimumSize()
+    gros = sorted(
+        ((getattr(window, n).minimumSizeHint().width(), n)
+         for n in ("top_bar", "crumbs", "controls", "picked_bar", "item_card",
+                   "viewer", "nav_row", "commands", "tree", "aside")
+         if getattr(window, n, None) is not None), reverse=True)[:3]
+    check(need.width() <= 980 and need.height() <= 540,
+          f"la fenêtre descend à {need.width()} x {need.height()} — elle tient "
+          f"(les plus larges : {gros})")
+    hint = window.minimumSizeHint()
+    check(hint.width() <= 1100 and hint.height() <= 620,
+          f"et son plafond suit l'écran ({hint.width()} x {hint.height()})")
+    window._fit_to_screen(9000, 9000)
+    free = QApplication.primaryScreen().availableGeometry()
+    check(window.height() <= free.height(),
+          f"elle ne naît jamais plus haute que l'écran ({window.height()} sur {free.height()})")
+
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(audite / "lot", MODE_FLAT)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 1, 60)
+    window.toggle_board(True)
+    pump(app, 0.3)
+    window.open_aside(0)
+    pump(app, 0.3)
+    check(not window.aside.isHidden(), "le clic droit ouvre la vidéo à côté")
+    window.set_tab(TAB_VIDEOS)
+    pump(app, 0.3)
+    check(window.aside.isHidden() and window.aside_index == -1,
+          "et changer d'onglet la referme — elle appartenait à la liste quittée")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+
+    print("\n[71] Grille qui remplit l'écran, vivier qui tient parole, jamais d'impasse")
+    from videosorter.split import grid_for as _grid
+
+    # -- la disposition suit la place -------------------------------------
+    check(_grid(4, "vertical", 1920, 900) == (1, 4),
+          "quatre verticales sur un écran large : une seule ligne")
+    check(_grid(4, "vertical", 900, 900) == (2, 2),
+          "et deux par deux quand l'écran est étroit")
+    check(_grid(4, "horizontal", 1920, 900) == (2, 2),
+          "quatre horizontales : deux par deux, elles sont couchées")
+    check(_grid(9, "horizontal", 1920, 1080) == (3, 3), "neuf font un carré")
+    check(_grid(3, "vertical") == (1, 3),
+          "sans dimensions connues, un partage raisonnable")
+
+    # -- le vivier ne promet que ce qu'il sait ------------------------------
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 60)
+    videos = [v for item in window.all_items for v in item.videos][:4]
+    check(len(videos) >= 3, "quelques vidéos pour l'essai")
+    INDEX.put_probe(videos[0], "", {"duration": 8.0, "width": 720, "height": 1280,
+                                    "codec": "", "ok": True})
+    INDEX.put_probe(videos[1], "", {"duration": 8.0, "width": 1280, "height": 720,
+                                    "codec": "", "ok": True})
+    INDEX.probes.pop(str(videos[2]), None)          # celle-là reste inconnue
+    window.cfg["wall_orientation"] = "vertical"
+    pool, unsure = window.vertical_pool()
+    check(str(videos[0]) in pool, "la verticale connue entre")
+    check(str(videos[1]) not in pool, "l'horizontale connue reste dehors")
+    check(str(videos[2]) not in pool and unsure >= 1,
+          f"et l'inconnue aussi — elle est comptée à part ({unsure})")
+    check(str(videos[2]) in window._wall_unsure, "elle est gardée pour le sondage")
+
+    # -- recliquer ne mène jamais à une impasse ------------------------------
+    window.set_tab(TAB_TAGS)
+    window.set_tag_family("top")
+    wait_for(app, lambda: window._top_tags is not None, 90)
+    pump(app, 0.5)
+    tags = [i for i in window.items if i.is_tag]
+    if tags:
+        window.open_tag(tags[0])
+        pump(app, 0.5)
+        check(not window.at_home(), "on descend dans un mot-clé")
+        window.set_tag_family(window.tag_family)
+        pump(app, 0.6)
+        check(window.at_home(), "recliquer la famille ramène à la liste")
+        check(any(i.is_tag for i in window.items),
+              f"et les mots-clés sont de retour ({len(window.items)})")
+        window.open_tag([i for i in window.items if i.is_tag][0])
+        pump(app, 0.5)
+        window.set_tab(TAB_TAGS)
+        pump(app, 0.6)
+        check(window.at_home() and any(i.is_tag for i in window.items),
+              "recliquer l'onglet ramène aussi")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.4)
+    window.toggle_board(False)
+    pump(app, 0.3)
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.4)
+    check(window.at_home(), "et depuis une fiche, l'onglet remonte aux vignettes")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

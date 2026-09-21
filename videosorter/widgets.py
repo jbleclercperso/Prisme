@@ -112,9 +112,10 @@ QFrame#singleDone { background: #4d8dff; border-radius: 4px; }
 QFrame#playRail { background: rgba(255,255,255,0.22); border: 0;
                   border-radius: 4px; }
 QFrame#playProgress { background: #5c9dff; border: 0; border-radius: 4px; }
-QLabel#remaining { background: rgba(0,0,0,0.82); color: #ffffff;
-                   border-radius: 5px; padding: 3px 9px;
-                   font-size: 14px; font-weight: 700; }
+/* Lisible, jamais criard : le temps restant se pose sur l'image sans la
+   disputer. Il etait en gras quatorze sur pave noir — on ne voyait que lui. */
+QLabel#remaining { background: transparent; color: rgba(255,255,255,0.72);
+                   padding: 2px 6px; font-size: 11px; font-weight: 500; }
 QPushButton { background: #232932; border: 1px solid #323a45; border-radius: 6px;
               padding: 6px 12px; color: #e6e8ea; }
 QPushButton:hover { background: #2c333e; }
@@ -176,7 +177,11 @@ class PreviewTile(QFrame):
         # pixels exiges par la fenetre entiere, qui ne peut alors plus
         # retrecir. Les cases s'etirent de toute facon pour occuper la
         # place disponible.
-        self.setMinimumSize(120, 84)
+        # Deux rangees de cases a quatre-vingt-quatre points imposaient
+        # leur hauteur a la fenetre entiere. Elles gardent leur taille
+        # des qu'il y a la place — c'est la mise en page qui la leur
+        # donne — mais ne l'exigent plus.
+        self.setMinimumSize(58, 40)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.image = QLabel(self)
@@ -1023,7 +1028,8 @@ class SinglePlayer(QWidget):
         # au-delà du cadre produit un zoom, sans passer par une scène graphique.
         self.video_area = QWidget(top)
         self.video_area.setObjectName("videoArea")
-        self.video_area.setMinimumHeight(320)
+        # Assez pour voir, assez peu pour tenir sur un ecran agrandi.
+        self.video_area.setMinimumHeight(180)
         self.decks = [_Deck(self.video_area), _Deck(self.video_area)]
         self._active = 0
         self._muted = False
@@ -1086,7 +1092,12 @@ class SinglePlayer(QWidget):
             tile = PreviewTile(slot, strip)
             tile.strip_mode = True
             tile.duration_chip.hide()
-            tile.setMinimumSize(150, 86)
+            # Cinq cases a quatre-vingt-six points imposaient quatre cent
+            # trente points de hauteur a la fiche entiere : sur un ecran
+            # agrandi, la derniere rangee passait sous le bord. Elles gardent
+            # leur taille des qu'il y a la place, mais cedent quand il n'y en
+            # a pas.
+            tile.setMinimumSize(90, 44)
             tile.setMaximumWidth(190)
             self.strip_layout.addWidget(tile, 1)
             self.tiles.append(tile)

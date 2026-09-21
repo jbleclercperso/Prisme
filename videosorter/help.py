@@ -60,6 +60,7 @@ SHORTCUTS = [
         ("⋯ → Repérer les plans", "les vignettes se posent sur des changements de plan, non sur des fractions"),
         ("⋯ → Empreintes", "sonde ce qui manque ; ensuite les doublons sortent sans toucher au disque"),
         ("⋯ → Où sont les vignettes", "leur dossier, et comment le partager avec un autre PC"),
+        ("⋯ → Ignorer la mise à l'échelle", "sur un écran agrandi, rend à la fenêtre une taille qui tient"),
         ("Mur : ▸  ⚄  ⤢", "la suivante du même dossier ; une autre n'importe où ; ouvrir"),
         ("Mur : clic droit sur un panneau", "ses neuf instants ; cliquer une case y va"),
     ]),

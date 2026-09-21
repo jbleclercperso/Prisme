@@ -88,7 +88,7 @@ class TreePanel(QWidget):
         super().__init__(parent)
         self.setObjectName("treePanel")
         self.setStyleSheet(TREE_STYLE)
-        self.setMinimumWidth(210)
+        self.setMinimumWidth(150)
         self.setMaximumWidth(460)
 
         layout = QVBoxLayout(self)

@@ -37,17 +37,43 @@ ORIENTATIONS = (("vertical", "Verticales"), ("horizontal", "Horizontales"),
                 ("any", "Toutes"))
 
 
-def grid_for(count: int, orientation: str) -> tuple:
-    """(rangees, colonnes) pour `count` panneaux.
+def grid_for(count: int, orientation: str, width: int = 0,
+             height: int = 0) -> tuple:
+    """(rangees, colonnes) qui montrent le plus d'image possible.
 
-    Des videos verticales se rangent sur une ligne tant qu'elles restent
-    lisibles ; des horizontales preferent le carre.
+    Une table figee donnait quatre videos sur deux rangees de deux, meme sur
+    un ecran large ou elles tenaient en ligne — la moitie de la place partait
+    en bandes noires. On essaie donc chaque disposition et l'on garde celle
+    dont les images occupent la plus grande surface, la forme des videos
+    etant connue : debout pour des verticales, couchee sinon.
+
+    Sans dimensions, on retombe sur un partage raisonnable : c'est le cas au
+    tout premier affichage, avant que la fenetre n'ait sa taille.
     """
-    if orientation == "vertical":
-        rows = 1 if count <= 5 else 2
-    else:
-        rows = {2: 1, 3: 1, 4: 2, 6: 2, 8: 2, 9: 3, 10: 2}.get(count, 2)
-    return rows, -(-count // rows)
+    count = max(1, count)
+    if width <= 0 or height <= 0:
+        rows = 1 if (orientation == "vertical" and count <= 5) else \
+            {2: 1, 3: 1, 4: 2, 6: 2, 8: 2, 9: 3, 10: 2}.get(count, 2)
+        return rows, -(-count // rows)
+
+    shape = 9 / 16 if orientation == "vertical" else 16 / 9
+    best = (1, count)
+    seen = -1.0
+    for rows in range(1, count + 1):
+        cols = -(-count // rows)
+        if rows * cols - count >= cols:
+            continue          # une rangee resterait vide
+        cell_w = width / cols
+        cell_h = height / rows
+        # L'image garde sa forme dans sa case : c'est la plus petite des deux
+        # contraintes qui decide.
+        shown_w = min(cell_w, cell_h * shape)
+        shown_h = min(cell_h, cell_w / shape)
+        area = shown_w * shown_h * count
+        if area > seen:
+            seen = area
+            best = (rows, cols)
+    return best
 
 SPLIT_STYLE = """
 QFrame#splitPane { background: #0b0d10; border: 1px solid #242a33;
@@ -56,6 +82,15 @@ QLabel#splitName { color: #b9c2cd; font-size: 12px; }
 QPushButton#splitButton { background: #1a1f27; border: 1px solid #2b323d;
                           border-radius: 5px; padding: 3px 10px;
                           color: #b9c2cd; font-size: 12px; }
+/* Les gestes d'un panneau : le cadre garde sa taille, le signe la remplit.
+   A douze points, on ne distinguait pas la fleche du de. */
+QPushButton#paneGesture { background: #1a1f27; border: 1px solid #2b323d;
+                          border-radius: 5px; padding: 0; margin: 0;
+                          color: #cdd5df; font-size: 19px; line-height: 19px; }
+QPushButton#paneGesture:hover { color: #ffffff; border-color: #5a6474;
+                                background: #242a33; }
+QLabel#paneTime { color: rgba(255,255,255,0.72); font-size: 11px;
+                  font-weight: 500; background: transparent; }
 QPushButton#splitButton:hover { color: #ffffff; border-color: #39414d; }
 QLabel#splitEmpty { color: #6f7885; font-size: 13px; }
 QPushButton#splitButton[chosen="true"] { color: #ffffff; background: #242a33;
@@ -87,8 +122,8 @@ class SplitPane(QFrame):
 
         self.stage = QWidget(self)
         self.stage.setObjectName("videoArea")
-        self.stage.setMinimumHeight(240)
-        self.setMinimumWidth(180)
+        self.stage.setMinimumHeight(140)
+        self.setMinimumWidth(140)
         layout.addWidget(self.stage, 1)
 
         self.video = QVideoWidget(self.stage)
@@ -100,25 +135,12 @@ class SplitPane(QFrame):
         self.peek.chosen.connect(lambda slot: self.peekChosen.emit(self.index, slot))
         self.peeking = False
 
-        # Sous l'image, pas dessus : le lecteur natif passe devant tout ce
-        # qu'on lui superpose, et l'on ne voyait ni le rail ni le temps
-        # restant. Une ligne fine, toujours la, meme en plein ecran.
-        self.under = QWidget(self)
-        under = QHBoxLayout(self.under)
-        under.setContentsMargins(0, 0, 0, 0)
-        under.setSpacing(6)
-        self.rail = QFrame(self.under)
-        self.rail.setObjectName("playRail")
-        self.rail.setFixedHeight(self.RAIL_HEIGHT)
-        self.done = QFrame(self.rail)
-        self.done.setObjectName("playProgress")
-        self.done.setGeometry(0, 0, 0, self.RAIL_HEIGHT)
-        under.addWidget(self.rail, 1)
-        self.remaining = QLabel("", self.under)
-        self.remaining.setObjectName("remaining")
-        under.addWidget(self.remaining, 0)
-        self.under.setFixedHeight(18)
-        layout.addWidget(self.under)
+        # Pas de barre d'avancement ici : sur un mur, on regarde plusieurs
+        # videos a la fois et l'on ne suit la progression d'aucune. Le seul
+        # chiffre qui serve est le temps qu'il reste, et il tient dans la
+        # barre du panneau — une rangee de moins pour autant d'image.
+        self.remaining = QLabel("", self)
+        self.remaining.setObjectName("paneTime")
 
         self.bar = QWidget(self)
         bar = QHBoxLayout(self.bar)
@@ -131,6 +153,7 @@ class SplitPane(QFrame):
         # au mur, donc a la fenetre entiere, qui ne pouvait plus retrecir.
         self.name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         bar.addWidget(self.name, 1)
+        bar.addWidget(self.remaining, 0)
         # Trois gestes : la suivante du meme dossier quand une video plait,
         # une autre au hasard n'importe ou, et ouvrir en grand.
         for text, tip, slot in (
@@ -139,9 +162,10 @@ class SplitPane(QFrame):
             ("⤢", "Ouvrir cette vidéo", self._open),
         ):
             button = QPushButton(text, self)
-            button.setObjectName("splitButton")
+            button.setObjectName("paneGesture")
             button.setToolTip(tip)
             button.setFocusPolicy(Qt.NoFocus)
+            button.setFixedSize(26, 22)
             button.clicked.connect(slot)
             bar.addWidget(button)
         layout.addWidget(self.bar)
@@ -185,7 +209,6 @@ class SplitPane(QFrame):
         self.player.stop()
         self.player.setSource(QUrl())
         self.remaining.setText("")
-        self.done.setGeometry(0, 0, 0, self.RAIL_HEIGHT)
 
     def stop(self) -> None:
         self.player.stop()
@@ -215,11 +238,6 @@ class SplitPane(QFrame):
 
     def _on_position(self, position: int) -> None:
         duration = self.player.duration()
-        fraction = (position / duration) if duration > 0 else 0.0
-        width = self.rail.width()
-        self.done.setGeometry(
-            0, 0, max(0, int(width * max(0.0, min(1.0, fraction)))),
-            self.RAIL_HEIGHT)
         self.remaining.setText(
             f"−{human_duration(max(0, duration - position) / 1000.0)}"
             if duration > 0 else "")
@@ -439,13 +457,24 @@ class SplitWall(QWidget):
             self.panes.append(pane)
         self._lay_out()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # La meilleure disposition depend de la place : elle change avec la
+        # fenetre. On ne refait la grille que si elle change vraiment.
+        rows, cols = grid_for(len(self.panes), self.orientation,
+                              self.row.width(), self.row.height())
+        if (rows, cols) != getattr(self, "_shape", None):
+            self._lay_out()
+
     def _lay_out(self) -> None:
-        rows, cols = grid_for(len(self.panes), self.orientation)
+        rows, cols = grid_for(len(self.panes), self.orientation,
+                              self.row.width(), self.row.height())
+        self._shape = (rows, cols)
         for pane in self.panes:
             self.grid.removeWidget(pane)
         for index, pane in enumerate(self.panes):
             # Plusieurs rangees : chacune doit pouvoir tenir dans l'ecran.
-            pane.stage.setMinimumHeight(240 if rows == 1 else 120)
+            pane.stage.setMinimumHeight(140 if rows == 1 else 90)
             self.grid.addWidget(pane, index // cols, index % cols)
         for row in range(rows):
             self.grid.setRowStretch(row, 1)

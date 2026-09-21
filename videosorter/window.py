@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import actions
-from .backfill import SceneScan, TitleScan, ThumbAudit, ThumbBackfill, VideoCount
+from .backfill import InfoScan, SceneScan, TitleScan, ThumbAudit, ThumbBackfill, VideoCount
 from .dupes import (
     DuplicateScan, ImageDuplicateScan, SignatureScan, group_by_signature,
 )
@@ -57,7 +57,7 @@ from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
-    PeekOverlay, RadialMenu, app_icon, draw_icon,
+    FlowLayout, PeekOverlay, RadialMenu, app_icon, draw_icon,
     STYLESHEET, CommandBar, DestinationsDialog, PreviewGrid, SinglePlayer,
     StarStrip, TagsDialog, TrashDialog,
 )
@@ -119,6 +119,13 @@ class DonePage(QWidget):
         self.title.setObjectName("title")
         self.summary = QLabel("", self)
         self.summary.setObjectName("subtitle")
+        # Le bilan d'une seance s'allonge avec elle. Sur une seule ligne, il
+        # imposait sa largeur a la fenetre entiere — et celle-ci ne pouvait
+        # plus retrecir, alors meme que cette page n'etait pas affichee : une
+        # pile exige la plus large de ses pages.
+        self.summary.setWordWrap(True)
+        self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.rescan = QPushButton("Réanalyser cette racine", self)
         self.rescan.setObjectName("primary")
         self.change = QPushButton("Changer de racine", self)
@@ -139,7 +146,8 @@ class MainWindow(QMainWindow):
         self.cfg = cfg
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
-        self.resize(cfg["window"].get("w", 1400), cfg["window"].get("h", 900))
+        self._fit_to_screen(cfg["window"].get("w", 1400),
+                            cfg["window"].get("h", 900))
         self.setStyleSheet(STYLESHEET + HEADER_STYLE)
 
         self.all_items: list = []      # tout ce que l'analyse a trouve
@@ -390,6 +398,7 @@ class MainWindow(QMainWindow):
             ("Raccourcis et recherche…", self.show_help),
             ("Journal des gels de l'interface", self.open_stall_log),
             ("Où sont les vignettes…", self.show_cache_place),
+            ("Ignorer la mise à l'échelle de Windows", self.toggle_dpi),
             ("Réanalyser tout le disque", self.refresh_root),
             ("Changer de racine…", self.choose_root),
         ])
@@ -403,7 +412,11 @@ class MainWindow(QMainWindow):
         self.more_button.setMenu(self.overflow)
         self._name_backfill_action()
 
-        selectors = QHBoxLayout()
+        # Une disposition qui se replie : une rangee rigide impose sa
+        # largeur a la fenetre entiere, qui ne peut alors plus
+        # retrecir — et sur un ecran agrandi, tout deborde par la
+        # droite. Ici, ce qui ne tient pas passe a la ligne.
+        selectors = FlowLayout(spacing=10)
         selectors.setContentsMargins(0, 0, 0, 0)
         selectors.setSpacing(12)
         self.tabs = Segmented("", [
@@ -433,7 +446,6 @@ class MainWindow(QMainWindow):
         selectors.addWidget(self.tags_button)
 
         selectors.addWidget(self.up_button)
-        selectors.addStretch(1)
         # « Analyser » vit dans le menu ; le hasard local va sous l'image.
         self.scan_button.hide()
         selectors.addWidget(self.state_button)
@@ -487,9 +499,11 @@ class MainWindow(QMainWindow):
 
         header = QFrame(sort_page)
         header.setObjectName("card")
-        header_layout = QHBoxLayout(header)
+        # Repliable comme les rangees du haut : titre, informations et
+        # boutons alignes de force imposaient leur somme a la fenetre,
+        # qui ne pouvait plus retrecir.
+        header_layout = FlowLayout(header, spacing=14)
         header_layout.setContentsMargins(14, 7, 14, 7)
-        header_layout.setSpacing(14)
         self.item_title = QLabel("—", header)
         self.item_title.setObjectName("title")
         self.item_parent = QLabel("", header)
@@ -504,8 +518,8 @@ class MainWindow(QMainWindow):
         # Avec une politique « Ignored » et un facteur nul, le titre recevait
         # zero pixel : il etait bien la, et invisible. Il prend desormais la
         # plus grosse part de la ligne, les chiffres se contentant du reste.
-        header_layout.addWidget(self.item_title, 3)
-        header_layout.addWidget(self.item_subtitle, 2)
+        header_layout.addWidget(self.item_title)
+        header_layout.addWidget(self.item_subtitle)
 
         # « Entrer » se lit au bout de la ligne qui decrit le dossier — poids,
         # nombre de videos, date — la ou l'on vient de decider qu'il fallait y
@@ -547,9 +561,9 @@ class MainWindow(QMainWindow):
         self.enter_button.setToolTip("Trier le contenu de ce dossier   (Ctrl+↓)")
         self.enter_button.setFocusPolicy(Qt.NoFocus)
         self.enter_button.clicked.connect(self.enter_current)
-        header_layout.addWidget(self.contact_button, 0)
-        header_layout.addWidget(self.cinema_button, 0)
-        header_layout.addWidget(self.enter_button, 0)
+        header_layout.addWidget(self.contact_button)
+        header_layout.addWidget(self.cinema_button)
+        header_layout.addWidget(self.enter_button)
         # Dans un dossier : combien d'apercus a la fois. Meme geste que le mur.
         self.grid_chips = QWidget(header)
         grid_row = QHBoxLayout(self.grid_chips)
@@ -565,7 +579,7 @@ class MainWindow(QMainWindow):
             grid_row.addWidget(button)
             self.grid_count_buttons[count] = button
         self.grid_chips.hide()
-        header_layout.addWidget(self.grid_chips, 0)
+        header_layout.addWidget(self.grid_chips)
         self._mark_grid_count()
         # En planche, ce bloc repetait le fil d'Ariane et une phrase d'aide, sur
         # trois lignes, au detriment d'une rangee entiere de vignettes.
@@ -575,13 +589,12 @@ class MainWindow(QMainWindow):
         # Elle n'existe que le temps d'une selection : une barre d'actions
         # permanente occuperait une rangee pour ne rien dire la plupart du temps.
         self.picked_bar = QWidget(sort_page)
-        picked_row = QHBoxLayout(self.picked_bar)
+        picked_row = FlowLayout(self.picked_bar, spacing=8)
         picked_row.setContentsMargins(0, 0, 0, 0)
         picked_row.setSpacing(8)
         self.picked_label = QLabel("", self.picked_bar)
         self.picked_label.setObjectName("pending")
         picked_row.addWidget(self.picked_label)
-        picked_row.addStretch(1)
         for text, tip, slot in (
             ("▶  Lire ensemble", "Les vidéos cochées, toutes à la fois, sur le mur",
              self.wall_picked),
@@ -668,6 +681,8 @@ class MainWindow(QMainWindow):
         self.controls.clearRequested.connect(self.reset_filters)
         self.wall_full = False
         self._wall_pinned: list = []
+        self._wall_unsure: list = []
+        self.wall_prober = None
         self.viewer.addWidget(self.board)
         self.viewer.addWidget(self.wall)
         # L'image, et dessous une seule rangee : fleche, barre d'avancement,
@@ -2058,6 +2073,27 @@ class MainWindow(QMainWindow):
     def peek_hide(self) -> None:
         self.single.peek_end()
 
+    def toggle_dpi(self) -> None:
+        """Suivre l'agrandissement de Windows, ou l'ignorer.
+
+        Sur un ecran lointain regle a 200 %, tout est deux fois plus grand —
+        confortable, mais la fenetre ne tient plus. L'ignorer rend a
+        l'application sa taille en points d'ecran : plus petit, mais entier.
+        Qt fige ce choix a son demarrage : il faut donc relancer.
+        """
+        wanted = not self.cfg["ignore_dpi"]
+        self.cfg["ignore_dpi"] = wanted
+        self.cfg.save()
+        QMessageBox.information(
+            self, "Mise à l'échelle",
+            ("Prisme ignorera l'agrandissement de Windows au prochain "
+             "lancement : tout sera plus petit, mais la fenêtre tiendra "
+             "entière sur l'écran."
+             if wanted else
+             "Prisme suivra de nouveau l'agrandissement de Windows au "
+             "prochain lancement.")
+            + "\n\nCe choix se fige au démarrage : fermez et rouvrez Prisme.")
+
     def show_cache_place(self) -> None:
         """Dit ou vit le cache, et comment le partager avec un autre PC."""
         from .config import INDEX_PATH, SHARED_DIR, THUMB_DIR
@@ -2698,6 +2734,39 @@ class MainWindow(QMainWindow):
         pane.peek_end()
         self._wall_peek = None
 
+    def probe_for_wall(self) -> None:
+        """Sonde en fond ce dont on ignore l'orientation, tant que le mur a faim.
+
+        Le vivier est strict : sans sondage, une collection neuve donnerait
+        un mur vide. On va donc chercher la resolution des videos inconnues,
+        quelques-unes a la fois, et le mur se garnit a mesure.
+        """
+        if self.tab != TAB_SPLIT or self._wall_pinned:
+            return
+        if self.wall_prober is not None or not self._wall_unsure:
+            return
+        if len(self.wall.pool) >= max(12, len(self.wall.panes) * 3):
+            return
+        import random as _random
+        batch = list(self._wall_unsure)
+        _random.shuffle(batch)
+        self.wall_prober = InfoScan(batch[:60], self)
+        self.wall_prober.done.connect(self._wall_probed)
+        self.wall_prober.start()
+
+    def _wall_probed(self, count: int) -> None:
+        self.wall_prober = None
+        if self.tab != TAB_SPLIT or self._wall_pinned:
+            return
+        before = len(self.wall.pool)
+        pool, unsure = self.vertical_pool()
+        if len(pool) > before:
+            self.wall.set_pool(pool)
+            self.wall.set_caption(len(pool), unsure)
+        elif count:
+            # Rien de nouveau, mais il reste a chercher.
+            self.probe_for_wall()
+
     def _wall_unseen(self, on: bool) -> None:
         self.cfg["only_unseen"] = bool(on)
         self.cfg.save_soon()
@@ -2798,13 +2867,14 @@ class MainWindow(QMainWindow):
         self.setFocus()
 
     def vertical_pool(self) -> tuple:
-        """(vivier, nombre d'orientation inconnue) pour le mur.
+        """(vivier, nombre d'orientation encore inconnue) pour le mur.
 
-        Toute la collection, pas seulement ce que l'onglet affiche : le mur
-        ne montrait qu'une video quand on l'ouvrait depuis un petit dossier.
-        On n'ecarte que ce qu'on **sait** etre de l'autre orientation ; ce
-        qui n'a pas encore ete sonde reste dans le vivier, et la legende le
-        dit — un mur vide n'apprend rien.
+        Strict : on ne met dans le vivier que ce dont on **sait** qu'il est
+        de l'orientation demandee. Laisser entrer l'inconnu remplissait le
+        mur d'horizontales quand on avait demande des verticales — et c'est
+        precisement ce qu'on voulait eviter. Ce qui n'a pas encore ete sonde
+        est compte a part, et `probe_for_wall` va le chercher en tache de
+        fond : le mur se remplit alors tout seul, sans jamais mentir.
         """
         from .index import INDEX
         terms = self._terms((self.criteria or {}).get(
@@ -2815,12 +2885,13 @@ class MainWindow(QMainWindow):
         videos = list(self._videos_from_items())
         if top is not None:
             try:
-                for item in cached_items(top, MODE_FOLDERS, self.cfg["expand_parents"]):
+                for item in cached_items(top, MODE_FOLDERS,
+                                         self.cfg["expand_parents"]):
                     videos.extend(item.videos)
             except Exception:
                 pass
         found = []
-        unknown = 0
+        unsure = []
         seen = set()
         for video in videos:
             key = str(video)
@@ -2837,13 +2908,13 @@ class MainWindow(QMainWindow):
             info = INDEX.probe(video) or {}
             width, height = info.get("width") or 0, info.get("height") or 0
             if not (width and height):
-                found.append(key)
-                unknown += 1
+                unsure.append(key)
                 continue
             kind = "vertical" if height > width else "horizontal"
             if kind == wanted:
                 found.append(key)
-        return found, unknown
+        self._wall_unsure = unsure
+        return found, len(unsure)
 
     def wall_sibling(self, index: int, path: str) -> None:
         """La suivante du meme dossier, dans ce panneau. Une lecture du dossier,
@@ -2911,6 +2982,7 @@ class MainWindow(QMainWindow):
         self.item_title.setText(self.wall.caption.text()
                                 or f"{len(self.wall.pool)} vidéo(s) pour le mur")
         self.item_subtitle.setText("")
+        self.probe_for_wall()
 
     def open_video_path(self, path: str) -> None:
         """Ouvre dans la fiche une vidéo désignée par son chemin."""
@@ -2975,8 +3047,10 @@ class MainWindow(QMainWindow):
         # Recliquer l'onglet ou l'on est ramene chez soi : a la racine, sur les
         # vignettes. C'est le geste qu'on fait quand on s'est perdu en
         # descendant, et il ne faisait rien.
-        if (tab == self.tab and self.browsing and not self.levels):
-            return
+        if tab == self.tab:
+            # Recliquer l'onglet ou l'on est ramene chez soi ; s'y trouver
+            # deja ne coute rien.
+            return self.go_home()
         was = self.tab
         self.tab = tab
         self.content = (CONTENT_VIDEOS if tab == TAB_VIDEOS
@@ -2992,6 +3066,10 @@ class MainWindow(QMainWindow):
         # le fil de l'interface jusqu'a 1,2 s a chaque onglet — c'etait la
         # lenteur qu'on sentait sous le doigt.
         self._hush_players()
+        # Une video ouverte a cote appartient a la liste qu'on quitte : la
+        # laisser jouer sur un autre onglet n'avait aucun sens, et son bouton
+        # de fermeture se trouvait hors de l'ecran sur un affichage agrandi.
+        self.close_aside()
         if tab != TAB_SPLIT:
             if self.wall_full:
                 self.toggle_wall_fullscreen(False)
@@ -3199,16 +3277,63 @@ class MainWindow(QMainWindow):
         if self.tab == TAB_TAGS and self.tag_family != "mine":
             self._add_tag_items()
 
+    def at_home(self) -> bool:
+        """Vrai quand on est sur la liste d'un onglet, et non dans un element."""
+        return self.browsing and not self.levels
+
+    def go_home(self) -> None:
+        """Remonte a la liste de l'onglet courant, d'ou qu'on vienne.
+
+        C'est la sortie de secours : recliquer le bouton sur lequel on se
+        trouve deja doit toujours ramener ici. Sans elle, on descendait dans
+        un mot-cle et plus rien ne repondait — il fallait deviner qu'une
+        fleche, ailleurs, faisait remonter.
+        """
+        if self.at_home():
+            return
+        mark("go_home")
+        self.close_aside()
+        self.levels = []
+        if self.root is not None:
+            top = self.top_root()
+            self.crumbs.set_path(top, top)
+            if top != self.root:
+                self.root = top
+        self.browsing = True
+        if self.tab == TAB_TAGS:
+            # Les mots-cles se recalculent depuis la liste des vrais dossiers,
+            # qu'on a gardee de cote en descendant. Il faut d'abord la
+            # reposer : descendre dans un mot a change le mode, et le calcul
+            # des mots-cles ne se fait qu'en mode dossiers.
+            self.mode = MODE_FOLDERS
+            self.restore_folders()
+            self._add_tag_items()
+        elif self.tab == TAB_VIDEOS:
+            self.show_videos_tab()
+        elif not self.restore_folders():
+            self.start_root(self.top_root(), self.mode_for_content(),
+                            reset_levels=True)
+            return
+        self._apply_selectors()
+        self.refresh_board()
+        self._show_counts()
+        self.setFocus()
+
     def set_tag_family(self, family: str) -> None:
         """Mes propres mots-clés, ou ceux que les noms de fichiers répètent."""
         if family == self.tag_family:
-            return
+            # Recliquer la famille ou l'on est : on remonte a sa liste. C'est
+            # le geste qu'on fait quand on s'est perdu dans un mot-cle.
+            return self.go_home()
         self.tag_family = family
         self.cfg["tag_family"] = family
-        self.cfg.save()
+        self.cfg.save_soon()
         self.tag_chips.set_value(family)
+        self.levels = []
+        self.browsing = True
         if not self.scanning:
             self._add_tag_items()
+        self._apply_selectors()
 
     def _first_to_sort(self) -> int:
         """Le premier élément qui n'est pas déjà rangé sous un dossier de tête.
@@ -4449,6 +4574,23 @@ class MainWindow(QMainWindow):
         self._refresh_mute()
         self.show_banner("Son coupé" if muted else "Son activé", "quiet")
 
+    def _fit_to_screen(self, width: int, height: int) -> None:
+        """Ouvre a la taille voulue, mais jamais plus grande que l'ecran.
+
+        A 200 % de mise a l'echelle, un ecran de 1920 sur 1080 n'offre plus
+        que 960 sur 540 points : une fenetre de 1400 sur 900 y depasse par le
+        bas, et la derniere rangee — celle des fleches et de l'avancement —
+        se retrouve sous le bord. On laisse donc l'ecran decider du plafond.
+        """
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            free = screen.availableGeometry()
+            width = min(width, free.width())
+            # Barre de titre et bordures comprises : sans cette marge, le bas
+            # de la fenetre passe encore sous la barre des taches.
+            height = min(height, free.height() - 48)
+        self.resize(max(720, width), max(420, height))
+
     def minimumSizeHint(self):
         """Plafonne ce que la fenetre exige, quoi qu'en disent ses pieces.
 
@@ -4460,7 +4602,15 @@ class MainWindow(QMainWindow):
         qu'elle montre.
         """
         hint = super().minimumSizeHint()
-        return QSize(min(hint.width(), 1100), min(hint.height(), 620))
+        # Le plafond suit l'ecran : sur un affichage agrandi, il n'y a plus
+        # mille cent points de large, et une fenetre qui les exige deborde.
+        top_w, top_h = 1100, 620
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            free = screen.availableGeometry()
+            top_w = min(top_w, max(640, free.width() - 40))
+            top_h = min(top_h, max(400, free.height() - 80))
+        return QSize(min(hint.width(), top_w), min(hint.height(), top_h))
 
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key_Shift and not event.isAutoRepeat():

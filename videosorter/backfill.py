@@ -385,3 +385,43 @@ class SceneScan(QThread):
                     break
         self.progress.emit(seen, total)
         self.done.emit(seen, found)
+
+
+class InfoScan(QThread):
+    """Sonde la resolution d'une poignee de videos, et rien d'autre.
+
+    Le mur en a besoin pour savoir ce qui est debout : sans cela, il ne peut
+    ni promettre des verticales, ni se remplir. Quelques dizaines a la fois,
+    pour ne jamais retenir l'ecran.
+    """
+
+    WORKERS = 6
+    done = Signal(int)               # combien ont ete sondees
+
+    def __init__(self, videos: list, parent=None):
+        super().__init__(parent)
+        self.videos = list(videos)
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def _one(self, video) -> int:
+        from .media import probe
+        if self._stop:
+            return 0
+        try:
+            return 1 if (probe(Path(video)) or {}).get("width") else 0
+        except OSError:
+            return 0
+
+    def run(self) -> None:
+        if not self.videos:
+            return self.done.emit(0)
+        count = 0
+        with ThreadPoolExecutor(max_workers=self.WORKERS) as pool:
+            for outcome in pool.map(self._one, self.videos):
+                count += outcome
+                if self._stop:
+                    break
+        self.done.emit(count)
