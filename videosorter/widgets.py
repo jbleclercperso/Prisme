@@ -10,6 +10,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor, QCursor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
+    QRegion,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -690,6 +691,131 @@ def draw_icon(kind: str, on: bool = True, size: int = 20,
     return QIcon(pixmap)
 
 
+class RadialMenu(QWidget):
+    """Les destinations en rond autour du pointeur, le temps d'un clic.
+
+    Comme dans un jeu : clic droit, les choix apparaissent autour de la
+    souris, on en clique un, ils disparaissent. La lecture continue et
+    l'image reste visible — seules de petites pastilles se posent dessus.
+    C'est une fenetre-outil sans cadre : la seule chose qui passe devant le
+    lecteur natif. Entre les pastilles, elle est percee : les clics et la
+    molette vont a la video.
+    """
+
+    chosen = Signal(int)
+    closed = Signal()
+
+    RADIUS = 98        # distance des pastilles au pointeur
+    PILL_H = 26
+    MAX = 9
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint
+                         | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setMouseTracking(True)
+        self.entries: list = []
+        self.rects: list = []
+        self.hot = -1
+        self.watch = QTimer(self)
+        self.watch.setInterval(50)
+        self.watch.timeout.connect(self._watch)
+        self.hide()
+
+    # -- ouverture ----------------------------------------------------------
+    def open_at(self, center: QPoint, entries: list) -> None:
+        """`entries` : [(touche, libelle)], neuf au plus, dans l'ordre."""
+        self.entries = list(entries)[:self.MAX]
+        if not self.entries:
+            return
+        side = 2 * (self.RADIUS + 90)
+        self.setGeometry(center.x() - side // 2, center.y() - side // 2, side, side)
+        self._layout()
+        self.hot = -1
+        self.show()
+        self.raise_()
+        self.watch.start()
+
+    def close_menu(self) -> None:
+        if self.isHidden():
+            return
+        self.watch.stop()
+        self.hide()
+        self.closed.emit()
+
+    def _layout(self) -> None:
+        import math
+        metrics = self.fontMetrics()
+        count = len(self.entries)
+        middle = QPointF(self.width() / 2, self.height() / 2)
+        self.rects = []
+        region = QRegion()
+        for index, (key, label) in enumerate(self.entries):
+            angle = -math.pi / 2 + index * 2 * math.pi / count
+            cx = middle.x() + self.RADIUS * math.cos(angle)
+            cy = middle.y() + self.RADIUS * math.sin(angle)
+            text = self._text(key, label)
+            width = metrics.horizontalAdvance(text) + 24
+            rect = QRect(int(cx - width / 2), int(cy - self.PILL_H / 2), width, self.PILL_H)
+            self.rects.append(rect)
+            region = region.united(QRegion(rect.adjusted(-2, -2, 2, 2)))
+        self.setMask(region)
+
+    @staticmethod
+    def _text(key: str, label: str) -> str:
+        return f"{key.upper()}  {elide(label, 16)}"
+
+    # -- dessin --------------------------------------------------------------
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        for index, rect in enumerate(self.rects):
+            hot = index == self.hot
+            painter.setPen(QPen(QColor("#5a6474" if hot else "#39414d"), 1))
+            painter.setBrush(QColor(43, 50, 61, 245) if hot else QColor(22, 26, 32, 235))
+            painter.drawRoundedRect(rect, 13, 13)
+            key, label = self.entries[index]
+            painter.setPen(QColor("#ffffff" if hot else "#e9eef4"))
+            painter.drawText(rect, Qt.AlignCenter, self._text(key, label))
+        painter.end()
+
+    # -- souris ------------------------------------------------------------------
+    def _hit(self, local: QPoint) -> int:
+        for index, rect in enumerate(self.rects):
+            if rect.contains(local):
+                return index
+        return -1
+
+    def _watch(self) -> None:
+        """Suit le pointeur : surbrillance, et fermeture s'il s'eloigne."""
+        local = self.mapFromGlobal(QCursor.pos())
+        middle = QPoint(self.width() // 2, self.height() // 2)
+        away = (local - middle).manhattanLength()
+        if away > self.RADIUS + 120:
+            self.close_menu()
+            return
+        hot = self._hit(local)
+        if hot != self.hot:
+            self.hot = hot
+            self.update()
+
+    def mouseMoveEvent(self, event):
+        hot = self._hit(event.position().toPoint())
+        if hot != self.hot:
+            self.hot = hot
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            hit = self._hit(event.position().toPoint())
+            if hit >= 0:
+                self.chosen.emit(hit)
+            self.close_menu()
+        elif event.button() == Qt.RightButton:
+            self.close_menu()
+
+
 class PeekCell(QFrame):
     """Une case du peek : un instant de la video, et la destination qui va avec."""
 
@@ -783,6 +909,10 @@ class PeekOverlay(QWidget):
         if 0 <= slot < len(self.cells):
             self.cells[slot].set_thumb(path)
 
+    def set_caption(self, slot: int, text: str) -> None:
+        if 0 <= slot < len(self.cells):
+            self.cells[slot].caption.setText(text)
+
 
 class _Deck:
     """Un lecteur complet : la surface, le moteur, le son.
@@ -819,7 +949,7 @@ class SinglePlayer(QWidget):
     # le lecteur servait a examiner un fichier ; quand il sert a trier, revoir
     # indefiniment ce qu'on vient de voir est exactement ce qu'on ne veut pas.
     finished = Signal()
-    peekRequested = Signal()     # clic droit sur l'image : les neuf instants
+    radialRequested = Signal()   # clic droit sur l'image : les destinations en rond
 
     # Cinq reperes suffisent a se reperer dans une video : un cinquieme, deux
     # cinquiemes, et ainsi de suite. Dix prenaient deux fois plus de place pour
@@ -1285,9 +1415,9 @@ class SinglePlayer(QWidget):
             return self._scrub_press(event)
         # Le clic droit remet l'image à sa taille : geste unique, sans menu.
         if event.button() == Qt.RightButton and self.zoom <= 1.0:
-            # Le clic droit ouvre les neuf instants ; s'il y a un zoom, il le
-            # defait d'abord — un geste, un effet.
-            self.peekRequested.emit()
+            # Le clic droit ouvre les destinations autour du pointeur ; s'il y
+            # a un zoom, il le defait d'abord — un geste, un effet.
+            self.radialRequested.emit()
             return
         if event.button() == Qt.RightButton and self.zoom > 1.0:
             self.reset_zoom()

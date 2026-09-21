@@ -1945,11 +1945,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Shift, Qt.ShiftModifier))
     pump(app, 0.1)
     check(sp.peeking and not sp.peek.isHidden(), "Maj enfoncée : la mosaïque est là")
-    check(sp.peek.cells[0].caption.text().startswith("6"),
-          f"les cases portent les destinations ({sp.peek.cells[0].caption.text()!r})")
     peek_key = f"peek@{window.current.item_id}"
     check(wait_for(app, lambda: len(window.peek_thumbs.get(peek_key, {})) == 9, 60),
           "neuf images arrivent")
+    check(":" in sp.peek.cells[4].caption.text(),
+          f"chaque case dit son instant ({sp.peek.cells[4].caption.text()!r})")
     window.keyReleaseEvent(QKeyEvent(QEvent.KeyRelease, Qt.Key_Shift, Qt.NoModifier))
     pump(app, 0.1)
     check(not sp.peeking and sp.peek.isHidden(), "Maj relâchée : elle disparaît")
@@ -2107,6 +2107,37 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     b.stop()
     b.hovered = -1
     b.hover_timer.start()
+
+    print("\n[64] Clic droit : les destinations en rond")
+    from PySide6.QtCore import QPoint as _QPoint
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(audite / "lot", MODE_FLAT)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 1, 60)
+    window.toggle_board(False)
+    pump(app, 0.3)
+    window.show_item(0)
+    pump(app, 0.2)
+    radial = window.radial
+    window.single.radialRequested.emit()
+    pump(app, 0.2)
+    check(not radial.isHidden() and len(radial.rects) == len(window.cfg.destinations[:9]),
+          f"clic droit : une pastille par destination ({len(radial.rects)})")
+    check(window.single.player.playbackState() == window.single.player.PlaybackState.PlayingState,
+          "et la lecture continue")
+    check(not window.single.video.isHidden(), "l'image reste visible")
+    sent = []
+    kept_move = window.act_move
+    window.act_move = lambda dest: sent.append(dest["label"])
+    pick = min(1, len(window.cfg.destinations) - 1)
+    radial.chosen.emit(pick)
+    radial.close_menu()
+    check(sent == [window.cfg.destinations[pick]["label"]],
+          f"cliquer une pastille envoie vers elle ({sent})")
+    window.act_move = kept_move
+    window.single.radialRequested.emit()
+    pump(app, 0.1)
+    window.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+    check(radial.isHidden(), "Échap le referme")
 
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]

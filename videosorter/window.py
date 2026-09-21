@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from PySide6.QtGui import QCursor
 from PySide6.QtCore import QSize, QTimer, QUrl, Qt
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QListWidget,
@@ -53,7 +54,7 @@ from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
-    PeekOverlay, draw_icon,
+    PeekOverlay, RadialMenu, draw_icon,
     STYLESHEET, CommandBar, DestinationsDialog, PreviewGrid, SinglePlayer,
     StarStrip, TagsDialog, TrashDialog,
 )
@@ -585,8 +586,10 @@ class MainWindow(QMainWindow):
             self.cfg["thumb_count"], self.cfg["scroll_seconds"], self.viewer
         )
         self.single.finished.connect(self.on_video_finished)
-        self.single.peekRequested.connect(self.peek_toggle)
+        self.single.radialRequested.connect(self.open_radial)
         self.single.peek.chosen.connect(self.peek_seek)
+        self.radial = RadialMenu(self)
+        self.radial.chosen.connect(self._radial_chosen)
         self.board = BoardView(
             self.cfg["preview_seconds"], self.cfg["board_columns"], self.viewer
         )
@@ -1943,16 +1946,10 @@ class MainWindow(QMainWindow):
         if (self.browsing or item is None or item.kind == MODE_FOLDERS
                 or item.locked or self.single.peeking):
             return
-        captions = []
-        destinations = list(self.cfg.destinations)[:PeekOverlay.COUNT]
-        for slot in range(PeekOverlay.COUNT):
-            if slot < len(destinations):
-                dest = destinations[slot]
-                captions.append(f"{dest['key'].upper()}  ·  {dest['label']}")
-            else:
-                captions.append("")
-        self.single.peek_begin(captions)
         key = f"peek@{item.item_id}"
+        plan = self.plans.get(key) or []
+        captions = [human_duration(entry[1]) for entry in plan]
+        self.single.peek_begin(captions)
         ready = self.peek_thumbs.get(key)
         if ready:
             for slot, path in ready.items():
@@ -1965,12 +1962,24 @@ class MainWindow(QMainWindow):
     def peek_hide(self) -> None:
         self.single.peek_end()
 
-    def peek_toggle(self) -> None:
-        """Clic droit : les neuf instants s'ouvrent, un second clic les referme."""
-        if self.single.peeking:
-            self.peek_hide()
-        else:
-            self.peek_show()
+    def open_radial(self) -> None:
+        """Clic droit : les destinations en rond autour de la souris."""
+        item = self.current
+        if self.browsing or item is None or item.locked:
+            return
+        if not self.radial.isHidden():
+            return self.radial.close_menu()
+        entries = [(d.get("key", "?"), d.get("label") or Path(d["path"]).name)
+                   for d in list(self.cfg.destinations)[:RadialMenu.MAX]]
+        if not entries:
+            self.show_banner("Aucune destination : ⋯ → Destinations…", "quiet")
+            return
+        self.radial.open_at(QCursor.pos(), entries)
+
+    def _radial_chosen(self, index: int) -> None:
+        destinations = list(self.cfg.destinations)
+        if 0 <= index < len(destinations):
+            self.act_move(destinations[index])
 
     def peek_seek(self, slot: int) -> None:
         """Une case cliquee : la lecture saute a cet instant, la mosaique se ferme."""
@@ -2112,6 +2121,7 @@ class MainWindow(QMainWindow):
         else:
             self.single.set_item(str(item.path), "…")
         self.single.peek_end()
+        self.radial.close_menu()
         self.seen_timer.start()
         if self.cfg["burst"] and item.kind != MODE_FOLDERS:
             self.burst_timer.start()
@@ -2198,6 +2208,7 @@ class MainWindow(QMainWindow):
         self.plans[key] = plan
         if key.startswith("peek@"):
             for slot, entry in enumerate(plan):
+                self.single.peek.set_caption(slot, human_duration(entry[1]))
                 self.preview.request_thumb(key, slot, entry[0], entry[1], True)
             return
         if key.startswith("board@"):
@@ -3908,6 +3919,8 @@ class MainWindow(QMainWindow):
         if key == Qt.Key_Escape:
             if self.wall_full:
                 return self.toggle_wall_fullscreen(False)
+            if not self.radial.isHidden():
+                return self.radial.close_menu()
             if self.single.peeking:
                 return self.peek_hide()
             if self.cinema:
