@@ -3684,32 +3684,42 @@ class MainWindow(QMainWindow):
         self.board.pick_all(None)
         self.setFocus()
 
-    def reveal_current(self) -> None:
-        """Ouvre l'explorateur sur l'element courant, deja selectionne.
+    def reveal_target(self):
+        """Le fichier que l'on veut retrouver dans l'explorateur, ou None.
 
         Sur le mur, c'est la video du panneau seul — ou du premier qui joue —
-        qu'on veut retrouver, et non l'element de la liste qu'on a quittee.
+        et non l'element de la liste qu'on a quittee. Une fonction a part :
+        elle se verifie sans rien lancer.
         """
-        target = None
         if self.tab == TAB_SPLIT:
             panes = self.wall.panes
             at = self.wall.solo if self.wall.solo != -1 else 0
-            for pane in ([panes[at]] if at < len(panes) else []) + panes:
+            ordered = ([panes[at]] if at < len(panes) else []) + panes
+            for pane in ordered:
                 if pane.video_path:
-                    target = Path(pane.video_path)
-                    break
+                    return Path(pane.video_path)
+        item = self.current
+        return None if item is None else Path(item.path)
+
+    @staticmethod
+    def reveal_command(target) -> str:
+        """La commande qui ouvre l'explorateur **sur** le fichier.
+
+        La virgule colle au chemin, et le tout ne fait qu'un seul argument :
+        separes, l'explorateur ouvre le dossier parent et ne selectionne
+        rien — ce que Ctrl+E faisait depuis toujours.
+        """
+        return f'explorer /select,"{target}"'
+
+    def reveal_current(self) -> None:
+        """Ouvre l'explorateur sur l'element courant, deja selectionne."""
+        target = self.reveal_target()
         if target is None:
-            item = self.current
-            if item is None:
-                return
-            target = Path(item.path)
+            return
         if not target.exists():
             return self.show_banner(f"Introuvable : {target.name}", "error")
         try:
-            # La virgule colle a l'option : « /select, » suivi du chemin en un
-            # seul argument. Separes, l'explorateur ouvre le dossier parent et
-            # ne selectionne rien.
-            subprocess.Popen(f'explorer /select,"{target}"')
+            subprocess.Popen(self.reveal_command(target))
         except OSError as exc:
             self.show_banner(f"Explorateur indisponible : {exc}", "error")
 

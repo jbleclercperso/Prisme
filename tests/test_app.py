@@ -2592,29 +2592,26 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.set_wall_count(3)
 
     # -- l'explorateur, sur le fichier -------------------------------------
-    called = []
-    kept_popen = _sp3.Popen
-    _sp3.Popen = lambda cmd, *a, **k: called.append(cmd)
-    try:
-        window.reveal_current()
-        check(len(called) == 1 and "/select," in called[0],
-              f"le mur révèle la vidéo qu'il montre ({called[:1]})")
-        check(called[0].count('"') == 2 and called[0].endswith('"'),
-              "le chemin est cité, collé à l'option — sinon rien n'est sélectionné")
-        window.set_tab(TAB_FOLDERS)
-        pump(app, 0.3)
-        window.toggle_board(False)
-        pump(app, 0.3)
-        called.clear()
-        window.reveal_current()
-        check(len(called) == 1 and str(window.current.path) in called[0],
-              "et depuis une fiche, c'est son fichier")
-        check(not window.reveal_button.isHidden(), "le bouton est là, près du titre")
-        window.toggle_board(True)
-        pump(app, 0.2)
-        check(window.reveal_button.isHidden(), "et disparaît en vue planche")
-    finally:
-        _sp3.Popen = kept_popen
+    # On interroge ce qui decide, sans rien lancer : remplacer subprocess
+    # cassait les extracteurs de vignettes qui tournent en fond.
+    shown = window.reveal_target()
+    check(shown is not None and str(shown) in window._wall_pinned,
+          f"le mur révèle la vidéo qu'il montre ({shown})")
+    order = window.reveal_command(shown)
+    check(order.startswith('explorer /select,"') and order.endswith('"'),
+          f"le chemin est cité, collé à l'option ({order[:30]}…)")
+    check(order.count('"') == 2,
+          "en un seul argument — séparés, rien n'est sélectionné")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.3)
+    window.toggle_board(False)
+    pump(app, 0.3)
+    check(window.reveal_target() == Path(window.current.path),
+          "et depuis une fiche, c'est son fichier")
+    check(not window.reveal_button.isHidden(), "le bouton est là, près du titre")
+    window.toggle_board(True)
+    pump(app, 0.2)
+    check(window.reveal_button.isHidden(), "et disparaît en vue planche")
     window._wall_pinned = []
 
     probe_dialog = DestinationsDialog([])
