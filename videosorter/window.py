@@ -561,6 +561,18 @@ class MainWindow(QMainWindow):
         self.enter_button.setToolTip("Trier le contenu de ce dossier   (Ctrl+↓)")
         self.enter_button.setFocusPolicy(Qt.NoFocus)
         self.enter_button.clicked.connect(self.enter_current)
+        # Ouvrir l'explorateur **sur** le fichier, pas seulement sur son
+        # dossier : on le retrouve deja selectionne, prêt a etre glisse,
+        # renomme ou copie. Le raccourci existait (Ctrl+E), mais rien ne le
+        # disait a l'ecran.
+        self.reveal_button = QPushButton("⌸", header)
+        self.reveal_button.setObjectName("paneGesture")
+        self.reveal_button.setFixedSize(30, 24)
+        self.reveal_button.setToolTip(
+            "Ouvrir le dossier, le fichier déjà sélectionné   (Ctrl+E)")
+        self.reveal_button.setFocusPolicy(Qt.NoFocus)
+        self.reveal_button.clicked.connect(self.reveal_current)
+        header_layout.addWidget(self.reveal_button)
         header_layout.addWidget(self.contact_button)
         header_layout.addWidget(self.cinema_button)
         header_layout.addWidget(self.enter_button)
@@ -3396,6 +3408,8 @@ class MainWindow(QMainWindow):
             and item.kind == MODE_FOLDERS and not item.locked
         )
         self.stars.setVisible(not self.browsing)
+        self.reveal_button.setVisible(not self.browsing and item is not None
+                                      and not item.is_tag and not item.locked)
         root = self.root
         self.up_button.setEnabled(
             bool(self.levels) or (root is not None
@@ -3671,12 +3685,31 @@ class MainWindow(QMainWindow):
         self.setFocus()
 
     def reveal_current(self) -> None:
-        """Ouvre l'explorateur sur l'element courant, selectionne."""
-        item = self.current
-        if item is None:
-            return
+        """Ouvre l'explorateur sur l'element courant, deja selectionne.
+
+        Sur le mur, c'est la video du panneau seul — ou du premier qui joue —
+        qu'on veut retrouver, et non l'element de la liste qu'on a quittee.
+        """
+        target = None
+        if self.tab == TAB_SPLIT:
+            panes = self.wall.panes
+            at = self.wall.solo if self.wall.solo != -1 else 0
+            for pane in ([panes[at]] if at < len(panes) else []) + panes:
+                if pane.video_path:
+                    target = Path(pane.video_path)
+                    break
+        if target is None:
+            item = self.current
+            if item is None:
+                return
+            target = Path(item.path)
+        if not target.exists():
+            return self.show_banner(f"Introuvable : {target.name}", "error")
         try:
-            subprocess.Popen(["explorer", "/select,", str(Path(item.path))])
+            # La virgule colle a l'option : « /select, » suivi du chemin en un
+            # seul argument. Separes, l'explorateur ouvre le dossier parent et
+            # ne selectionne rien.
+            subprocess.Popen(f'explorer /select,"{target}"')
         except OSError as exc:
             self.show_banner(f"Explorateur indisponible : {exc}", "error")
 
@@ -4521,6 +4554,8 @@ class MainWindow(QMainWindow):
                 self.wall.end_peeks()
                 self._wall_peek = None
                 return
+            if self.tab == TAB_SPLIT and self.wall.solo != -1:
+                return self.wall.unsolo()
             if self.cinema:
                 # Echap sort d'abord du cinema : c'est le geste qu'on fait.
                 return self.toggle_cinema(False)

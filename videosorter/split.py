@@ -108,6 +108,7 @@ class SplitPane(QFrame):
     opened = Signal(str)
     peekRequested = Signal(int, str)  # clic droit : les neuf instants
     peekChosen = Signal(int, int)     # une case cliquee : (panneau, case)
+    soloRequested = Signal(int)       # cette video seule, sur tout le mur
 
     def __init__(self, index: int, scroll_seconds: int = 5, parent=None):
         super().__init__(parent)
@@ -159,7 +160,9 @@ class SplitPane(QFrame):
         for text, tip, slot in (
             ("▸", "La suivante, dans le même dossier", self._sibling),
             ("⚄", "Une autre, au hasard, n'importe où", self._next),
-            ("⤢", "Ouvrir cette vidéo", self._open),
+            ("⤢", "Ouvrir cette vidéo dans sa fiche", self._open),
+            ("⛶", "Cette vidéo seule, en grand — Échap pour revenir",
+             self._solo),
         ):
             button = QPushButton(text, self)
             button.setObjectName("paneGesture")
@@ -223,6 +226,9 @@ class SplitPane(QFrame):
     def _open(self) -> None:
         if self.video_path:
             self.opened.emit(self.video_path)
+
+    def _solo(self) -> None:
+        self.soloRequested.emit(self.index)
 
     # -- avancement ------------------------------------------------------
     def _place(self) -> None:
@@ -321,6 +327,7 @@ class SplitWall(QWidget):
         self.shown: list = []
         self.scroll_seconds = scroll_seconds
         self.orientation = orientation
+        self.solo = -1                 # rang du panneau seul en grand, ou -1
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -441,6 +448,7 @@ class SplitWall(QWidget):
     def set_pane_count(self, count: int) -> None:
         """Autant de panneaux que demande, en gardant ceux qui existent."""
         count = max(1, count)
+        self.solo = -1
         while len(self.panes) > count:
             pane = self.panes.pop()
             pane.clear()
@@ -451,6 +459,7 @@ class SplitWall(QWidget):
             pane.wants_next.connect(self.refill_one)
             pane.wants_sibling.connect(self.siblingRequested)
             pane.peekRequested.connect(self.peekRequested)
+            pane.soloRequested.connect(self.toggle_solo)
             pane.peekChosen.connect(self.peekChosen)
             pane.opened.connect(self.opened)
             pane.set_bare(self.panes[0].bare if self.panes else False)
@@ -467,9 +476,23 @@ class SplitWall(QWidget):
             self._lay_out()
 
     def _lay_out(self) -> None:
+        if self.solo != -1 and self.solo < len(self.panes):
+            # Un seul panneau occupe tout : les autres se retirent de la
+            # grille, ils reviendront tels quels.
+            for at, pane in enumerate(self.panes):
+                self.grid.removeWidget(pane)
+                pane.setVisible(at == self.solo)
+            self.grid.addWidget(self.panes[self.solo], 0, 0)
+            self.grid.setRowStretch(0, 1)
+            self.grid.setColumnStretch(0, 1)
+            self._shape = (1, 1)
+            self._mark_choices()
+            return
         rows, cols = grid_for(len(self.panes), self.orientation,
                               self.row.width(), self.row.height())
         self._shape = (rows, cols)
+        for pane in self.panes:
+            pane.setVisible(True)
         for pane in self.panes:
             self.grid.removeWidget(pane)
         for index, pane in enumerate(self.panes):
@@ -481,6 +504,33 @@ class SplitWall(QWidget):
         for col in range(cols):
             self.grid.setColumnStretch(col, 1)
         self._mark_choices()
+
+    def toggle_solo(self, index: int) -> None:
+        """Ne garder que ce panneau, ou rendre les autres.
+
+        Les autres se mettent en pause plutot que de continuer derriere : on
+        ne les regarde plus, et six decodages pour une seule image visible
+        n'apportent rien qu'un processeur occupe.
+        """
+        if self.solo == index:
+            return self.unsolo()
+        if not (0 <= index < len(self.panes)):
+            return
+        self.solo = index
+        for at, pane in enumerate(self.panes):
+            if at == index:
+                continue
+            pane.player.pause()
+        self._lay_out()
+
+    def unsolo(self) -> None:
+        if self.solo == -1:
+            return
+        self.solo = -1
+        for pane in self.panes:
+            if pane.video_path:
+                pane.player.play()
+        self._lay_out()
 
     def set_bare(self, bare: bool) -> None:
         """Rien que les videos : ni reglages, ni barres de panneau."""
@@ -552,6 +602,7 @@ class SplitWall(QWidget):
 
     def stop(self) -> None:
         self._queue = []
+        self.solo = -1
         for pane in self.panes:
             pane.peek_end()
             pane.stop()

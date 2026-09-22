@@ -2554,6 +2554,69 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.4)
     check(window.at_home(), "et depuis une fiche, l'onglet remonte aux vignettes")
 
+    print("\n[72] Un panneau seul en grand, et l'explorateur sur le fichier")
+    import subprocess as _sp3
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(audite / "lot", MODE_FLAT)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
+    window._wall_pinned = [str(i.path) for i in window.items[:3]]
+    window.set_wall_count(3)
+    window.set_tab(TAB_SPLIT)
+    check(wait_for(app, lambda: sum(1 for p in window.wall.panes if p.video_path) >= 2, 20),
+          "le mur joue plusieurs vidéos")
+    from PySide6.QtWidgets import QPushButton as _QPB
+    gestes = window.wall.panes[1].bar.findChildren(_QPB)
+    check(len(gestes) == 4,
+          f"chaque panneau porte quatre gestes : ▸ ⚄ ⤢ ⛶ ({len(gestes)})")
+
+    window.wall.toggle_solo(1)
+    pump(app, 0.4)
+    check(window.wall.solo == 1, "un panneau passe seul en grand")
+    check(window.wall.panes[1].isVisible() and not window.wall.panes[0].isVisible(),
+          "les autres se retirent")
+    check(window.wall.panes[0].player.playbackState()
+          != window.wall.panes[0].player.PlaybackState.PlayingState,
+          "et se mettent en pause plutôt que de jouer sans être vues")
+    window.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+    pump(app, 0.4)
+    check(window.wall.solo == -1 and window.wall.panes[0].isVisible(),
+          "Échap rend le mur")
+    window.wall.toggle_solo(1)
+    pump(app, 0.2)
+    window.wall.toggle_solo(1)
+    pump(app, 0.2)
+    check(window.wall.solo == -1, "et le même bouton referme")
+    window.wall.toggle_solo(2)
+    window.set_wall_count(4)
+    check(window.wall.solo == -1, "changer le nombre de panneaux annule le solo")
+    window.set_wall_count(3)
+
+    # -- l'explorateur, sur le fichier -------------------------------------
+    called = []
+    kept_popen = _sp3.Popen
+    _sp3.Popen = lambda cmd, *a, **k: called.append(cmd)
+    try:
+        window.reveal_current()
+        check(len(called) == 1 and "/select," in called[0],
+              f"le mur révèle la vidéo qu'il montre ({called[:1]})")
+        check(called[0].count('"') == 2 and called[0].endswith('"'),
+              "le chemin est cité, collé à l'option — sinon rien n'est sélectionné")
+        window.set_tab(TAB_FOLDERS)
+        pump(app, 0.3)
+        window.toggle_board(False)
+        pump(app, 0.3)
+        called.clear()
+        window.reveal_current()
+        check(len(called) == 1 and str(window.current.path) in called[0],
+              "et depuis une fiche, c'est son fichier")
+        check(not window.reveal_button.isHidden(), "le bouton est là, près du titre")
+        window.toggle_board(True)
+        pump(app, 0.2)
+        check(window.reveal_button.isHidden(), "et disparaît en vue planche")
+    finally:
+        _sp3.Popen = kept_popen
+    window._wall_pinned = []
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

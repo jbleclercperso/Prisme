@@ -47,7 +47,7 @@ SHORTCUTS = [
         ("Ctrl+A", "cocher tout"),
         ("Ctrl+N", "tout décocher"),
         ("Ctrl+I", "inverser la sélection"),
-        ("Ctrl+E", "révéler l'élément dans l'explorateur"),
+        ("Ctrl+E", "ouvrir le dossier, le fichier déjà sélectionné"),
         ("Ctrl+O", "l'ouvrir dans le lecteur du système"),
         ("Ctrl+D", "modifier les destinations"),
         ("Ctrl+T", "afficher ou masquer l'arborescence"),
@@ -61,7 +61,8 @@ SHORTCUTS = [
         ("⋯ → Empreintes", "sonde ce qui manque ; ensuite les doublons sortent sans toucher au disque"),
         ("⋯ → Où sont les vignettes", "leur dossier, et comment le partager avec un autre PC"),
         ("⋯ → Ignorer la mise à l'échelle", "sur un écran agrandi, rend à la fenêtre une taille qui tient"),
-        ("Mur : ▸  ⚄  ⤢", "la suivante du même dossier ; une autre n'importe où ; ouvrir"),
+        ("Mur : ▸ ⚄ ⤢ ⛶", "la suivante du même dossier ; une autre n'importe où ; "
+                            "ouvrir sa fiche ; cette vidéo seule en grand"),
         ("Mur : clic droit sur un panneau", "ses neuf instants ; cliquer une case y va"),
     ]),
 ]
