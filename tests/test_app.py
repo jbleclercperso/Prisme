@@ -2808,6 +2808,30 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(_tun.PACKAGE == "Cloudflare.cloudflared",
           "et l'installation sait quoi demander à winget")
 
+    # -- l'adresse fixe : Tailscale ----------------------------------------
+    check(_tun.TAILSCALE_PACKAGE == "tailscale.tailscale",
+          "l'adresse fixe sait aussi quoi demander à winget")
+    check(_tun.CONSENT.search(
+        "visit https://login.tailscale.com/f/funnel?node=abc to enable"
+    ).group(0).startswith("https://login.tailscale.com/"),
+        "et le lien d'autorisation se lit dans ce que Tailscale répond")
+
+    kept_fixed = _tun.find_fixed
+    _tun.find_fixed = lambda: ""
+    try:
+        window.set_tunnel_kind("tailscale")
+        check(window.cfg["tunnel_kind"] == "tailscale", "on peut choisir l'adresse fixe")
+        check(window.start_tunnel() is False,
+              "sans Tailscale, elle ne s'ouvre pas")
+        check("pas installé" in window.tunnel_state(),
+              f"et l'état le dit ({window.tunnel_state()!r})")
+        ready, why = _tun.fixed_state()
+        check(ready is False and why, "l'état de la mise en route se lit d'un coup")
+    finally:
+        _tun.find_fixed = kept_fixed
+        window.set_tunnel_kind("cloudflare")
+    check(window.cfg["tunnel_kind"] == "cloudflare", "et l'on revient en arrière")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

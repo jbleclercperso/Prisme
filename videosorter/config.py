@@ -207,6 +207,10 @@ DEFAULTS = {
     "share_port": 8713,
     "share_host": "127.0.0.1",   # le tunnel fait le reste ; aucun port ouvert
     "tunnel_auto": True,         # ouvrir l'adresse publique des le lancement
+    # « cloudflare » : prete en dix secondes, mais elle change a chaque fois.
+    # « tailscale » : la meme tous les jours, gratuite, sans nom de domaine —
+    # au prix d'une mise en route.
+    "tunnel_kind": "cloudflare",
     "share_salt": "",
     "share_digest": "",
     "skip_hidden": True,

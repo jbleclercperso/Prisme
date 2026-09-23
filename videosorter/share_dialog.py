@@ -9,23 +9,33 @@ from __future__ import annotations
 
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QTabWidget, QTreeWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QTabWidget, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .access import JOURNAL, spell, when
-from .tunnel import find as find_tunnel, install as install_tunnel, qr_png
+from .tunnel import (
+    connect_fixed, find as find_tunnel, find_fixed, install as install_tunnel,
+    install_fixed, qr_png,
+)
 
 
 class Installer(QThread):
-    """Installe cloudflared sans figer la fenêtre : winget prend son temps."""
+    """Installe le programme du tunnel sans figer la fenêtre : winget prend son temps."""
 
     done = Signal(str, str)          # chemin trouve, ce qu'il faut en dire
 
+    def __init__(self, kind: str, parent=None):
+        super().__init__(parent)
+        self.kind = kind
+
     def run(self) -> None:
-        where, said = install_tunnel()
+        where, said = (install_fixed() if self.kind == "tailscale"
+                       else install_tunnel())
         self.done.emit(where, said)
 
 SHARE_STYLE = """
@@ -119,6 +129,28 @@ class ShareDialog(QDialog):
         head.setObjectName("shareHead")
         box.addWidget(head)
 
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Adresse", page))
+        self.kind = QComboBox(page)
+        self.kind.addItem("D'un soir — prête tout de suite (Cloudflare)",
+                          "cloudflare")
+        self.kind.addItem("De toujours — la même chaque jour (Tailscale)",
+                          "tailscale")
+        at = self.kind.findData(self.window.cfg["tunnel_kind"])
+        self.kind.setCurrentIndex(max(0, at))
+        self.kind.currentIndexChanged.connect(self._kind_changed)
+        row.addWidget(self.kind, 1)
+        box.addLayout(row)
+
+        self.kind_hint = QLabel("", page)
+        self.kind_hint.setWordWrap(True)
+        box.addWidget(self.kind_hint)
+
+        self.setup = QPushButton("Connecter un compte Tailscale", page)
+        self.setup.clicked.connect(self._connect_fixed)
+        self.setup.hide()
+        box.addWidget(self.setup, 0, Qt.AlignLeft)
+
         self.tunnel_auto = QCheckBox(
             "Ouvrir l'adresse publique au lancement", page)
         self.tunnel_auto.setChecked(bool(self.window.cfg["tunnel_auto"]))
@@ -164,33 +196,73 @@ class ShareDialog(QDialog):
         return page
 
     # -- le tunnel -----------------------------------------------------------
+    HINTS = {
+        "cloudflare": ("Rien à configurer : un clic et l'adresse existe. Mais "
+                       "elle change à chaque ouverture — il faut la renvoyer "
+                       "à chaque fois."),
+        "tailscale": ("La même adresse tous les jours, gratuite, sans nom de "
+                      "domaine. Il faut connecter un compte une fois, et "
+                      "autoriser le partage public — Prisme vous y mène."),
+    }
+
+    def _kind_changed(self) -> None:
+        self.window.set_tunnel_kind(self.kind.currentData())
+        self.refresh()
+
+    def _connect_fixed(self) -> None:
+        """Ouvre la page qui connecte le compte, ou celle qui autorise le partage."""
+        if not find_fixed():
+            return self._open_tunnel()
+        link, said = connect_fixed()
+        if link:
+            QDesktopServices.openUrl(QUrl(link))
+            QMessageBox.information(
+                self, "Connecter Tailscale",
+                "Votre navigateur s'ouvre sur la page de connexion. Une fois "
+                "le compte connecté, revenez ici et cliquez « Ouvrir "
+                "l'adresse publique ».")
+        else:
+            QMessageBox.information(self, "Tailscale", said)
+        self.refresh()
+
     def _auto(self, on: bool) -> None:
         self.window.cfg["tunnel_auto"] = bool(on)
         self.window.cfg.save()
 
     def _open_tunnel(self) -> None:
-        if not find_tunnel():
+        kind = self.kind.currentData()
+        present = find_fixed() if kind == "tailscale" else find_tunnel()
+        name = "Tailscale" if kind == "tailscale" else "cloudflared"
+        if not present:
             if QMessageBox.question(
-                    self, "Installer cloudflared",
-                    "Pour une adresse publique, Prisme a besoin de "
-                    "cloudflared — le programme de Cloudflare qui tient le "
-                    "tunnel.\n\nL'installer maintenant ? Cela passe par "
-                    "winget et prend une minute.") != QMessageBox.Yes:
+                    self, f"Installer {name}",
+                    f"Pour une adresse publique, Prisme a besoin de {name} — "
+                    "le programme qui tient le tunnel.\n\nL'installer "
+                    "maintenant ? Cela passe par winget et prend une "
+                    "minute.") != QMessageBox.Yes:
                 return
             self.open_tunnel.setEnabled(False)
-            self.tunnel_state.setText("Installation de cloudflared…")
-            self.installer = Installer(self)
+            self.tunnel_state.setText(f"Installation de {name}…")
+            self.installer = Installer(kind, self)
             self.installer.done.connect(self._installed)
             self.installer.start()
             return
         if not self.window.start_tunnel():
             self.refresh()
+            # Tailscale dit souvent ce qui manque, et donne le lien qui le
+            # regle : mieux vaut le montrer que de laisser l'etat muet.
+            trouble = self.window.tunnel_trouble
+            if trouble and "http" in trouble:
+                QMessageBox.information(self, "Une étape à faire", trouble)
 
     def _installed(self, where: str, said: str) -> None:
         self.installer = None
         self.open_tunnel.setEnabled(True)
         self.tunnel_state.setText(said)
-        if where:
+        if where and self.kind.currentData() == "tailscale":
+            # Installe ne veut pas dire connecte : Tailscale demande un compte.
+            self._connect_fixed()
+        elif where:
             self.window.start_tunnel()
         else:
             QMessageBox.warning(self, "cloudflared", said)
@@ -289,6 +361,9 @@ class ShareDialog(QDialog):
         self.open_tunnel.setEnabled(not public and self.installer is None)
         self.shut_tunnel.setEnabled(bool(public))
         self.copy.setEnabled(bool(address))
+        kind = self.kind.currentData()
+        self.kind_hint.setText(self.HINTS.get(kind, ""))
+        self.setup.setVisible(kind == "tailscale" and not public)
         self._paint_code(public + "/" if public else "")
 
         self.visits.clear()

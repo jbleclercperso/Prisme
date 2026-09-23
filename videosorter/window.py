@@ -2204,12 +2204,21 @@ class MainWindow(QMainWindow):
 
     # -- le tunnel : une adresse publique, sans ouvrir de port -------------
     def start_tunnel(self) -> bool:
-        """Ouvre l'adresse publique. Sans bruit si de quoi la faire manque."""
-        from .tunnel import Tunnel, find
+        """Ouvre l'adresse publique, par le chemin choisi."""
+        from .tunnel import Tunnel, find, open_fixed
 
+        if self.share_server is None:
+            return False
+        if self.cfg["tunnel_kind"] == "tailscale":
+            address, said = open_fixed(self.share_server.port)
+            self.tunnel_trouble = "" if address else said
+            self.tunnel_address = address
+            if address:
+                self.show_banner(f"Adresse fixe ouverte : {address}", "done")
+            return bool(address)
         if self.tunnel is not None and self.tunnel.running:
             return True
-        if self.share_server is None or not find():
+        if not find():
             return False
         self.tunnel_trouble = ""
         self.tunnel = Tunnel(self.share_server.port, self)
@@ -2230,6 +2239,9 @@ class MainWindow(QMainWindow):
         self.tunnel_address = ""
 
     def stop_tunnel(self) -> None:
+        if self.cfg["tunnel_kind"] == "tailscale" and self.tunnel_address:
+            from .tunnel import close_fixed
+            close_fixed()
         if self.tunnel is not None:
             self.tunnel.stop()
             self.tunnel = None
@@ -2280,9 +2292,22 @@ class MainWindow(QMainWindow):
             return ""
         return f"http://127.0.0.1:{self.share_server.port}/"
 
-    def tunnel_state(self) -> str:
-        from .tunnel import find
+    def set_tunnel_kind(self, kind: str) -> None:
+        """Change de chemin : l'adresse d'avant se ferme avec l'ancien."""
+        if kind == self.cfg["tunnel_kind"]:
+            return
+        self.stop_tunnel()
+        self.cfg["tunnel_kind"] = kind
+        self.cfg.save()
 
+    def tunnel_state(self) -> str:
+        from .tunnel import find, fixed_state
+
+        if self.cfg["tunnel_kind"] == "tailscale":
+            if self.tunnel_address:
+                return f"Adresse fixe ouverte : {self.tunnel_address}"
+            ready, why = fixed_state()
+            return why if not ready else f"Prêt — {why}"
         if not find():
             return "cloudflared n'est pas installé."
         if self.tunnel_address:

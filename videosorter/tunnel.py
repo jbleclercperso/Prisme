@@ -12,6 +12,7 @@ s'il manque, l'ouvrir, lire l'adresse qu'il annonce, et le refermer.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -181,3 +182,147 @@ def qr_png(text: str, scale: int = 5) -> bytes:
         return buffer.getvalue()
     except Exception:                                  # noqa: BLE001
         return b""
+
+
+# ---------------------------------------------------------------------------
+# L'adresse fixe : Tailscale
+# ---------------------------------------------------------------------------
+#
+# Cloudflare donne une adresse en quelques secondes, mais elle change a chaque
+# ouverture : ses tunnels gratuits sont ephemeres, et une adresse permanente y
+# demande un nom de domaine.
+#
+# Tailscale, lui, attache l'adresse a la machine : `nom.tailnet.ts.net`, en
+# https, avec un vrai certificat, gratuitement et sans rien acheter. Elle est
+# la meme demain. Le prix a payer est une mise en route : creer un compte, et
+# autoriser le partage une premiere fois.
+
+TAILSCALE_PACKAGE = "tailscale.tailscale"
+TAILSCALE_LIKELY = (
+    Path(os.environ.get("ProgramFiles", "")) / "Tailscale",
+    Path(os.environ.get("ProgramW6432", "")) / "Tailscale",
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links",
+)
+# Ce que Tailscale imprime quand le partage n'est pas encore autorise dans le
+# compte : une adresse a ouvrir dans le navigateur, et tout est dit.
+CONSENT = re.compile(r"https://login\.tailscale\.com/\S+")
+
+
+def find_fixed() -> str:
+    """Le chemin de tailscale, ou une chaîne vide."""
+    found = shutil.which("tailscale")
+    if found:
+        return found
+    for folder in TAILSCALE_LIKELY:
+        try:
+            candidate = folder / "tailscale.exe"
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return ""
+
+
+def _ask(args: list, timeout: int = 60) -> tuple:
+    """Lance tailscale et rend (code, ce qu'il a dit)."""
+    where = find_fixed()
+    if not where:
+        return 1, ""
+    try:
+        done = subprocess.run(
+            [where] + args, capture_output=True, text=True, timeout=timeout,
+            creationflags=NO_WINDOW, encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as trouble:
+        return 1, str(trouble)
+    return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+
+def install_fixed(timeout: int = 900) -> tuple:
+    """Installe Tailscale par winget. Rend (chemin, ce qu'il faut en dire)."""
+    if find_fixed():
+        return find_fixed(), "Tailscale était déjà là."
+    if not shutil.which("winget"):
+        return "", ("winget est introuvable. Installez Tailscale à la main, "
+                    "puis revenez ici.")
+    try:
+        subprocess.run(
+            ["winget", "install", "--id", TAILSCALE_PACKAGE, "--silent",
+             "--accept-source-agreements", "--accept-package-agreements"],
+            capture_output=True, text=True, timeout=timeout,
+            creationflags=NO_WINDOW, encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as trouble:
+        return "", f"L'installation a échoué : {trouble}"
+    where = find_fixed()
+    return ((where, "Tailscale est installé.") if where else
+            ("", "L'installation s'est terminée, mais Tailscale reste "
+                 "introuvable. Un redémarrage peut être nécessaire."))
+
+
+def fixed_name() -> str:
+    """Le nom de cette machine dans le réseau Tailscale, ou rien.
+
+    C'est lui qui donne l'adresse : `nom.tailnet.ts.net`. Il ne change pas.
+    """
+    code, said = _ask(["status", "--json"], timeout=20)
+    if code != 0 or not said.strip():
+        return ""
+    try:
+        told = json.loads(said)
+    except ValueError:
+        return ""
+    name = ((told.get("Self") or {}).get("DNSName") or "").strip(".")
+    return name
+
+
+def fixed_state() -> tuple:
+    """(prêt, ce qu'il faut en dire) — l'état de la mise en route."""
+    if not find_fixed():
+        return False, "Tailscale n'est pas installé."
+    code, said = _ask(["status"], timeout=20)
+    if "Logged out" in said or "logged out" in said:
+        return False, "Tailscale est installé, mais aucun compte n'est connecté."
+    if code != 0 and not fixed_name():
+        return False, "Tailscale ne répond pas. " + said.strip()[:160]
+    name = fixed_name()
+    if not name:
+        return False, "Tailscale est connecté, mais cette machine n'a pas de nom."
+    return True, name
+
+
+def connect_fixed() -> tuple:
+    """Ouvre la page de connexion à un compte Tailscale, dans le navigateur."""
+    code, said = _ask(["up"], timeout=15)
+    found = CONSENT.search(said)
+    if found:
+        return found.group(0), "Ouvrez cette adresse pour connecter le compte."
+    if code == 0:
+        return "", "Le compte est connecté."
+    return "", said.strip()[:200] or "Tailscale n'a pas répondu."
+
+
+def open_fixed(port: int) -> tuple:
+    """Publie le port sur l'adresse fixe. Rend (adresse, ce qu'il faut en dire).
+
+    Une adresse peut manquer pour deux raisons : le compte n'est pas
+    connecte, ou le partage public n'est pas encore autorise. Dans le second
+    cas Tailscale imprime le lien qui l'autorise — on le rend tel quel.
+    """
+    ready, why = fixed_state()
+    if not ready:
+        return "", why
+    code, said = _ask(["funnel", "--bg", str(port)], timeout=60)
+    consent = CONSENT.search(said)
+    if consent:
+        return "", ("Le partage public doit être autorisé une fois : "
+                    + consent.group(0))
+    if code != 0:
+        return "", said.strip()[:200] or "Tailscale a refusé d'ouvrir l'adresse."
+    return f"https://{why}", "Adresse fixe ouverte."
+
+
+def close_fixed() -> str:
+    """Retire le partage public. Rend ce qu'il faut en dire."""
+    code, said = _ask(["funnel", "--https=443", "off"], timeout=30)
+    if code != 0:
+        code, said = _ask(["funnel", "reset"], timeout=30)
+    return "Adresse fixe fermée." if code == 0 else said.strip()[:160]
