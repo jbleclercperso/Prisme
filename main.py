@@ -45,7 +45,32 @@ def _report(problem: BaseException) -> None:
         print(line, file=sys.stderr)
 
 
+def _read_setting(name: str) -> bool:
+    """Lit un reglage avant que Qt ne demarre.
+
+    La mise a l'echelle se decide a la toute premiere ligne, bien avant que
+    la configuration ne soit chargee comme il faut : on va donc la lire a la
+    main, et l'on se passe d'elle si quoi que ce soit resiste.
+    """
+    import json
+    try:
+        from videosorter.config import CONFIG_PATH
+        return bool(json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get(name))
+    except Exception:                                  # noqa: BLE001
+        return False
+
+
 def run() -> int:
+    import os
+
+    # Avant toute chose : Qt fige sa politique d'echelle des sa creation.
+    # A 200 %, l'application suit Windows et devient deux fois plus grande —
+    # ce qui est juste sur un ecran lointain, mais fait deborder la fenetre
+    # d'un petit ecran. Ce reglage lui fait ignorer l'agrandissement.
+    if _read_setting("ignore_dpi"):
+        os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
+        os.environ["QT_SCALE_FACTOR"] = "1"
+
     from PySide6.QtWidgets import QApplication
 
     from videosorter.config import ADOPTED, APP_NAME, Config
