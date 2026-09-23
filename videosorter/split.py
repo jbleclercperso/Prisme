@@ -106,7 +106,8 @@ class SplitPane(QFrame):
     wants_next = Signal(int)          # une autre, au hasard, n'importe ou
     wants_sibling = Signal(int, str)  # la suivante du meme dossier
     opened = Signal(str)
-    peekRequested = Signal(int, str)  # clic droit : les neuf instants
+    peekRequested = Signal(int, str)  # Maj + clic droit : les neuf instants
+    sortRequested = Signal(int, str)  # clic droit : les destinations, pour ranger
     peekChosen = Signal(int, int)     # une case cliquee : (panneau, case)
     soloRequested = Signal(int)       # cette video seule, sur tout le mur
 
@@ -289,7 +290,14 @@ class SplitPane(QFrame):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.RightButton and self.video_path:
-            self.peekRequested.emit(self.index, self.video_path)
+            # Le clic droit sert a ranger : ce sont les destinations qui
+            # apparaissent, comme sur la fiche. Les neuf instants restent
+            # accessibles, mais avec Maj — on les consulte, on ne les
+            # utilise pas pour decider.
+            if event.modifiers() & Qt.ShiftModifier:
+                self.peekRequested.emit(self.index, self.video_path)
+            else:
+                self.sortRequested.emit(self.index, self.video_path)
             event.accept()
             return
         if event.button() == Qt.LeftButton and self.video_path:
@@ -318,6 +326,7 @@ class SplitWall(QWidget):
     unseenToggled = Signal(bool)
     peekRequested = Signal(int, str)
     peekChosen = Signal(int, int)
+    sortRequested = Signal(int, str)
 
     def __init__(self, panes: int = DEFAULT_PANES, scroll_seconds: int = 5,
                  parent=None, orientation: str = "vertical"):
@@ -459,6 +468,7 @@ class SplitWall(QWidget):
             pane.wants_next.connect(self.refill_one)
             pane.wants_sibling.connect(self.siblingRequested)
             pane.peekRequested.connect(self.peekRequested)
+            pane.sortRequested.connect(self.sortRequested)
             pane.soloRequested.connect(self.toggle_solo)
             pane.peekChosen.connect(self.peekChosen)
             pane.opened.connect(self.opened)

@@ -62,6 +62,11 @@ QPushButton#enter { background: #1d4a2e; border: 1px solid #2f7a4a;
                     border-radius: 6px; padding: 5px 12px; color: #cdf0da;
                     font-weight: 600; }
 QPushButton#enter:hover { background: #2a6a41; color: #ffffff; }
+/* Le repli : un rond presque eteint. Il ne doit rien annoncer a qui
+   regarde par-dessus l'epaule, et se trouver sans reflechir. */
+QPushButton#quietSwitch { background: transparent; border: 0; color: #2c333d;
+                          font-size: 15px; padding: 0; }
+QPushButton#quietSwitch:hover { color: #8b94a1; }
 QPushButton#up { background: transparent; border: 1px solid #39414d;
                  border-radius: 6px; padding: 5px 0; color: #9aa4b2;
                  font-size: 15px; }

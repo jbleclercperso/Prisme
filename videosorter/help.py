@@ -53,6 +53,7 @@ SHORTCUTS = [
         ("Ctrl+T", "afficher ou masquer l'arborescence"),
         ("Ctrl+F", "aller au champ de recherche"),
         ("Ctrl+R", "tout réanalyser"),
+        ("Ctrl+K", "passer à autre chose, et revenir du même geste"),
         ("Chip « Non vus »", "ne garder que ce qui n'a été ni décidé ni regardé"),
         ("⋯ → Rafale", "la suivante arrive toute seule après 8 s sans décision"),
         ("⋯ → Journal des gels", "quand l'interface s'est figée, combien de temps, après quoi"),
@@ -66,7 +67,8 @@ SHORTCUTS = [
         ("⋯ → Ignorer la mise à l'échelle", "sur un écran agrandi, rend à la fenêtre une taille qui tient"),
         ("Mur : ▸ ⚄ ⤢ ⛶", "la suivante du même dossier ; une autre n'importe où ; "
                             "ouvrir sa fiche ; cette vidéo seule en grand"),
-        ("Mur : clic droit sur un panneau", "ses neuf instants ; cliquer une case y va"),
+        ("Mur : clic droit sur un panneau", "les destinations, pour le ranger sans quitter le mur"),
+        ("Mur : Maj + clic droit", "ses neuf instants ; cliquer une case y va"),
     ]),
 ]
 

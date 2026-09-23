@@ -37,6 +37,7 @@ from .tagging import MIN_BUCKET, TagsThread, build_tag_items, top_words
 from .split import DEFAULT_PANES, SplitWall
 from .access import JOURNAL
 from .perf import LOG as STALL_LOG, WATCH, mark
+from .quiet import QUIET_TITLE, QuietPage
 from .share_dialog import ShareDialog
 from .query import available as fuzzy_available, matches_text
 
@@ -65,7 +66,7 @@ from .widgets import (
     StarStrip, TagsDialog, TrashDialog,
 )
 
-PAGE_WELCOME, PAGE_SORT, PAGE_DONE = 0, 1, 2
+PAGE_WELCOME, PAGE_SORT, PAGE_DONE, PAGE_QUIET = 0, 1, 2, 3
 
 DELETE_LABELS = {
     "recycle": "Corbeille",
@@ -373,6 +374,16 @@ class MainWindow(QMainWindow):
         self.mute_button.clicked.connect(self.toggle_mute)
         header_row.addWidget(self.mute_button)
 
+        # Le repli. Un rond gris, sans legende : il ne doit rien annoncer a
+        # qui regarde par-dessus l'epaule, et se trouver sans reflechir.
+        self.quiet_button = QPushButton("●", sort_page)
+        self.quiet_button.setObjectName("quietSwitch")
+        self.quiet_button.setFixedWidth(30)
+        self.quiet_button.setToolTip("Passer à autre chose   (Ctrl+K)")
+        self.quiet_button.setFocusPolicy(Qt.NoFocus)
+        self.quiet_button.clicked.connect(self.enter_quiet)
+        header_row.addWidget(self.quiet_button)
+
         self.more_button = QPushButton("⋯", sort_page)
         self.more_button.setFixedWidth(42)
         self.more_button.setToolTip("Destinations, corbeille, arborescence…")
@@ -666,6 +677,8 @@ class MainWindow(QMainWindow):
         self.single.peek.chosen.connect(self.peek_seek)
         self.radial = RadialMenu(self)
         self.radial.chosen.connect(self._radial_chosen)
+        self.radial.closed.connect(self._radial_closed)
+        self._sorting_pane = None
         self.board = BoardView(
             self.cfg["preview_seconds"], self.cfg["board_columns"], self.viewer
         )
@@ -696,6 +709,7 @@ class MainWindow(QMainWindow):
         self.wall.controls.hide()
         self.wall.peekRequested.connect(self.wall_peek)
         self.wall.peekChosen.connect(self.wall_peek_chosen)
+        self.wall.sortRequested.connect(self.wall_sort)
         self._wall_peek = None
         self.controls.clearRequested.connect(self.reset_filters)
         self.wall_full = False
@@ -808,6 +822,11 @@ class MainWindow(QMainWindow):
         self.done_page.rescan.clicked.connect(self.refresh_root)
         self.done_page.change.clicked.connect(self.choose_root)
         self.stack.addWidget(self.done_page)
+        # La page de repli, prete des le depart : la chercher au moment ou
+        # l'on en a besoin serait trop tard.
+        self.quiet_page = QuietPage(self)
+        self.quiet_page.back.clicked.connect(self.leave_quiet)
+        self.stack.addWidget(self.quiet_page)
 
         # Rien ne disait que des apercus etaient en fabrication : devant une
         # planche qui ne se remplit pas, on ne sait pas s'il faut attendre ou
@@ -2095,6 +2114,10 @@ class MainWindow(QMainWindow):
             self.preview.request_plan(key, [str(item.path)], PeekOverlay.COUNT,
                                       page=0, one_per_video=False, urgent=True)
 
+    def _radial_closed(self) -> None:
+        """Referme sans choisir : le panneau ne doit pas rester en attente."""
+        self._sorting_pane = None
+
     def peek_hide(self) -> None:
         self.single.peek_end()
 
@@ -2118,6 +2141,45 @@ class MainWindow(QMainWindow):
              "Prisme suivra de nouveau l'agrandissement de Windows au "
              "prochain lancement.")
             + "\n\nCe choix se fige au démarrage : fermez et rouvrez Prisme.")
+
+    # ------------------------------------------------------------------
+    # Le repli
+    # ------------------------------------------------------------------
+    def enter_quiet(self) -> None:
+        """Tout s'efface, et l'on voit autre chose. Sans rien perdre.
+
+        Les lecteurs se taisent d'abord : une image figee ou un son qui
+        continue trahirait la page en un instant.
+        """
+        if self.stack.currentIndex() == PAGE_QUIET:
+            return
+        self._quiet_from = self.stack.currentIndex()
+        self._hush_players()
+        self.wall.stop()
+        self.close_aside()
+        self.single.peek_end()
+        self.radial.close_menu()
+        self.quiet_page.start()
+        self.stack.setCurrentIndex(PAGE_QUIET)
+        self.setWindowTitle(QUIET_TITLE)
+        self.quiet_page.setFocus()
+
+    def leave_quiet(self) -> None:
+        """On revient là où l'on était."""
+        if self.stack.currentIndex() != PAGE_QUIET:
+            return
+        self.quiet_page.stop()
+        self.stack.setCurrentIndex(getattr(self, "_quiet_from", PAGE_SORT))
+        self.setWindowTitle(APP_NAME)
+        self.setFocus()
+        if self.tab == TAB_SPLIT:
+            self.show_wall()
+
+    def toggle_quiet(self) -> None:
+        if self.stack.currentIndex() == PAGE_QUIET:
+            self.leave_quiet()
+        else:
+            self.enter_quiet()
 
     def toggle_veiled(self) -> None:
         """Montre, ou remasque, les dossiers mis de côté.
@@ -2382,8 +2444,18 @@ class MainWindow(QMainWindow):
 
     def _radial_chosen(self, index: int) -> None:
         destinations = list(self.cfg.destinations)
-        if 0 <= index < len(destinations):
-            self.act_move(destinations[index])
+        if not (0 <= index < len(destinations)):
+            return
+        sorting = getattr(self, "_sorting_pane", None)
+        if sorting is not None:
+            # Venu du mur : on range cette video-la, puis le panneau se
+            # remplit d'une autre.
+            self._sorting_pane = None
+            pane_at, path = sorting
+            if self.move_one(path, destinations[index]):
+                self.wall.refill_one(pane_at)
+            return
+        self.act_move(destinations[index])
 
     def peek_seek(self, slot: int) -> None:
         """Une case cliquee : la lecture saute a cet instant, la mosaique se ferme."""
@@ -2929,6 +3001,38 @@ class MainWindow(QMainWindow):
         self.apply_sort()
         self.index = 0
         self._show_counts()
+        return True
+
+    def wall_sort(self, index: int, path: str) -> None:
+        """Clic droit sur un panneau : les destinations, pour ranger la vidéo."""
+        entries = [(d.get("key", "?"), d.get("label") or Path(d["path"]).name)
+                   for d in list(self.cfg.destinations)[:RadialMenu.MAX]]
+        if not entries:
+            self.show_banner("Aucune destination : ⋯ → Destinations…", "quiet")
+            return
+        self._sorting_pane = (index, path)
+        self.radial.open_at(QCursor.pos(), entries)
+
+    def move_one(self, path, dest: dict) -> bool:
+        """Range **ce fichier**, sans passer par la liste.
+
+        `act_move` travaille sur l'element courant ; depuis le mur, la vidéo
+        qu'on range n'est pas celle-là.
+        """
+        source = Path(path)
+        dest_dir = Path(dest["path"])
+        label = dest.get("label") or dest_dir.name
+        if not source.exists():
+            self.show_banner(f"Introuvable : {source.name}", "error")
+            return False
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.show_banner(f"Destination inaccessible : {exc}", "error")
+            return False
+        self.transfers.submit(Transfer(
+            kind="move", src=source, dest=dest_dir, label=label, item_id=""))
+        self.show_banner(f"« {source.name} » → {label}", "done")
         return True
 
     def wall_peek(self, index: int, path: str) -> None:
@@ -4709,6 +4813,12 @@ class MainWindow(QMainWindow):
             if key == Qt.Key_Escape or (ctrl and key == Qt.Key_Up):
                 if self.go_up():
                     return
+            return super().keyPressEvent(event)
+        # Avant tout : le repli doit repondre d'ou que l'on vienne, et en
+        # sortir de meme.
+        if ctrl and key == Qt.Key_K:
+            return self.toggle_quiet()
+        if self.stack.currentIndex() == PAGE_QUIET:
             return super().keyPressEvent(event)
         if self.stack.currentIndex() != PAGE_SORT:
             return super().keyPressEvent(event)

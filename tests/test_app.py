@@ -2900,6 +2900,59 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.start_root(root, MODE_FOLDERS, force=True)
     wait_for(app, lambda: not window.scanning, 60)
 
+    print("\n[76] Le repli, et le clic droit qui range")
+    from videosorter.quiet import QUIET_TITLE
+    from videosorter.window import PAGE_QUIET
+
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 60)
+    before = window.stack.currentIndex()
+    window.enter_quiet()
+    pump(app, 0.3)
+    check(window.stack.currentIndex() == PAGE_QUIET, "le repli prend toute la fenêtre")
+    check(window.windowTitle() == QUIET_TITLE,
+          f"et le titre ne dit plus rien de Prisme ({window.windowTitle()!r})")
+    check(window.quiet_page.table.topLevelItemCount() >= 3,
+          "la page montre autre chose, et c'est plausible")
+    check(all(p.player.playbackState() != p.player.PlaybackState.PlayingState
+              for p in window.wall.panes),
+          "rien ne joue plus — ni image figée, ni son qui continue")
+    window.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_K, Qt.ControlModifier))
+    pump(app, 0.3)
+    check(window.stack.currentIndex() == before and window.windowTitle() == "Prisme",
+          "Ctrl+K ramène là où l'on était")
+    window.enter_quiet()
+    pump(app, 0.2)
+    window.quiet_page.back.click()
+    pump(app, 0.3)
+    check(window.stack.currentIndex() == before, "et le bouton discret aussi")
+
+    # -- le clic droit du mur range, au lieu de montrer l'heure -------------
+    window._wall_pinned = [str(i.path) for i in window.items[:2] if i.videos] or None
+    if window._wall_pinned:
+        window.set_tab(TAB_SPLIT)
+        pump(app, 0.4)
+        kept = list(window.cfg.destinations)
+        window.cfg.set_destinations([
+            {"key": "6", "label": "Essai", "path": str(tri / "2019")}])
+        try:
+            window.wall_sort(0, str(Path(window._wall_pinned[0])))
+            pump(app, 0.2)
+            check(not window.radial.isHidden(),
+                  "clic droit sur un panneau : les destinations apparaissent")
+            check(window._sorting_pane is not None,
+                  "et l'on sait quel panneau attend")
+            window.radial.close_menu()
+            pump(app, 0.2)
+            check(window._sorting_pane is None,
+                  "refermer sans choisir ne laisse pas le panneau en attente")
+        finally:
+            window.cfg.set_destinations(kept)
+        window.set_tab(TAB_FOLDERS)
+        pump(app, 0.2)
+    window._wall_pinned = []
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,
