@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import faulthandler
 import os
+import json as _json_web
 import shutil
 import sys
 import time
@@ -2613,6 +2614,159 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.2)
     check(window.reveal_button.isHidden(), "et disparaît en vue planche")
     window._wall_pinned = []
+
+    print("\n[73] Prisme à distance : mot de passe, portée, et lecture par morceaux")
+    import urllib.error as _uerr
+    import urllib.request as _ureq
+    from videosorter import web as _web
+
+    # -- le mot de passe n'est jamais gardé en clair -------------------------
+    salt, digest = _web.hash_password("un mot de passe convenable")
+    check(len(salt) == 32 and len(digest) == 64, "sel et empreinte sont écrits")
+    check("un mot de passe" not in salt + digest,
+          "et le mot de passe ne s'y lit pas")
+    check(_web.password_ok("un mot de passe convenable", salt, digest),
+          "le bon mot de passe est reconnu")
+    check(not _web.password_ok("un mot de passe Convenable", salt, digest),
+          "une seule lettre de travers suffit à le refuser")
+    check(not _web.password_ok("x", "", ""),
+          "et sans mot de passe enregistré, rien ne passe")
+    other, _d = _web.hash_password("un mot de passe convenable")
+    check(other != salt, "deux enregistrements tirent deux sels différents")
+
+    # -- le catalogue ne connaît que ce que l'index connaît -------------------
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 60)
+    shelf = _web.Library(root, window.cfg["expand_parents"], window.cfg["thumb_width"])
+    check(bool(shelf.folders), f"des dossiers sont catalogués ({len(shelf.folders)})")
+    check(bool(shelf.videos), f"et des vidéos ({len(shelf.videos)})")
+    one = next(iter(shelf.videos))
+    check(len(one) == 16 and str(shelf.videos[one]) not in one,
+          "chaque vidéo est désignée par une empreinte, jamais par son chemin")
+    check(shelf.video_entry("0" * 16) is None,
+          "une empreinte inventée ne mène à rien")
+
+    served = _web.Server(root, salt, digest, port=0,
+                         expand=window.cfg["expand_parents"],
+                         width=window.cfg["thumb_width"])
+    port = served.start()
+    site = f"http://127.0.0.1:{port}"
+    try:
+        check(port > 0 and served.running, f"le serveur écoute ({port})")
+
+        class _NoJump(_ureq.HTTPRedirectHandler):
+            """Sans cela, urllib suit la redirection et le temoin de session,
+            pose sur la reponse intermediaire, se perd en chemin."""
+
+            def redirect_request(self, *_a, **_k):
+                return None
+
+        plain = _ureq.build_opener(_NoJump)
+
+        def ask(route, token="", method="GET", data=None, headers=None):
+            request = _ureq.Request(site + route, data=data, method=method)
+            if token:
+                request.add_header("Cookie", f"prisme={token}")
+            for name, value in (headers or {}).items():
+                request.add_header(name, value)
+            try:
+                with plain.open(request, timeout=10) as answer:
+                    return answer.status, answer.read(), dict(answer.headers)
+            except _uerr.HTTPError as refused:
+                return refused.code, refused.read(), dict(refused.headers)
+
+        # -- sans mot de passe, rien --------------------------------------
+        code, _body, head = ask("/")
+        check(code in (200, 303) and "/login" in str(head.get("Location", "/login")),
+              "la racine renvoie vers la demande de mot de passe")
+        code, _body, _h = ask("/api/folders")
+        check(code == 401, f"et l'inventaire est refusé ({code})")
+        code, _body, _h = ask("/video/" + one)
+        check(code == 401, "la vidéo aussi — c'est le point le plus important")
+
+        # -- un mauvais mot de passe ne passe pas ---------------------------
+        code, _body, _h = ask("/login", method="POST",
+                              data=b"password=ce+n+est+pas+lui")
+        check(code == 401, f"un mauvais mot de passe est refusé ({code})")
+
+        # -- le bon ouvre une session ---------------------------------------
+        from urllib.parse import quote_plus as _q
+        code, _body, head = ask(
+            "/login", method="POST",
+            data=f"password={_q('un mot de passe convenable')}".encode())
+        biscuit = str(head.get("Set-Cookie", ""))
+        token = biscuit.split("prisme=", 1)[-1].split(";", 1)[0] if "prisme=" in biscuit else ""
+        check(code in (200, 303) and token, "le bon mot de passe ouvre une session")
+        check("HttpOnly" in biscuit and "SameSite" in biscuit,
+              "dont le témoin est hors de portée des scripts")
+
+        code, body, _h = ask("/api/folders", token)
+        listed = _json_web.loads(body.decode("utf-8"))
+        check(code == 200 and listed.get("folders"),
+              "l'inventaire s'ouvre une fois connecté")
+        first = listed["folders"][0]
+        code, body, _h = ask("/api/folder?id=" + first["id"], token)
+        inside = _json_web.loads(body.decode("utf-8"))
+        check(code == 200 and inside.get("videos"), "un dossier rend ses vidéos")
+
+        # -- la lecture par morceaux : c'est elle qui permet de sauter --------
+        code, body, head = ask("/video/" + one, token,
+                               headers={"Range": "bytes=0-99"})
+        check(code == 206 and len(body) == 100,
+              f"un morceau demandé est un morceau rendu ({code}, {len(body)} octets)")
+        check(head.get("Content-Range", "").startswith("bytes 0-99/"),
+              f"et le serveur dit où il en est ({head.get('Content-Range')})")
+        check(head.get("Accept-Ranges") == "bytes",
+              "il annonce qu'on peut lui demander n'importe quel passage")
+        code, body, _h = ask("/video/" + one, token)
+        check(code == 200 and len(body) > 100, "sans demande, il rend tout")
+
+        # -- on ne sort pas du catalogue --------------------------------------
+        for sortie in ("/video/" + "0" * 16, "/video/..%2F..%2Fwindows",
+                       "/thumb/" + "0" * 16):
+            code, _body, _h = ask(sortie, token)
+            check(code == 404, f"« {sortie[:24]}… » ne mène nulle part ({code})")
+
+        # -- sortir ferme vraiment la session ----------------------------------
+        ask("/logout", token)
+        code, _body, _h = ask("/api/folders", token)
+        check(code == 401, "après être sorti, le témoin ne vaut plus rien")
+    finally:
+        served.stop()
+    check(not served.running, "et le serveur s'arrête proprement")
+
+    # -- le journal : qui est venu, et ce qu'il a regardé --------------------
+    from videosorter.access import Journal, describe, spell
+    book = Journal(Path(base) / "_appdata" / "essai-acces.db")
+    try:
+        nom = book.entered("82.45.1.9", "Mozilla/5.0 (Linux; Android 14) Chrome/120")
+        check("Android" in nom and "Chrome" in nom,
+              f"le visiteur est nommé sans être identifié ({nom})")
+        check(describe("1.2.3.4", "Mozilla/5.0 (iPhone) Safari") != nom,
+              "deux appareils différents portent deux noms")
+        check(describe("9.9.9.9", "Mozilla/5.0 (Linux; Android 14) Chrome/120") == nom,
+              "et le même appareil garde le sien, d'où qu'il vienne")
+        book.entered("5.5.5.5", "curl", "refus")
+        seen = book.visits()
+        check(len(seen) == 2 and seen[0][3] == "refus",
+              f"entrées et refus sont notés ({[row[3] for row in seen]})")
+
+        book.watched("82.45.1.9", nom, "abc", "plage.mp4", 30)
+        book.watched("82.45.1.9", nom, "abc", "plage.mp4", 25)
+        watched = book.views()
+        check(len(watched) == 1 and abs(watched[0][4] - 55) < 0.01,
+              f"le temps regardé s'additionne sur la même séance ({watched})")
+        book.watched("82.45.1.9", nom, "abc", "plage.mp4", 99999)
+        watched = book.views()
+        check(watched[0][4] <= 55 + 60.01,
+              f"un battement ne peut pas valoir la nuit ({watched[0][4]:.0f} s)")
+        check(spell(55) == "55 s" and "min" in spell(300) and "h" in spell(7200),
+              "et le temps se lit en clair")
+        book.clear()
+        check(not book.visits() and not book.views(), "le journal s'efface")
+    finally:
+        book.close()
 
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]

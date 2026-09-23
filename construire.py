@@ -62,7 +62,9 @@ def gather_cache(into: Path) -> tuple:
     count = weight = 0
     # Ni les journaux ni la liste de lecture : ils ne disent rien de la
     # collection et changent a chaque seance.
-    skip = {"gel.log", "preparation.log", "selection.m3u"}
+    # Ni les journaux, ni la liste de lecture, ni le registre des acces :
+    # celui-ci ne regarde que la machine ou il a ete tenu.
+    skip = {"gel.log", "preparation.log", "selection.m3u", "acces.db"}
     for entry in source.rglob("*"):
         if not entry.is_file() or entry.name in skip:
             continue

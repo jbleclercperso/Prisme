@@ -35,7 +35,9 @@ from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
 from .tagging import MIN_BUCKET, TagsThread, build_tag_items, top_words
 from .split import DEFAULT_PANES, SplitWall
+from .access import JOURNAL
 from .perf import LOG as STALL_LOG, WATCH, mark
+from .share_dialog import ShareDialog
 from .query import available as fuzzy_available, matches_text
 
 # Les tons du bandeau d'etat. Ils etaient ecrits en dur a chaque appel, avec
@@ -397,6 +399,7 @@ class MainWindow(QMainWindow):
             ("-", None),
             ("Raccourcis et recherche…", self.show_help),
             ("Journal des gels de l'interface", self.open_stall_log),
+            ("Partage à distance…", self.open_share),
             ("Où sont les vignettes…", self.show_cache_place),
             ("Ignorer la mise à l'échelle de Windows", self.toggle_dpi),
             ("Réanalyser tout le disque", self.refresh_root),
@@ -695,6 +698,7 @@ class MainWindow(QMainWindow):
         self._wall_pinned: list = []
         self._wall_unsure: list = []
         self.wall_prober = None
+        self.share_server = None
         self.viewer.addWidget(self.board)
         self.viewer.addWidget(self.wall)
         # L'image, et dessous une seule rangee : fleche, barre d'avancement,
@@ -1896,6 +1900,8 @@ class MainWindow(QMainWindow):
         else:
             self.update_counter()
         self.resume_last()
+        # La racine est enfin connue : c'est ici que le partage peut ouvrir.
+        self.start_share()
 
     # ------------------------------------------------------------------
     # Affichage de l'élément courant
@@ -2147,6 +2153,91 @@ class MainWindow(QMainWindow):
             os.startfile(str(STALL_LOG))
         except OSError as exc:
             self.show_banner(f"Journal illisible : {exc}", "error")
+
+    # ------------------------------------------------------------------
+    # Le partage a distance
+    # ------------------------------------------------------------------
+    def share_ready(self) -> bool:
+        """Un mot de passe est-il pose ? Sans lui, on ne sert rien."""
+        return bool(self.cfg["share_salt"] and self.cfg["share_digest"])
+
+    def start_share(self) -> bool:
+        """Ouvre le partage si tout est reuni. Sans bruit s'il manque quelque chose.
+
+        Appele a chaque analyse terminee : c'est la qu'on connait enfin la
+        racine, et le catalogue se refait avec ce qu'on vient d'apprendre.
+        """
+        from .web import Server
+
+        if not self.cfg["share"] or self.root is None or not self.share_ready():
+            return False
+        top = self.top_root()
+        if self.share_server is not None:
+            # Deja ouvert : on lui repasse simplement le catalogue a jour.
+            try:
+                self.share_server.library.refresh()
+            except OSError:
+                pass
+            return True
+        try:
+            self.share_server = Server(
+                top, self.cfg["share_salt"], self.cfg["share_digest"],
+                port=int(self.cfg["share_port"] or 0),
+                host=self.cfg["share_host"] or "127.0.0.1",
+                expand=self.cfg["expand_parents"],
+                width=self.cfg["thumb_width"])
+            port = self.share_server.start()
+            self.cfg["share_port"] = port
+            self.cfg.save_soon()
+        except OSError as exc:
+            self.share_server = None
+            self.show_banner(f"Partage impossible : {exc}", "error")
+            return False
+        return True
+
+    def stop_share(self) -> None:
+        if self.share_server is not None:
+            self.share_server.stop()
+            self.share_server = None
+
+    def set_share(self, on: bool) -> None:
+        self.cfg["share"] = bool(on)
+        self.cfg.save()
+        if on:
+            if self.start_share():
+                self.show_banner("Partage à distance ouvert.", "done")
+        else:
+            self.stop_share()
+            self.show_banner("Partage à distance fermé.", "quiet")
+
+    def set_share_password(self, given: str) -> None:
+        from .web import hash_password
+
+        salt, digest = hash_password(given)
+        self.cfg["share_salt"], self.cfg["share_digest"] = salt, digest
+        self.cfg.save()
+        # Changer la serrure ferme les sessions ouvertes : c'est le but.
+        self.stop_share()
+        self.start_share()
+
+    def share_state(self) -> str:
+        if not self.cfg["share"]:
+            return "Partage fermé."
+        if not self.share_ready():
+            return "Aucun mot de passe : le partage reste fermé."
+        if self.share_server is None:
+            return ("Prêt, en attente d'une racine analysée."
+                    if self.root is None else "Partage arrêté.")
+        return (f"Ouvert — {len(self.share_server.library.videos)} vidéo(s) "
+                f"servies depuis {self.share_server.library.root}")
+
+    def share_link(self) -> str:
+        if self.share_server is None:
+            return ""
+        return f"http://127.0.0.1:{self.share_server.port}/"
+
+    def open_share(self) -> None:
+        ShareDialog(self, self).exec()
 
     def open_radial(self) -> None:
         """Clic droit : les destinations en rond autour de la souris."""
@@ -4685,6 +4776,8 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
                 self.transfers.wait(200)
             waiter.close()
+        self.stop_share()
+        JOURNAL.close()
         self._flush_trash_on_close()
         self.preview.shutdown()
         self.ratings.flush()

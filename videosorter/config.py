@@ -200,6 +200,14 @@ DEFAULTS = {
     "ffprobe": "",
     "window": {"w": 1400, "h": 900},
     "ignore_dpi": False,         # ignorer la mise a l'echelle de Windows
+    # Le partage a distance. Actif des le depart : il ne sert a rien s'il
+    # faut penser a l'allumer. Mais il reste inerte tant qu'aucun mot de
+    # passe n'est pose — on n'ouvre pas une collection sans serrure.
+    "share": True,
+    "share_port": 8713,
+    "share_host": "127.0.0.1",   # le tunnel fait le reste ; aucun port ouvert
+    "share_salt": "",
+    "share_digest": "",
     "skip_hidden": True,
     "use_scan_cache": True,      # reutiliser l analyse precedente
     "sort_mode": "random",       # random | duration_desc | size_asc | …
