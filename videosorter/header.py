@@ -782,6 +782,8 @@ MENU_ICONS = (
     ("Où sont", "hard-drive"), ("mise à l'échelle", "monitor"),
     ("Réanalyser", "refresh-cw"), ("racine", "folder-cog"),
     ("Enregistrer", "bookmark-plus"), ("enregistrées", "bookmark"),
+    ("Affichage", "monitor"), ("Collection", "hard-drive"),
+    ("Connexion", "share-2"), ("Aide", "keyboard"), ("Recherches", "search"),
 )
 
 
@@ -793,12 +795,23 @@ def menu_icon(text: str):
     return None
 
 
-def build_overflow(parent, entries: list) -> QMenu:
-    """Regroupe ce qui ne sert qu'occasionnellement derrière un seul bouton."""
-    menu = QMenu(parent)
+def build_overflow(parent, entries: list, menu: QMenu | None = None) -> QMenu:
+    """Regroupe ce qui ne sert qu'occasionnellement derrière un seul bouton.
+
+    Une entree dont le second terme est une liste devient un sous-menu : une
+    colonne de vingt-cinq lignes ne se lisait plus, on y cherchait.
+    """
+    menu = QMenu(parent) if menu is None else menu
     for text, slot in entries:
         if text == "-":
             menu.addSeparator()
+            continue
+        if isinstance(slot, list):
+            sub = menu.addMenu(text)
+            found = menu_icon(text)
+            if found is not None:
+                sub.setIcon(found)
+            build_overflow(parent, slot, sub)
             continue
         action = menu.addAction(text, slot)
         found = menu_icon(text)

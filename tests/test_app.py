@@ -3207,6 +3207,41 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
               "avec ses étoiles et ses commandes")
     tab_click(TAB_FOLDERS)
 
+    print("\n[80] La sélection en mur ou en playlist, un menu rangé")
+    top = [a for a in window.overflow.actions() if not a.isSeparator()]
+    check(len(top) <= 9, f"le menu ⋯ tient en quelques lignes ({len(top)})")
+    check(any(a.menu() is not None and a.text() == "Collection" for a in top),
+          "le reste est rangé en sous-menus")
+    check(any(a.text().startswith("Préparer toutes les vignettes")
+              for a in window._menu_actions()),
+          "et chaque entrée s'y retrouve")
+    tab_click(TAB_VIDEOS)
+    window.toggle_board(True)
+    pump(app, 0.3)
+    chosen = [i for i in window.items if i.videos][:3]
+    if len(chosen) == 3:
+        for item in chosen:
+            window.board.picked_ids.add(item.item_id)
+        window.playlist_picked()
+        pump(app, 0.4)
+        check(not window.aside.isHidden() and len(window.aside_playlist) == 3,
+              "« Playlist » : les trois vidéos, dans le lecteur de droite")
+        window.aside_step(1)
+        window.aside_step(1)
+        window.aside_step(1)
+        check(window.aside_playlist_at == 0,
+              "après la dernière, la première : la playlist tourne en boucle")
+        window.close_aside()
+        check(not window.aside_playlist, "et se referme proprement")
+        for item in chosen:
+            window.board.picked_ids.add(item.item_id)
+        window.wall_picked()
+        pump(app, 0.4)
+        check(window.tab == TAB_SPLIT and window.wall._shape == (1, 3),
+              f"« Mur » : trois vidéos choisies, sur une seule ligne "
+              f"({window.wall._shape})")
+    tab_click(TAB_FOLDERS)
+
 
 def main() -> int:
     base = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(

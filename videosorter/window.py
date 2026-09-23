@@ -435,45 +435,56 @@ class MainWindow(QMainWindow):
             "QPushButton::menu-indicator { image: none; width: 0px; }")
         self.more_button.setToolTip("Destinations, corbeille, arborescence…")
         self.more_button.setFocusPolicy(Qt.NoFocus)
+        # Les usages de tous les jours en tete ; le reste range par theme,
+        # dans des sous-menus qui s'ouvrent au survol.
         self.overflow = build_overflow(self, [
             ("Destinations…", self.edit_destinations),
             ("Mots-clés automatiques…", self.edit_tags),
-            ("-", None),
             ("Corbeille de session", self.open_trash),
-            ("Arborescence des destinations", self.toggle_tree),
             ("-", None),
-            ("Recherche vidéo sur le web…", self.open_web_search),
-            ("-", None),
-            ("Préparer toutes les vignettes", self.toggle_backfill),
-            ("Compter les vidéos", self.count_videos),
-            ("État des vignettes", self.audit_thumbs),
-            ("Analyser les titres des métadonnées", self.scan_titles),
-            ("Repérer les plans (vignettes plus parlantes)", self.scan_scenes),
-            ("Chercher les doublons (même taille)", self.find_duplicates),
-            ("Chercher les doublons (même image)",
-             lambda: self.find_duplicates(by_image=True)),
-            ("Empreintes : sonder ce qui manque", self.scan_signatures),
-            ("Doublons d'après les empreintes", self.duplicates_from_sigs),
-            ("-", None),
-            ("Rafale : passer tout seul après 8 s", self.toggle_burst),
-            ("-", None),
-            ("Raccourcis et recherche…", self.show_help),
-            ("Journal des gels de l'interface", self.open_stall_log),
-            ("Afficher les dossiers masqués", self.toggle_veiled),
-            ("Partage à distance…", self.open_share),
-            ("Où sont les vignettes…", self.show_cache_place),
-            ("Ignorer la mise à l'échelle de Windows", self.toggle_dpi),
-            ("Réanalyser tout le disque", self.refresh_root),
-            ("Changer de racine…", self.choose_root),
+            ("Recherches", [
+                ("Enregistrer cette recherche…", self.save_search),
+            ]),
+            ("Affichage", [
+                ("Arborescence des destinations", self.toggle_tree),
+                ("Rafale : passer tout seul après 8 s", self.toggle_burst),
+                ("Afficher les dossiers masqués", self.toggle_veiled),
+                ("Ignorer la mise à l'échelle de Windows", self.toggle_dpi),
+            ]),
+            ("Collection", [
+                ("Compter les vidéos", self.count_videos),
+                ("État des vignettes", self.audit_thumbs),
+                ("Préparer toutes les vignettes", self.toggle_backfill),
+                ("Analyser les titres des métadonnées", self.scan_titles),
+                ("Repérer les plans (vignettes plus parlantes)", self.scan_scenes),
+                ("-", None),
+                ("Réanalyser tout le disque", self.refresh_root),
+                ("Changer de racine…", self.choose_root),
+                ("Où sont les vignettes…", self.show_cache_place),
+            ]),
+            ("Doublons", [
+                ("Chercher les doublons (même taille)", self.find_duplicates),
+                ("Chercher les doublons (même image)",
+                 lambda: self.find_duplicates(by_image=True)),
+                ("Empreintes : sonder ce qui manque", self.scan_signatures),
+                ("Doublons d'après les empreintes", self.duplicates_from_sigs),
+            ]),
+            ("Connexion", [
+                ("Partage à distance…", self.open_share),
+                ("Recherche vidéo sur le web…", self.open_web_search),
+            ]),
+            ("Aide", [
+                ("Raccourcis et recherche…", self.show_help),
+                ("Journal des gels de l'interface", self.open_stall_log),
+            ]),
         ])
         # Les recherches enregistrees : la requete, son tri, et « Non vus »,
         # sous un nom. Le langage de recherche existait, il manquait de le
         # retenir.
-        self.overflow.addSeparator()
-        self.overflow.addAction(icon("bookmark-plus"), "Enregistrer cette recherche…",
-                                self.save_search)
-        self.searches_menu = self.overflow.addMenu(icon("bookmark"),
-                                                   "Recherches enregistrées")
+        searches = next(a.menu() for a in self.overflow.actions()
+                        if a.menu() is not None and a.text() == "Recherches")
+        self.searches_menu = searches.addMenu(icon("bookmark"),
+                                              "Recherches enregistrées")
         self.searches_menu.aboutToShow.connect(self._fill_searches_menu)
         self.more_button.setMenu(self.overflow)
         self._name_backfill_action()
@@ -541,19 +552,24 @@ class MainWindow(QMainWindow):
         self.picked_label = QLabel("", self.picked_bar)
         self.picked_label.setObjectName("pending")
         picked_row.addWidget(self.picked_label)
-        for text, tip, slot in (
-            ("▶  Lire ensemble", "Les vidéos cochées, toutes à la fois, sur le mur",
+        for name, text, tip, slot in (
+            ("square-stack", "Mur", "Les vidéos cochées, toutes à la fois, sur le mur",
              self.wall_picked),
-            ("Déplacer…", "Cliquez ensuite un dossier de l'arborescence",
+            ("play", "Playlist",
+             "Les vidéos cochées l'une après l'autre, à droite, en boucle",
+             self.playlist_picked),
+            ("folder-input", "Déplacer…", "Cliquez ensuite un dossier de l'arborescence",
              self.move_picked_hint),
-            ("Supprimer", "Écarte les vidéos cochées", self.delete_picked),
-            ("Annuler", "Décoche tout", self.clear_picked),
+            ("trash-2", "Supprimer", "Écarte les vidéos cochées", self.delete_picked),
+            ("x", "Annuler", "Décoche tout", self.clear_picked),
         ):
             button = QPushButton(text, self.picked_bar)
+            dress(button, name, 16, text)
             button.setToolTip(tip)
             button.setFocusPolicy(Qt.NoFocus)
             button.clicked.connect(slot)
             picked_row.addWidget(button)
+        picked_row.addStretch(1)
         self.picked_bar.hide()
         self.picked_bar.setMinimumWidth(120)
         # En bout de la ligne des filtres, pas sur une ligne a elle.
@@ -766,6 +782,8 @@ class MainWindow(QMainWindow):
         self.aside_watch.start()
         self.aside.hide()
         self.aside_index = -1
+        self.aside_playlist: list = []
+        self.aside_playlist_at = 0
         middle.addWidget(self.aside, 1)
         layout.addLayout(middle, 1)
 
@@ -1372,7 +1390,7 @@ class MainWindow(QMainWindow):
             done = self.cfg["thumbs_last_run"]
             label = ("Préparer toutes les vignettes"
                      + (f"   (dernière : {done})" if done else "   (jamais faite)"))
-        for action in self.overflow.actions():
+        for action in self._menu_actions():
             if action.text().startswith("Préparer toutes les vignettes"):
                 action.setText(label)
                 return
@@ -2262,12 +2280,22 @@ class MainWindow(QMainWindow):
         label = ("Masquer de nouveau les dossiers mis de côté"
                  if self.cfg["show_veiled"]
                  else f"Afficher les dossiers masqués ({names})")
-        for action in self.overflow.actions():
+        for action in self._menu_actions():
             text = action.text()
             if text.startswith("Afficher les dossiers masqués") or \
                     text.startswith("Masquer de nouveau"):
                 action.setText(label)
                 return
+
+    def _menu_actions(self, menu=None) -> list:
+        """Toutes les entrees du menu ⋯, sous-menus compris."""
+        menu = self.overflow if menu is None else menu
+        found = []
+        for action in menu.actions():
+            found.append(action)
+            if action.menu() is not None:
+                found.extend(self._menu_actions(action.menu()))
+        return found
 
     def show_cache_place(self) -> None:
         """Dit ou vit le cache, et comment le partager avec un autre PC."""
@@ -3427,6 +3455,7 @@ class MainWindow(QMainWindow):
             self.wall.set_pool(self._wall_pinned)
             self.wall.set_caption(len(self.wall.pool), pinned=True)
         else:
+            self.wall.single_row = False
             self.wall.set_shape(None)
             pool, unknown = self.vertical_pool()
             heavy = 0
@@ -3870,7 +3899,8 @@ class MainWindow(QMainWindow):
                                 TAB_TAGS: "tags"}.get(self.tab, "videos"))
         # La seconde ligne : les filtres sur une planche, le titre sur une
         # fiche. Jamais les deux — c'etait trois lignes avant l'image.
-        self.controls.setVisible(not sheet)
+        self.controls.setVisible(not sheet and not (
+            self.board.picked_ids and self.browsing and not wall))
         self.item_card.setVisible(sheet)
         self.picked_bar.setVisible(not sheet and bool(self.board.picked_ids)
                                    and not wall)
@@ -4026,10 +4056,14 @@ class MainWindow(QMainWindow):
         if not item.videos:
             return
         self.aside_index = position
-        video = str(item.videos[0])
+        self.aside_playlist = []
+        self._aside_play(str(item.videos[0]), item.name, str(item.path))
+
+    def _aside_play(self, video: str, title: str, tip: str = "") -> None:
+        """Le lecteur de droite, sur cette video."""
         mark("open_aside")
-        self.aside_title.setText(item.name)
-        self.aside_title.setToolTip(str(item.path))
+        self.aside_title.setText(title)
+        self.aside_title.setToolTip(tip or video)
         self.aside.show()
         self.aside_player.set_muted(self.cfg["muted"])
         self.aside_player.set_loop(False)
@@ -4044,7 +4078,8 @@ class MainWindow(QMainWindow):
     def _watch_aside(self) -> None:
         """Montre le bandeau tant que la souris est sur l'image, l'efface sinon."""
         area = self.aside_player.video_area
-        if (self.aside.isHidden() or self.aside_index < 0
+        if (self.aside.isHidden()
+                or (self.aside_index < 0 and not self.aside_playlist)
                 or not area.isVisible() or not self.isActiveWindow()):
             self.aside_player.marks.hide()
             return self.aside_bar.hide()
@@ -4105,6 +4140,12 @@ class MainWindow(QMainWindow):
 
     def aside_fullscreen(self) -> None:
         """Donne tout l'ecran a la video ouverte a cote, et sait en revenir."""
+        if self.aside_playlist:
+            video = self.aside_playlist[self.aside_playlist_at]
+            self.close_aside()
+            self.play_in_app(video)
+            self.toggle_cinema(True)
+            return
         if self.aside_index < 0:
             return
         # On retient d'ou l'on vient : sortir du plein ecran laissait sur la
@@ -4121,6 +4162,11 @@ class MainWindow(QMainWindow):
 
     def aside_step(self, step: int) -> None:
         """Passe a la vignette voisine, dans l'ordre de la planche."""
+        if self.aside_playlist:
+            # En playlist, on tourne : apres la derniere, la premiere.
+            count = len(self.aside_playlist)
+            self.aside_playlist_at = (self.aside_playlist_at + step) % count
+            return self._aside_play_list()
         if self.aside_index < 0:
             return
         target = self.aside_index + step
@@ -4130,6 +4176,7 @@ class MainWindow(QMainWindow):
             self.open_aside(target)
 
     def close_aside(self) -> None:
+        self.aside_playlist = []
         self.aside_player.stop()
         self.aside_bar.hide()
         self.aside.hide()
@@ -4212,7 +4259,11 @@ class MainWindow(QMainWindow):
         self.act_delete()
 
     def on_picked_changed(self, count: int) -> None:
+        # Tant que des elements sont coches, leurs actions prennent la place
+        # des filtres : deux lignes, toujours. « Annuler » rend les filtres.
         self.picked_bar.setVisible(bool(count))
+        if self.browsing and self.tab != TAB_SPLIT:
+            self.controls.setVisible(not count)
         self.picked_label.setText(
             f"{count} élément(s) coché(s)" if count else "")
 
@@ -4297,7 +4348,27 @@ class MainWindow(QMainWindow):
         self.board.clear_picked()
         self.set_tab(TAB_SPLIT)
         self.wall.set_pane_count(max(1, min(len(videos), 10)))
+        # Trois ou quatre videos choisies : sur une seule ligne, comme on les
+        # a choisies, et non empilees.
+        self.wall.single_row = len(videos) <= 4
         self.show_wall()
+
+    def playlist_picked(self) -> None:
+        """Les videos cochees, l'une apres l'autre dans le lecteur de droite,
+        et on recommence : trois videos choisies tournent en boucle."""
+        videos = [str(video) for video in self._picked_videos()]
+        if not videos:
+            return
+        self.board.clear_picked()
+        self.aside_playlist = videos
+        self.aside_playlist_at = 0
+        self._aside_play_list()
+
+    def _aside_play_list(self) -> None:
+        video = self.aside_playlist[self.aside_playlist_at]
+        count = len(self.aside_playlist)
+        self._aside_play(video, f"{self.aside_playlist_at + 1}/{count} · "
+                                f"{Path(video).name}")
 
     def play_picked(self) -> None:
         """Écrit une liste de lecture et la confie au lecteur du système.
@@ -4429,11 +4500,24 @@ class MainWindow(QMainWindow):
         en mode dossier, la liste ne compte que quelques dizaines d'entrées.
         """
         import random
+        # Toute la collection, meme quand on est entre dans un dossier : la
+        # liste affichee n'etait plus, apres un premier tirage, que le dossier
+        # ou il avait mene — le hasard « general » tournait en rond dedans.
+        source = self.all_items
+        if (self._plain_items and self._plain_root is not None
+                and self.top_root() is not None
+                and Path(self._plain_root) == Path(self.top_root())):
+            source = list(self._plain_items) + list(self.all_items)
         pool = []
-        for item in self.all_items:
-            if item.locked:
+        seen = set()
+        for item in source:
+            if item.locked or item.is_tag:
                 continue
-            pool.extend(str(video) for video in item.videos)
+            for video in item.videos:
+                key = str(video)
+                if key not in seen and not under_veiled(key):
+                    seen.add(key)
+                    pool.append(key)
         if not pool:
             self.show_banner("Aucune vidéo à tirer au sort", "quiet")
             return

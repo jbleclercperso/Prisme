@@ -32,6 +32,17 @@ STYLESHEET = """
 QWidget { background: #14161a; color: #e6e8ea; font-size: 13px; }
 QLabel { border: none; background: transparent; }
 QLabel#title { font-size: 19px; font-weight: 600; color: #ffffff; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px 0; }
+QScrollBar::handle:vertical { background: #2b323d; border-radius: 4px;
+                              min-height: 36px; }
+QScrollBar::handle:vertical:hover { background: #3d4654; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 0 2px; }
+QScrollBar::handle:horizontal { background: #2b323d; border-radius: 4px;
+                                min-width: 36px; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
 QPushButton#paneGesture { background: #1a1f27; border: 1px solid #2b323d;
                           border-radius: 5px; padding: 0; margin: 0;
                           color: #cdd5df; font-size: 17px; }

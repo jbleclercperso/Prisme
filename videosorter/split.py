@@ -370,6 +370,8 @@ class SplitWall(QWidget):
         # videos choisies a la main, horizontales, n'ont rien a faire dans
         # des cases debout.
         self.shape = None
+        # Une poignee de videos choisies a la main : une seule rangee.
+        self.single_row = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -543,10 +545,15 @@ class SplitWall(QWidget):
         super().resizeEvent(event)
         # La meilleure disposition depend de la place : elle change avec la
         # fenetre. On ne refait la grille que si elle change vraiment.
-        rows, cols = grid_for(len(self.panes), self.shape or self.orientation,
-                              self.row.width(), self.row.height())
+        rows, cols = self._grid_shape()
         if (rows, cols) != getattr(self, "_shape", None):
             self._lay_out()
+
+    def _grid_shape(self) -> tuple:
+        if self.single_row and len(self.panes) <= 4:
+            return 1, max(1, len(self.panes))
+        return grid_for(len(self.panes), self.shape or self.orientation,
+                        self.row.width(), self.row.height())
 
     def _clear_stretch(self) -> None:
         """Les rangees et colonnes d'une grille precedente gardaient leur
@@ -571,8 +578,7 @@ class SplitWall(QWidget):
             self._shape = (1, 1)
             self._mark_choices()
             return
-        rows, cols = grid_for(len(self.panes), self.shape or self.orientation,
-                              self.row.width(), self.row.height())
+        rows, cols = self._grid_shape()
         self._shape = (rows, cols)
         for pane in self.panes:
             pane.setVisible(True)

@@ -551,6 +551,7 @@ class BoardView(QWidget):
 
     def _fill_page(self, previous=None) -> None:
         first, last = self._page_bounds()
+        self._laid_cols = self._cols()
         shown = last - first
         self._ensure_cards(shown)
         width = self._card_width()
@@ -577,7 +578,7 @@ class BoardView(QWidget):
             # La coche appartient a l'element, pas a la carte : les cartes sont
             # reutilisees d'une page a l'autre.
             card.set_picked(item.item_id in self.picked_ids)
-            self.grid.addWidget(card, slot // self.columns, slot % self.columns)
+            self.grid.addWidget(card, slot // self._cols(), slot % self._cols())
             card.show()
         self.pageChanged.emit(first + 1 if self.items else 0, last, len(self.items))
         self._pending_previews = set(needed)
@@ -649,6 +650,10 @@ class BoardView(QWidget):
         self.width_timer.start()
 
     def _apply_widths(self) -> None:
+        if self._cols() != getattr(self, "_laid_cols", self._cols()):
+            # Moins de place (le lecteur de droite s'est ouvert) : moins de
+            # colonnes, plutot que des cartes coupees au bord.
+            return self._relayout()
         width = self._card_width()
         for card in self.cards:
             if not card.isHidden() and card.width() != width:
@@ -701,7 +706,7 @@ class BoardView(QWidget):
         card.index = position
         card.set_card_width(self._card_width())
         card.set_item(item, stars)
-        self.grid.addWidget(card, slot // self.columns, slot % self.columns)
+        self.grid.addWidget(card, slot // self._cols(), slot % self._cols())
         card.show()
         self.empty.hide()
         self.scroll.show()
@@ -759,15 +764,25 @@ class BoardView(QWidget):
         if card is not None:
             self.scroll.ensureWidgetVisible(card, 40, 40)
 
-    def _card_width(self) -> int:
-        available = self.scroll.viewport().width() - CARD_GAP * (self.columns + 1)
+    def _available(self) -> int:
+        available = self.scroll.viewport().width()
         bar = self.scroll.verticalScrollBar()
         if not bar.isVisible():
             # La barre verticale viendra des qu'il y aura plus d'une rangee :
             # sa place est reservee d'avance, sinon la derniere colonne
             # passait sous le bord.
             available -= bar.sizeHint().width()
-        return max(MIN_CARD_WIDTH, available // max(1, self.columns))
+        return available
+
+    def _cols(self) -> int:
+        """Les colonnes demandees, tant qu'elles tiennent a leur largeur minimale."""
+        fit = (self._available() + CARD_GAP) // (MIN_CARD_WIDTH + CARD_GAP)
+        return max(1, min(self.columns, fit))
+
+    def _card_width(self) -> int:
+        cols = self._cols()
+        available = self._available() - CARD_GAP * (cols + 1)
+        return max(MIN_CARD_WIDTH, available // cols)
 
     def set_columns(self, columns: int) -> None:
         self.columns = max(1, columns)
@@ -776,10 +791,11 @@ class BoardView(QWidget):
     def _relayout(self) -> None:
         first, last = self._page_bounds()
         width = self._card_width()
+        self._laid_cols = self._cols()
         for slot, card in enumerate(self.cards[:last - first]):
             self.grid.removeWidget(card)
             card.set_card_width(width)
-            self.grid.addWidget(card, slot // self.columns, slot % self.columns)
+            self.grid.addWidget(card, slot // self._cols(), slot % self._cols())
 
     # -- survol et lecture ----------------------------------------------
     def _poll_hover(self) -> None:
