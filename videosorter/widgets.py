@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from .actions import ActionError
+from .icons import GLYPHS, dress, icon
 from .config import KEY_ORDER, RESERVED_KEYS
 from .scan import human_duration, human_resolution
 
@@ -172,6 +173,84 @@ def seek_step(event, seconds: int) -> int:
         notches = event.angleDelta().x() / 120.0
     factor = 6 if event.modifiers() & Qt.ControlModifier else 1
     return int(notches * seconds * 1000 * factor)
+
+
+class Expiring(dict):
+    """Un ensemble dont les membres s'oublient d'eux-memes.
+
+    Une video qui refusait de se lire etait ecartee pour toute la session :
+    il suffisait que le partage reseau decroche une seconde pour que plus
+    aucun apercu ne demarre, jusqu'au redemarrage. On la retente apres un
+    moment.
+    """
+
+    TTL = 45.0
+
+    def add(self, key) -> None:
+        self[key] = time.monotonic()
+
+    def __contains__(self, key) -> bool:
+        stamp = self.get(key)
+        if stamp is None:
+            return False
+        if time.monotonic() - stamp > self.TTL:
+            self.pop(key, None)
+            return False
+        return True
+
+
+class Stepper(QWidget):
+    """Un reglage chiffre : moins, la valeur, plus. Le meme partout —
+    vignettes par rangee, apercus d'un dossier, videos du mur."""
+
+    chosen = Signal(int)
+
+    def __init__(self, choices, tip: str = "", caption: str = "", parent=None):
+        super().__init__(parent)
+        self.choices = list(choices)
+        self.value = self.choices[0]
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        if caption:
+            label = QLabel(caption, self)
+            label.setObjectName("hint")
+            row.addWidget(label)
+        self.minus = QPushButton("", self)
+        self.plus = QPushButton("", self)
+        self.value_label = QLabel("", self)
+        self.value_label.setObjectName("counter")
+        self.value_label.setAlignment(Qt.AlignCenter)
+        self.value_label.setMinimumWidth(24)
+        self.value_label.setToolTip(tip)
+        for button, name, step in ((self.minus, "minus", -1), (self.plus, "plus", 1)):
+            button.setObjectName("stepper")
+            button.setFixedSize(30, 28)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setCursor(Qt.PointingHandCursor)
+            dress(button, name, 18)
+            button.clicked.connect(lambda _c=False, d=step: self._step(d))
+        self.minus.setToolTip(tip + " : moins" if tip else "Moins")
+        self.plus.setToolTip(tip + " : plus" if tip else "Plus")
+        row.addWidget(self.minus)
+        row.addWidget(self.value_label)
+        row.addWidget(self.plus)
+        self.set_value(self.value)
+
+    def set_value(self, value: int) -> None:
+        if value not in self.choices:
+            value = min(self.choices, key=lambda c: abs(c - value))
+        self.value = value
+        self.value_label.setText(str(value))
+        at = self.choices.index(value)
+        self.minus.setEnabled(at > 0)
+        self.plus.setEnabled(at < len(self.choices) - 1)
+
+    def _step(self, step: int) -> None:
+        at = self.choices.index(self.value) + step
+        if 0 <= at < len(self.choices):
+            self.set_value(self.choices[at])
+            self.chosen.emit(self.value)
 
 
 class PreviewTile(QFrame):
@@ -343,7 +422,7 @@ class PreviewGrid(QWidget):
         self.scroll_seconds = scroll_seconds
         self.item_id = ""
         self.hovered_slot = -1
-        self.unplayable: set = set()
+        self.unplayable = Expiring()
 
         self.grid_layout = QGridLayout(self)
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
@@ -682,6 +761,10 @@ def draw_icon(kind: str, on: bool = True, size: int = 20,
     « speaker » : un haut-parleur, barre au milieu quand le son est coupe.
     « tree » : un petit schema d'arborescence. « up » : un chevron large.
     """
+    if kind == "speaker":
+        return icon("volume-2") if on else icon("volume-x", "#e26d76")
+    if kind in ("tree", "up"):
+        return icon({"tree": "folder-tree", "up": "arrow-up"}[kind])
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
@@ -1009,7 +1092,10 @@ class OverBar(QWidget):
         button.setObjectName("overGesture")
         button.setToolTip(tip)
         button.setFocusPolicy(Qt.NoFocus)
-        button.setFixedSize(30, 24)
+        button.setFixedSize(32, 28)
+        name = GLYPHS.get(glyph)
+        if name:
+            dress(button, name, 20)
         button.setCursor(Qt.PointingHandCursor)
         button.clicked.connect(slot)
         self.buttons.addWidget(button)

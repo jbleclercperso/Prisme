@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import random
 
-from PySide6.QtCore import QTimer, QUrl, Qt, Signal
-from PySide6.QtMultimedia import QMediaPlayer
+from PySide6.QtCore import QPoint, QRect, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QCursor
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
@@ -22,8 +23,8 @@ from PySide6.QtWidgets import (
 )
 
 from .perf import mark
-from .scan import human_duration
-from .widgets import PeekOverlay, elide
+from .icons import dress, icon
+from .widgets import OverBar, PeekOverlay, PlayMarks, Stepper
 
 # Trois panneaux : sur un ecran large, trois videos verticales le remplissent
 # presque exactement. Quatre les amincissent au point qu'on ne distingue plus
@@ -119,8 +120,8 @@ class SplitPane(QFrame):
         self.video_path = ""
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(0)
 
         self.stage = QWidget(self)
         self.stage.setObjectName("videoArea")
@@ -137,74 +138,85 @@ class SplitPane(QFrame):
         self.peek.chosen.connect(lambda slot: self.peekChosen.emit(self.index, slot))
         self.peeking = False
 
-        # Pas de barre d'avancement ici : sur un mur, on regarde plusieurs
-        # videos a la fois et l'on ne suit la progression d'aucune. Le seul
-        # chiffre qui serve est le temps qu'il reste, et il tient dans la
-        # barre du panneau — une rangee de moins pour autant d'image.
-        self.remaining = QLabel("", self)
-        self.remaining.setObjectName("paneTime")
-
-        self.bar = QWidget(self)
-        bar = QHBoxLayout(self.bar)
-        bar.setContentsMargins(0, 0, 0, 0)
-        bar.setSpacing(6)
+        # Au repos, un trait tres fin en bas de l'image et le temps restant,
+        # discret, en haut a droite. Au survol, le bandeau complet — nom et
+        # gestes — pose sur l'image. Toute la hauteur du panneau va a la
+        # video : la barre du dessous lui prenait trente pixels chacun.
+        self.marks = PlayMarks(self, rail=True, left=True)
         self.bare = False
-        self.name = QLabel("—", self)
-        self.name.setObjectName("splitName")
-        # Sans cela, un nom de fichier long imposait sa largeur au panneau, donc
-        # au mur, donc a la fenetre entiere, qui ne pouvait plus retrecir.
-        self.name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        bar.addWidget(self.name, 1)
-        bar.addWidget(self.remaining, 0)
-        # Trois gestes : la suivante du meme dossier quand une video plait,
-        # une autre au hasard n'importe ou, et ouvrir en grand.
+        self.bar = OverBar(self)
+        self.bar.left.hide()          # le temps restant est deja en haut a droite
+        self.name = self.bar.name
+        self.name.setText("—")
+        # Le bandeau pilote tout : revenir a la precedente, pause, la
+        # suivante du meme dossier, une autre au hasard, sa fiche, et elle
+        # seule en grand.
+        self.history: list = []
         for text, tip, slot in (
+            ("◂", "La précédente, dans ce panneau", self._previous),
+            ("⏯", "Pause, ou reprendre", self.toggle_pause),
             ("▸", "La suivante, dans le même dossier", self._sibling),
             ("⚄", "Une autre, au hasard, n'importe où", self._next),
             ("⤢", "Ouvrir cette vidéo dans sa fiche", self._open),
             ("⛶", "Cette vidéo seule, en grand — Échap pour revenir",
              self._solo),
         ):
-            button = QPushButton(text, self)
-            button.setObjectName("paneGesture")
-            button.setToolTip(tip)
-            button.setFocusPolicy(Qt.NoFocus)
-            button.setFixedSize(26, 22)
-            button.clicked.connect(slot)
-            bar.addWidget(button)
-        layout.addWidget(self.bar)
+            self.bar.add_gesture(text, tip, slot)
+        self.pause_button = self.bar.buttons.itemAt(1).widget()
+        self.hovered = False
 
-        # Pas de sortie audio : trois videos qui parlent en meme temps ne
-        # s'ecoutent pas, elles se regardent.
+        # Le son ne vient que de la video survolee : six videos qui parlent
+        # en meme temps ne s'ecoutent pas.
         self.player = QMediaPlayer(self)
+        self.audio = QAudioOutput(self)
+        self.audio.setMuted(True)
+        self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.video)
+        self.player.playbackStateChanged.connect(self._show_pause)
+        self._show_pause()
         self.player.positionChanged.connect(self._on_position)
         self.player.mediaStatusChanged.connect(self._on_status)
 
     # -- contenu ---------------------------------------------------------
-    def play(self, path: str) -> None:
+    def play(self, path: str, remember: bool = True) -> None:
         mark(f"wall.play {path[-40:]}")
+        if remember and self.video_path and self.video_path != path:
+            self.history = (self.history + [self.video_path])[-30:]
         self.video_path = path
-        self.name.setText(elide(path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1], 28))
+        self.bar.set_name(path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1])
         self.name.setToolTip(path)
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
         self._place()
 
     def set_bare(self, bare: bool) -> None:
-        """Sans sa barre : en plein ecran, elle ne revient qu'au survol."""
+        """Le bandeau ne vient plus qu'au survol, plein ecran ou non."""
         self.bare = bare
-        self.bar.setVisible(not bare)
 
-    def enterEvent(self, event):
-        super().enterEvent(event)
-        if self.bare:
-            self.bar.show()
-
-    def leaveEvent(self, event):
-        super().leaveEvent(event)
-        if self.bare:
+    def watch(self, hovered: bool, muted: bool) -> None:
+        """Appele par le mur a chaque battement : bandeau, trait, et son."""
+        self.hovered = hovered
+        self.audio.setMuted(muted or not hovered)
+        if (not self.isVisible() or not self.video_path or self.peeking
+                or not self.stage.isVisible()):
             self.bar.hide()
+            self.marks.hide()
+            return
+        if hovered:
+            self.marks.with_rail = False
+            self.bar.place_on(self.stage)
+            self.bar.show()
+            self.bar.raise_()
+        else:
+            self.marks.with_rail = True
+            self.bar.hide()
+        self.marks.place_on(self.stage)
+        self.marks._lay_out()
+
+    def hide_overlays(self) -> None:
+        self.bar.hide()
+        self.marks.hide()
+        self.audio.setMuted(True)
 
     def clear(self) -> None:
         self.peek_end()
@@ -212,13 +224,30 @@ class SplitPane(QFrame):
         self.name.setText("—")
         self.player.stop()
         self.player.setSource(QUrl())
-        self.remaining.setText("")
+        self.marks.clear()
+        self.bar.hide()
 
     def stop(self) -> None:
         self.player.stop()
 
     def _next(self) -> None:
         self.wants_next.emit(self.index)
+
+    def _previous(self) -> None:
+        """Revient a la video d'avant, dans ce panneau."""
+        if self.history:
+            self.play(self.history.pop(), remember=False)
+
+    def toggle_pause(self) -> None:
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        else:
+            self.player.play()
+
+    def _show_pause(self, *_args) -> None:
+        playing = (self.player.playbackState()
+                   == QMediaPlayer.PlaybackState.PlayingState)
+        self.pause_button.setIcon(icon("pause" if playing else "play"))
 
     def _sibling(self) -> None:
         if self.video_path:
@@ -245,13 +274,13 @@ class SplitPane(QFrame):
 
     def _on_position(self, position: int) -> None:
         duration = self.player.duration()
-        self.remaining.setText(
-            f"−{human_duration(max(0, duration - position) / 1000.0)}"
-            if duration > 0 else "")
+        self.marks.set_progress(position, duration)
+        self.bar.set_progress(position, duration)
 
     # -- les neuf instants ----------------------------------------------------
     def peek_begin(self, captions: list) -> None:
         self.peeking = True
+        self.hide_overlays()
         self.peek.reset(captions)
         self.peek.setGeometry(self.stage.rect())
         self.video.hide()
@@ -337,6 +366,10 @@ class SplitWall(QWidget):
         self.scroll_seconds = scroll_seconds
         self.orientation = orientation
         self.solo = -1                 # rang du panneau seul en grand, ou -1
+        # La forme des cases, quand on la connait mieux que le reglage : des
+        # videos choisies a la main, horizontales, n'ont rien a faire dans
+        # des cases debout.
+        self.shape = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -369,14 +402,10 @@ class SplitWall(QWidget):
         self.caption.hide()
         controls.addStretch(1)
         self.count_buttons: dict = {}
-        for count in PANE_CHOICES:
-            button = QPushButton(str(count), self.controls)
-            button.setObjectName("splitButton")
-            button.setFocusPolicy(Qt.NoFocus)
-            button.setToolTip(f"{count} vidéos à la fois")
-            button.clicked.connect(lambda _c=False, n=count: self.countChanged.emit(n))
-            controls.addWidget(button)
-            self.count_buttons[count] = button
+        self.count_stepper = Stepper(PANE_CHOICES, "Vidéos à la fois", "",
+                                     self.controls)
+        self.count_stepper.chosen.connect(self.countChanged)
+        controls.addWidget(self.count_stepper)
         controls.addSpacing(10)
         # Un seul bouton qui tourne : Verticales → Horizontales → Toutes.
         # Trois chips prenaient la place de deux boutons pour un choix a
@@ -399,7 +428,8 @@ class SplitWall(QWidget):
                 self.unseen.property("chosen") != "true"))
         controls.addWidget(self.unseen)
         controls.addSpacing(10)
-        full = QPushButton("⛶ Plein écran", self.controls)
+        full = QPushButton("", self.controls)
+        dress(full, "maximize", 17, "Plein écran")
         full.setObjectName("splitButton")
         full.setFocusPolicy(Qt.NoFocus)
         full.setToolTip("Le mur seul, sur tout l'écran — Échap pour revenir")
@@ -432,6 +462,37 @@ class SplitWall(QWidget):
         outer.addWidget(self.row, 1)
         self._mark_choices()
 
+        # Le widget video natif ne signale pas le survol : on le sonde.
+        self.muted = False
+        self.watch_timer = QTimer(self)
+        self.watch_timer.setInterval(120)
+        self.watch_timer.timeout.connect(self._watch)
+
+    def set_muted(self, muted: bool) -> None:
+        self.muted = bool(muted)
+        self._watch()
+
+    def _watch(self) -> None:
+        window = self.window()
+        active = window is not None and window.isActiveWindow()
+        cursor = QCursor.pos()
+        for pane in self.panes:
+            stage = pane.stage
+            corner = stage.mapToGlobal(QPoint(0, 0))
+            over = (active and pane.isVisible() and QRect(
+                corner.x(), corner.y(), stage.width(),
+                stage.height()).contains(cursor))
+            pane.watch(over, self.muted)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.watch_timer.start()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.watch_timer.stop()
+        self.stop()
+
     def set_unseen(self, on: bool) -> None:
         self.unseen.setProperty("chosen", "true" if on else "false")
         self.unseen.style().unpolish(self.unseen)
@@ -443,15 +504,16 @@ class SplitWall(QWidget):
         self.orientationChanged.emit(keys[(at + 1) % len(keys)])
 
     def _mark_choices(self) -> None:
-        for count, button in self.count_buttons.items():
-            button.setProperty("chosen", "true" if count == len(self.panes) else "false")
-            button.style().unpolish(button)
-            button.style().polish(button)
+        self.count_stepper.set_value(len(self.panes))
         label = dict(ORIENTATIONS).get(self.orientation, "Toutes")
         self.orient_button.setText(f"{label} ▾")
 
     def set_orientation(self, orientation: str) -> None:
         self.orientation = orientation
+        self._lay_out()
+
+    def set_shape(self, shape) -> None:
+        self.shape = shape
         self._lay_out()
 
     def set_pane_count(self, count: int) -> None:
@@ -461,6 +523,7 @@ class SplitWall(QWidget):
         while len(self.panes) > count:
             pane = self.panes.pop()
             pane.clear()
+            pane.hide_overlays()
             self.grid.removeWidget(pane)
             pane.deleteLater()
         while len(self.panes) < count:
@@ -480,12 +543,22 @@ class SplitWall(QWidget):
         super().resizeEvent(event)
         # La meilleure disposition depend de la place : elle change avec la
         # fenetre. On ne refait la grille que si elle change vraiment.
-        rows, cols = grid_for(len(self.panes), self.orientation,
+        rows, cols = grid_for(len(self.panes), self.shape or self.orientation,
                               self.row.width(), self.row.height())
         if (rows, cols) != getattr(self, "_shape", None):
             self._lay_out()
 
+    def _clear_stretch(self) -> None:
+        """Les rangees et colonnes d'une grille precedente gardaient leur
+        etirement : trois videos apres douze n'occupaient que le coin des
+        douze, le reste de l'ecran restait vide."""
+        for row in range(self.grid.rowCount()):
+            self.grid.setRowStretch(row, 0)
+        for col in range(self.grid.columnCount()):
+            self.grid.setColumnStretch(col, 0)
+
     def _lay_out(self) -> None:
+        self._clear_stretch()
         if self.solo != -1 and self.solo < len(self.panes):
             # Un seul panneau occupe tout : les autres se retirent de la
             # grille, ils reviendront tels quels.
@@ -498,7 +571,7 @@ class SplitWall(QWidget):
             self._shape = (1, 1)
             self._mark_choices()
             return
-        rows, cols = grid_for(len(self.panes), self.orientation,
+        rows, cols = grid_for(len(self.panes), self.shape or self.orientation,
                               self.row.width(), self.row.height())
         self._shape = (rows, cols)
         for pane in self.panes:
@@ -616,11 +689,8 @@ class SplitWall(QWidget):
         for pane in self.panes:
             pane.peek_end()
             pane.stop()
+            pane.hide_overlays()
 
     def end_peeks(self) -> None:
         for pane in self.panes:
             pane.peek_end()
-
-    def hideEvent(self, event):
-        super().hideEvent(event)
-        self.stop()

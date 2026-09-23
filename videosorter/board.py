@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from .perf import mark
 from .scan import MODE_FOLDERS, human_duration, human_resolution, human_size
-from .widgets import PlayMarks, elide
+from .widgets import Expiring, PlayMarks, elide
 
 RATING_STYLE = ("QLabel { color: #f5c542; background: rgba(8, 10, 13, 190);"
                 " border-radius: 4px; padding: 0 5px; font-size: 14px;"
@@ -403,6 +403,9 @@ class BoardView(QWidget):
         self.scroll.setObjectName("boardScroll")
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
+        # Jamais de defilement horizontal : les cartes se calculent sur la
+        # largeur, barre verticale comprise.
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.canvas = QWidget()
         self.grid = QGridLayout(self.canvas)
         self.grid.setContentsMargins(0, 0, 0, 0)
@@ -444,7 +447,7 @@ class BoardView(QWidget):
         self.player.errorOccurred.connect(self._on_error)
         self._pending_seek = 0
         self._segment_start = 0
-        self.unplayable: set = set()
+        self.unplayable = Expiring()
 
         # Les vignettes ne sont fabriquees que pour les cartes reellement a
         # l ecran : en demander soixante d un coup saturait le reseau avant que
@@ -758,6 +761,12 @@ class BoardView(QWidget):
 
     def _card_width(self) -> int:
         available = self.scroll.viewport().width() - CARD_GAP * (self.columns + 1)
+        bar = self.scroll.verticalScrollBar()
+        if not bar.isVisible():
+            # La barre verticale viendra des qu'il y aura plus d'une rangee :
+            # sa place est reservee d'avance, sinon la derniere colonne
+            # passait sous le bord.
+            available -= bar.sizeHint().width()
         return max(MIN_CARD_WIDTH, available // max(1, self.columns))
 
     def set_columns(self, columns: int) -> None:

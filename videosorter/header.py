@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
+from .icons import dress
 from .widgets import FlowLayout
 
 # Trois facons de regarder la meme collection. Ce ne sont pas trois
@@ -65,6 +66,12 @@ QPushButton#stepper { background: #14181e; border: 1px solid #2b323d;
 QPushButton#stepper:hover { background: #262c35; border-color: #39414d;
                             color: #ffffff; }
 QPushButton#stepper:disabled { color: #4a515c; border-color: #1d222a; }
+QPushButton#lineAction { background: #1a1f27; border: 1px solid #2b323d;
+                         border-radius: 6px; padding: 4px 11px 4px 8px;
+                         color: #cdd5df; font-size: 13px; }
+QPushButton#lineAction:hover { background: #242a33; border-color: #5a6474;
+                               color: #ffffff; }
+QPushButton#lineAction:checked { background: #1d2a40; border-color: #4c8dff; }
 QLabel#counter { color: #9fb0c4; font-size: 13px; }
 QLabel#segmentLabel { color: #6f7885; font-size: 12px; }
 QPushButton#crumb { background: transparent; border: 0; padding: 3px 6px;
@@ -72,6 +79,7 @@ QPushButton#crumb { background: transparent; border: 0; padding: 3px 6px;
 QPushButton#crumb:hover { color: #ffffff; text-decoration: underline; }
 QPushButton#crumb[last="true"] { color: #ffffff; font-weight: 600; }
 QLabel#crumbSep { color: #4d5563; font-size: 14px; }
+QLabel#crumb { color: #ffffff; font-weight: 600; font-size: 14px; }
 """
 
 
@@ -167,7 +175,7 @@ class SortChips(QWidget):
     chosen = Signal(str)
 
     CRITERIA = (("duration", "Durée"), ("size", "Taille"),
-                ("stars", "Note"), ("resolution", "Résolution"))
+                ("resolution", "Résolution"))
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -239,10 +247,19 @@ class Breadcrumb(QWidget):
         if self.layout_.count():
             # Le ressort final, pose par set_path, doit rester en queue.
             item = self.layout_.takeAt(self.layout_.count() - 1)
+            # Seul le dernier segment est en gras : celui qu'on regarde.
+            for index in range(self.layout_.count()):
+                widget = self.layout_.itemAt(index).widget()
+                if widget is not None and widget.property("last") == "true":
+                    widget.setProperty("last", "false")
+                    widget.style().unpolish(widget)
+                    widget.style().polish(widget)
             separator = QLabel("›", self)
             separator.setObjectName("crumbSep")
             self.layout_.addWidget(separator)
-            label = QLabel(text, self)
+            label = QLabel(text if len(text) <= 70 else text[:67] + "…", self)
+            label.setToolTip(text)
+            label.setContentsMargins(6, 0, 4, 0)
             label.setObjectName("crumb")
             label.setProperty("last", "true")
             self.layout_.addWidget(label)
@@ -425,13 +442,14 @@ class ControlBar(QWidget):
             field.textChanged.connect(lambda _t: self.timer.start())
             row.addWidget(field)
 
-        self.random_here = _button("⚄", self.randomHere.emit)
+        # Le hasard dans ce qu'on regarde : les resultats des filtres, ou le
+        # dossier ou l'on est entre. Il ne parait que la ; sans filtre, le
+        # hasard general, en haut, fait deja l'affaire.
+        self.random_here = _button("", self.randomHere.emit)
         self.random_here.setObjectName("sortChip")
-        # Le de doit se lire : a douze points, on ne le reconnaissait pas.
-        self.random_here.setStyleSheet("font-size: 17px; padding: 0 9px;")
-        self.random_here.setToolTip("Un élément au hasard, dans cette liste")
+        dress(self.random_here, "shuffle", 17, "Au hasard")
+        self.random_here.setToolTip("Une vidéo au hasard, parmi celles affichées")
         self.random_here.hide()
-        row.addWidget(self.random_here)
 
         # La densite se regle comme on regle un zoom : deux boutons et le
         # chiffre entre eux. Une liste deroulante et son etiquette « par rangee »
@@ -463,10 +481,11 @@ class ControlBar(QWidget):
         self.columns_label.setAlignment(Qt.AlignCenter)
         self.columns_label.setFixedWidth(24)
         self.columns_label.setToolTip("Vignettes par rangée")
-        for widget, tip in ((self.wider, "Des vignettes plus grandes"),
-                            (self.tighter, "Des vignettes plus petites")):
+        for widget, tip, name in ((self.wider, "Des vignettes plus grandes", "minus"),
+                                  (self.tighter, "Des vignettes plus petites", "plus")):
             widget.setObjectName("stepper")
-            widget.setFixedSize(26, 24)
+            widget.setFixedSize(30, 28)
+            dress(widget, name, 18)
             widget.setToolTip(tip)
             widget.setCursor(Qt.PointingHandCursor)
         # Conserve pour les appels existants, sans occuper l'ecran.
@@ -494,15 +513,17 @@ class ControlBar(QWidget):
         self.count.setObjectName("counter")
         self.previous = _button("◂", self.previousPage.emit)
         self.next = _button("▸", self.nextPage.emit)
-        for widget, tip in ((self.previous, "Page précédente"),
-                            (self.next, "Page suivante")):
+        for widget, tip, name in ((self.previous, "Page précédente", "chevron-left"),
+                                  (self.next, "Page suivante", "chevron-right")):
             widget.setObjectName("stepper")
-            widget.setFixedSize(26, 24)
+            widget.setFixedSize(30, 28)
+            dress(widget, name, 20)
             widget.setToolTip(tip)
             widget.setCursor(Qt.PointingHandCursor)
         row.addWidget(self.previous)
         row.addWidget(self.count)
         row.addWidget(self.next)
+        row.addWidget(self.random_here)
 
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
@@ -668,15 +689,15 @@ class ControlBar(QWidget):
         wall = mode == "wall"
         folders = mode == "folders"
         self.sorts.setVisible(not wall)
-        self.sorts.buttons["stars"].setVisible(not folders)
         self.rating_pick.setVisible(not wall)
         self.unseen.setVisible(not wall and not folders)
         self.format_button.setVisible(not wall and not folders)
         self.folder_min.setVisible(folders)
         self.folder_max.setVisible(folders)
-        self.column_chips.setVisible(folders and browsing)
+        # Le meme reglage − 5 + sur toutes les planches, dossiers compris.
+        self.column_chips.hide()
         for widget in (self.wider, self.columns_label, self.tighter):
-            widget.setVisible(browsing and not wall and not folders)
+            widget.setVisible(browsing and not wall)
         for widget in (self.previous, self.next):
             widget.setVisible(browsing and not wall)
         self.count.setVisible(not wall and bool(self.count.text()))
@@ -747,6 +768,31 @@ def _button(text: str, slot) -> QPushButton:
     return button
 
 
+# Une icone par entree du menu : on retrouve une ligne a sa forme, sans
+# relire toute la liste.
+MENU_ICONS = (
+    ("Destinations", "folder-input"), ("Mots-clés", "tags"),
+    ("Corbeille", "trash-2"), ("Arborescence", "folder-tree"),
+    ("Recherche vidéo sur le web", "globe"), ("vignettes", "images"),
+    ("Compter", "hash"), ("État des vignettes", "gauge"),
+    ("titres", "captions"), ("plans", "film"), ("doublons", "copy"),
+    ("Doublons", "copy"), ("Empreintes", "fingerprint"), ("Rafale", "timer"),
+    ("Raccourcis", "keyboard"), ("gels", "activity"),
+    ("dossiers masqués", "eye-off"), ("Partage", "share-2"),
+    ("Où sont", "hard-drive"), ("mise à l'échelle", "monitor"),
+    ("Réanalyser", "refresh-cw"), ("racine", "folder-cog"),
+    ("Enregistrer", "bookmark-plus"), ("enregistrées", "bookmark"),
+)
+
+
+def menu_icon(text: str):
+    from .icons import icon
+    for needle, name in MENU_ICONS:
+        if needle in text:
+            return icon(name)
+    return None
+
+
 def build_overflow(parent, entries: list) -> QMenu:
     """Regroupe ce qui ne sert qu'occasionnellement derrière un seul bouton."""
     menu = QMenu(parent)
@@ -754,5 +800,8 @@ def build_overflow(parent, entries: list) -> QMenu:
         if text == "-":
             menu.addSeparator()
             continue
-        menu.addAction(text, slot)
+        action = menu.addAction(text, slot)
+        found = menu_icon(text)
+        if found is not None:
+            action.setIcon(found)
     return menu

@@ -425,11 +425,15 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(window.mode == MODE_FOLDERS, "on part du mode dossiers")
     check(not hasattr(window, "enter_button"),
           "plus de gros bouton « Entrer » : le titre du dossier en tient lieu")
-    check(window.item_title.cursor().shape() == Qt.PointingHandCursor,
-          "le titre d'un dossier se signale comme cliquable")
+    from PySide6.QtWidgets import QPushButton as _Crumb
+    pump(app, 0.2)
+    last = [b for b in window.crumbs.findChildren(_Crumb)
+            if b.isVisible() and b.property("last") == "true"]
+    check(last and last[0].text() == "Anniversaire",
+          "le dossier regardé finit le fil d'Ariane, une seule fois")
     check(window.levels == [], "on est bien au niveau racine")
 
-    QTest.mouseClick(window.item_title, Qt.LeftButton)
+    QTest.mouseClick(last[0], Qt.LeftButton)
     ok = wait_for(app, lambda: not window.scanning and window.root == parent_item.path, 60)
     check(ok, "la racine devient le dossier sur lequel on était")
     check(window.mode == MODE_FLAT,
@@ -889,8 +893,10 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     chips.buttons["size"].click()
     check(modes[-1] == "size_desc", "la taille se classe pareil")
-    chips.buttons["stars"].click()
-    check(modes[-1] == "stars_desc", "et la note")
+    check("stars" not in chips.buttons,
+          "une seule « Note » : celle des étoiles, qui filtre")
+    chips.buttons["resolution"].click()
+    check(modes[-1] == "resolution_desc", "la résolution se classe pareil")
     check(chips.buttons["size"].property("chosen") == "false",
           "un seul critère à la fois")
 
@@ -2559,8 +2565,16 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "le mur joue plusieurs vidéos")
     from PySide6.QtWidgets import QPushButton as _QPB
     gestes = window.wall.panes[1].bar.findChildren(_QPB)
-    check(len(gestes) == 4,
-          f"chaque panneau porte quatre gestes : ▸ ⚄ ⤢ ⛶ ({len(gestes)})")
+    check(len(gestes) == 6,
+          f"le bandeau d'un panneau pilote tout : ◂ ⏯ ▸ ⚄ ⤢ ⛶ ({len(gestes)})")
+    pane = window.wall.panes[1]
+    first_video = pane.video_path
+    window.wall.refill_one(1)
+    pump(app, 0.3)
+    pane._previous()
+    pump(app, 0.3)
+    check(pane.video_path == first_video,
+          "« précédente » ramène la vidéo d'avant, dans ce panneau")
 
     window.wall.toggle_solo(1)
     pump(app, 0.4)
@@ -2956,8 +2970,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "le bandeau du lecteur de côté flotte au-dessus de l'image")
     check(window.aside_bar.parent() is window or window.aside_bar.isWindow(),
           "c'est une fenêtre à part — la seule chose qui passe devant la vidéo")
-    check(window.aside_bar.buttons.count() == 4,
-          f"il porte ses quatre gestes ({window.aside_bar.buttons.count()})")
+    check(window.aside_bar.buttons.count() == 5,
+          f"il porte ses cinq gestes, précédente et pause compris "
+          f"({window.aside_bar.buttons.count()})")
+    check(window.single_bar.buttons.count() == 5,
+          "le bandeau de la fiche aussi : ◂ ⏯ ▸ ⌸ ⛶")
     gestes = window.aside_bar.skin.findChildren(QPushButton)
     check(gestes and all(b.width() >= 28 and b.height() >= 22 for b in gestes),
           "dont les signes ont la place de se voir")
@@ -3041,12 +3058,24 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.5)
     folder = window.current
     check(window.controls.isHidden() and not window.item_card.isHidden(),
-          "sur une fiche, la seconde ligne est celle du titre")
-    check(window.item_title.text() == folder.name and window.item_title.width() > 60,
-          f"et le titre se voit ({window.item_title.text()!r}, "
-          f"{window.item_title.width()} px)")
-    check(not window.bottom_bar.isHidden() and window.stars.isHidden(),
-          "une ligne en bas ; pas d'étoiles pour un dossier")
+          "sur une fiche, la seconde ligne dit ce qu'on regarde")
+    check("vidéo" in window.item_subtitle.text() and window.item_subtitle.isVisible(),
+          f"poids, nombre de vidéos, date ({window.item_subtitle.text()!r})")
+    check(not window.bottom_bar.isHidden() and not window.stars.isHidden(),
+          "une ligne en bas, et les étoiles : un dossier se note aussi")
+    window.ratings.set(folder.path, 0)
+    window.rate_current(4)
+    check(window.ratings.get(folder.path) == 4, "la note d'un dossier est retenue")
+    window.ratings.set(folder.path, 0)
+    check(window.random_here_button.text() == "Au hasard ici"
+          and window.reveal_button.text() == "Ouvrir le dossier",
+          "de vrais boutons, qui disent ce qu'ils font")
+    window.go_parent()
+    pump(app, 0.3)
+    check(window.browsing, "« remonter » depuis la fiche d'un dossier rend la liste")
+    window.toggle_board(False)
+    window.show_item(position)
+    pump(app, 0.3)
     check(not window.grid_chips.isHidden(), "le nombre d'aperçus est sur la ligne du titre")
     check(all(t.badge.isHidden() for t in window.grid.tiles),
           "les cases ne portent plus de numéro")
@@ -3062,6 +3091,14 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "de 4 à 10 aperçus, les premières vidéos restent les mêmes")
 
     check(5 in PANE_CHOICES, "le mur propose cinq vidéos")
+    check(window.wall.count_stepper.choices == list(PANE_CHOICES),
+          "et se règle avec le même − n + que le reste")
+    from videosorter.widgets import Expiring
+    gone = Expiring()
+    gone.add("x.mp4")
+    check("x.mp4" in gone, "une vidéo illisible est écartée un moment")
+    gone["x.mp4"] -= Expiring.TTL + 1
+    check("x.mp4" not in gone, "puis retentée : un réseau qui décroche ne la condamne pas")
     window.controls.set_stars(3)
     check(window.controls.rating_pick.text() == "★ 3"
           and window.controls.rating_choices[3].property("chosen") == "true",
@@ -3131,6 +3168,43 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
               "et « Vidéos » mène aux vidéos, d'un seul clic")
     else:
         check(False, "des mots fréquents sont trouvés")
+    tab_click(TAB_FOLDERS)
+
+    print("\n[79] Un seul chemin vers chaque niveau, un mur qui prend la place")
+    from videosorter.scan import MAX_VIDEOS_PER_ITEM
+    check(MAX_VIDEOS_PER_ITEM > 100_000,
+          "un dossier retient toutes ses vidéos, pas les quatre cents premières")
+    tab_click(TAB_VIDEOS)
+    window.reset_filters()
+    pump(app, 0.3)
+    check(window.controls.random_here.isHidden(),
+          "sans filtre, pas de second « au hasard » : celui du haut suffit")
+    window.set_only_unseen(True)
+    pump(app, 0.3)
+    check(not window.controls.random_here.isHidden() or not window.items,
+          "avec un filtre, le hasard dans les résultats paraît")
+    window.set_only_unseen(False)
+    window._wall_pinned = [str(i.path) for i in window.items[:3] if i.videos]
+    if window._wall_pinned:
+        window.set_tab(TAB_SPLIT)
+        window.set_wall_count(10)
+        pump(app, 0.3)
+        window.set_wall_count(3)
+        pump(app, 0.3)
+        grid = window.wall.grid
+        rows, cols = window.wall._shape
+        stretched = [c for c in range(grid.columnCount()) if grid.columnStretch(c)]
+        check(len(stretched) == cols,
+              f"trois vidéos après dix : aucune colonne fantôme ({stretched}, {cols})")
+        target = window._wall_pinned[0]
+        window.open_video_path(target)
+        wait_for(app, lambda: not window.scanning and window.current is not None
+                 and str(window.current.path) == target, 30)
+        check(window.tab != TAB_SPLIT and not window.browsing
+              and str(window.current.path) == target,
+              "« sa fiche » depuis le mur : la fiche de toujours, au niveau fichier")
+        check(not window.stars.isHidden() and not window.bottom_bar.isHidden(),
+              "avec ses étoiles et ses commandes")
     tab_click(TAB_FOLDERS)
 
 

@@ -63,8 +63,9 @@ from .search_dialog import WebSearchDialog
 from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
+from .icons import dress, icon
 from .widgets import (
-    OverBar, PeekOverlay, RadialMenu, app_icon, draw_icon,
+    Stepper, OverBar, PeekOverlay, RadialMenu, app_icon, draw_icon,
     STYLESHEET, CommandBar, DestinationsDialog, PreviewGrid, SinglePlayer,
     StarStrip, TagsDialog, TrashDialog,
 )
@@ -188,6 +189,8 @@ class MainWindow(QMainWindow):
         self._plain_root = None
         # Le cinema : la video seule, sans rien autour.
         self.cinema = False
+        # Ce que le fil d'Ariane ajoute au bout de la liste : le mot-cle ouvert.
+        self._list_leaf = ""
         # La racine que l on a choisie : le fil d Ariane en part toujours,
         # quels que soient les onglets traverses depuis.
         self.origin = Path(cfg["root"]) if cfg["root"] else None
@@ -383,7 +386,8 @@ class MainWindow(QMainWindow):
         self.state_button.clicked.connect(self.verify_collection)
         row_one.addWidget(self.state_button, 0)
 
-        self.random_button = QPushButton("⚄  Aléatoire", sort_page)
+        self.random_button = QPushButton("", sort_page)
+        dress(self.random_button, "dices", 18, "Aléatoire")
         self.random_button.setObjectName("random")
         self.random_button.setToolTip("Une vidéo au hasard, dans toute la "
                                       "collection   (Ctrl+H)")
@@ -423,11 +427,12 @@ class MainWindow(QMainWindow):
         self.quiet_button.clicked.connect(self.enter_quiet)
         row_one.addWidget(self.quiet_button, 0)
 
-        self.more_button = QPushButton("⋯", sort_page)
+        self.more_button = QPushButton("", sort_page)
         self.more_button.setFixedWidth(42)
-        # Trois points a treize points de corps : on ne voyait qu'une poussiere.
-        self.more_button.setStyleSheet("font-size: 20px; font-weight: 700;"
-                                       " padding: 0 0 4px 0;")
+        dress(self.more_button, "ellipsis", 22)
+        # La petite fleche de menu n'apprenait rien et mangeait la place.
+        self.more_button.setStyleSheet(
+            "QPushButton::menu-indicator { image: none; width: 0px; }")
         self.more_button.setToolTip("Destinations, corbeille, arborescence…")
         self.more_button.setFocusPolicy(Qt.NoFocus)
         self.overflow = build_overflow(self, [
@@ -465,8 +470,10 @@ class MainWindow(QMainWindow):
         # sous un nom. Le langage de recherche existait, il manquait de le
         # retenir.
         self.overflow.addSeparator()
-        self.overflow.addAction("Enregistrer cette recherche…", self.save_search)
-        self.searches_menu = self.overflow.addMenu("Recherches enregistrées")
+        self.overflow.addAction(icon("bookmark-plus"), "Enregistrer cette recherche…",
+                                self.save_search)
+        self.searches_menu = self.overflow.addMenu(icon("bookmark"),
+                                                   "Recherches enregistrées")
         self.searches_menu.aboutToShow.connect(self._fill_searches_menu)
         self.more_button.setMenu(self.overflow)
         self._name_backfill_action()
@@ -475,13 +482,14 @@ class MainWindow(QMainWindow):
 
         # -- deuxieme ligne : ce qui se regle ici ---------------------------
         self.tag_chips = Chips([
-            ("mine", "Mes mots-clés", "Ceux que vous avez saisis"),
-            ("top", "Mots fréquents", "Les mots qui reviennent le plus dans vos noms"),
+            ("mine", "Mes mots", "Mes mots-clés : ceux que vous avez saisis"),
+            ("top", "Fréquents", "Les cent mots qui reviennent le plus dans vos noms"),
         ], sort_page)
         self.tag_chips.chosen.connect(self.set_tag_family)
         # Le seul endroit ou l'on pense a ses mots-cles est celui ou on les
         # regarde : les faire chercher dans un menu n'avait pas de sens.
-        self.tags_button = QPushButton("＋", sort_page)
+        self.tags_button = QPushButton("", sort_page)
+        dress(self.tags_button, "plus", 18)
         self.tags_button.setFixedWidth(34)
         self.tags_button.setToolTip(
             "Mes mots-clés : un mot par ligne. Chacun réunit les vidéos "
@@ -490,8 +498,11 @@ class MainWindow(QMainWindow):
         self.tags_button.clicked.connect(self.edit_tags)
         self.tags_button.hide()
         self.tag_chips.hide()
-        row_two.addWidget(self.tag_chips, 0)
-        row_two.addWidget(self.tags_button, 0)
+        # Les deux familles de mots-cles sont un sous-onglet : elles vont a
+        # cote des onglets, pas sur la ligne des filtres, qu'elles faisaient
+        # deborder sur une troisieme ligne.
+        row_one.insertWidget(1, self.tag_chips, 0)
+        row_one.insertWidget(2, self.tags_button, 0)
 
         self.controls = ControlBar(COLUMN_CHOICES, sort_page)
         self.controls.changed.connect(self.on_controls_changed)
@@ -548,81 +559,56 @@ class MainWindow(QMainWindow):
         # En bout de la ligne des filtres, pas sur une ligne a elle.
         row_two.addWidget(self.picked_bar, 0)
 
-        # Sur une fiche, la seconde ligne est celle du titre : le nom, ce
-        # qu'on en sait, et les gestes qui s'y rapportent — ouvrir le
-        # dossier, le cinema, le hasard local, le nombre d'apercus.
+        # Sur une fiche, la seconde ligne est la meme pour tout ce qu'on
+        # regarde — video, dossier, mot-cle : ce qu'on en sait a gauche, les
+        # gestes a droite. Le nom, lui, est au bout du fil d'Ariane, une
+        # seule fois : il y etait deja, et la ligne le repetait en gros.
         header = QFrame(sort_page)
         header.setObjectName("titleLine")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(2, 0, 0, 0)
-        header_layout.setSpacing(10)
+        header_layout.setSpacing(8)
+        # Garde pour les appels existants ; le nom se lit dans le fil.
         self.item_title = QLabel("—", header)
         self.item_title.setObjectName("title")
-        self.item_title.setTextFormat(Qt.PlainText)
-        # Le titre prend la place qui reste, et se coupe plutot que d'elargir
-        # la fenetre. Dans une disposition qui passait a la ligne, la meme
-        # politique lui donnait zero pixel : il etait la, et invisible.
-        self.item_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.item_title.setMinimumWidth(80)
-        self.item_title.installEventFilter(self)
+        self.item_title.hide()
         self.item_parent = QLabel("", header)
         self.item_parent.setObjectName("parentPath")
         self.item_parent.hide()
         self.item_subtitle = QLabel("", header)
         self.item_subtitle.setObjectName("subtitle")
-        self.item_subtitle.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
-        self.item_subtitle.setMinimumWidth(40)
-        header_layout.addWidget(self.item_title, 1)
-        header_layout.addWidget(self.item_subtitle, 0)
+        self.item_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.item_subtitle.setMinimumWidth(60)
+        header_layout.addWidget(self.item_subtitle, 1)
 
-        # Ouvrir l'explorateur **sur** le fichier, pas seulement sur son
-        # dossier : on le retrouve deja selectionne, pret a etre glisse,
-        # renomme ou copie.
-        self.reveal_button = QPushButton("⌸", header)
-        self.reveal_button.setObjectName("paneGesture")
-        self.reveal_button.setFixedSize(30, 24)
-        self.reveal_button.setToolTip(
-            "Ouvrir le dossier, le fichier déjà sélectionné   (Ctrl+E)")
-        self.reveal_button.setFocusPolicy(Qt.NoFocus)
-        self.reveal_button.clicked.connect(self.reveal_current)
-        header_layout.addWidget(self.reveal_button, 0)
-
-        self.cinema_button = QPushButton("⛶", header)
-        self.cinema_button.setObjectName("paneGesture")
-        self.cinema_button.setFixedSize(30, 24)
-        self.cinema_button.setCheckable(True)
-        self.cinema_button.setToolTip(
-            "Cinéma : l'image seule, sans rien autour   (Ctrl+J)")
-        self.cinema_button.setFocusPolicy(Qt.NoFocus)
-        self.cinema_button.clicked.connect(self.toggle_cinema)
-        self.cinema_button.hide()
-        header_layout.addWidget(self.cinema_button, 0)
-
-        # Le hasard dans l'element affiche seulement : un signe, pas un
-        # bandeau de toute la largeur sous l'image.
-        self.random_here_button = QPushButton("⚄", header)
-        self.random_here_button.setObjectName("paneGesture")
-        self.random_here_button.setFixedSize(30, 24)
-        self.random_here_button.setToolTip(
-            "Une vidéo au hasard, dans ce dossier seulement")
-        self.random_here_button.setFocusPolicy(Qt.NoFocus)
-        self.random_here_button.clicked.connect(self.pick_random_here)
-        header_layout.addWidget(self.random_here_button, 0)
-
-        # Dans un dossier : combien d'apercus a la fois. Meme geste que le mur.
-        self.grid_chips = QWidget(header)
-        grid_row = QHBoxLayout(self.grid_chips)
-        grid_row.setContentsMargins(0, 0, 0, 0)
-        grid_row.setSpacing(4)
-        self.grid_count_buttons: dict = {}
-        for count in (2, 4, 6, 8, 10):
-            button = QPushButton(str(count), self.grid_chips)
-            button.setObjectName("splitButton")
+        def action(name: str, text: str, tip: str, slot) -> QPushButton:
+            button = QPushButton("", header)
+            button.setObjectName("lineAction")
+            dress(button, name, 18, text)
+            button.setToolTip(tip)
             button.setFocusPolicy(Qt.NoFocus)
-            button.setToolTip(f"{count} aperçus à la fois")
-            button.clicked.connect(lambda _c=False, n=count: self.set_thumb_count(n))
-            grid_row.addWidget(button)
-            self.grid_count_buttons[count] = button
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(slot)
+            header_layout.addWidget(button, 0)
+            return button
+
+        # Ouvrir l'explorateur : sur le dossier lui-meme pour un dossier, sur
+        # le fichier deja selectionne pour une video.
+        self.reveal_button = action(
+            "folder-open", "Ouvrir le dossier",
+            "Ouvrir dans l'explorateur   (Ctrl+E)", self.reveal_current)
+        self.random_here_button = action(
+            "shuffle", "Au hasard ici",
+            "Une vidéo au hasard, dans ce dossier seulement", self.pick_random_here)
+        self.cinema_button = action(
+            "maximize", "Cinéma",
+            "L'image seule, sans rien autour   (Ctrl+J)", self.toggle_cinema)
+        self.cinema_button.setCheckable(True)
+        self.cinema_button.hide()
+        # Combien d'apercus a la fois : le meme − n + que partout.
+        self.grid_chips = Stepper((2, 4, 6, 8, 10), "Aperçus à la fois",
+                                  "Aperçus", header)
+        self.grid_chips.chosen.connect(self.set_thumb_count)
         self.grid_chips.hide()
         header_layout.addWidget(self.grid_chips, 0)
         self._mark_grid_count()
@@ -697,6 +683,7 @@ class MainWindow(QMainWindow):
             self.cfg["wall_panes"] or DEFAULT_PANES, self.cfg["scroll_seconds"],
             self.viewer, self.cfg["wall_orientation"] or "vertical")
         self.wall.opened.connect(self.open_video_path)
+        self.wall.set_muted(bool(self.cfg["muted"]))
         self.wall.countChanged.connect(self.set_wall_count)
         self.wall.orientationChanged.connect(self.set_wall_orientation)
         self.wall.fullscreenRequested.connect(self.toggle_wall_fullscreen)
@@ -731,7 +718,9 @@ class MainWindow(QMainWindow):
         self.single_bar = OverBar(self)
         for text, tip, slot in (
             ("◂", "Précédente   (←)", lambda: self.step(-1)),
+            ("⏯", "Pause, ou reprendre   (Entrée)", self.single.toggle_pause),
             ("▸", "Suivante   (→)", lambda: self.step(1)),
+            ("⌸", "Ouvrir dans l'explorateur   (Ctrl+E)", self.reveal_current),
             ("⛶", "Cinéma   (Ctrl+J)", self.toggle_cinema),
         ):
             self.single_bar.add_gesture(text, tip, slot)
@@ -761,6 +750,7 @@ class MainWindow(QMainWindow):
         self.aside_title = self.aside_bar.name
         for text, tip, slot in (
             ("◂", "Précédente", lambda: self.aside_step(-1)),
+            ("⏯", "Pause, ou reprendre", self.aside_player.toggle_pause),
             ("▸", "Suivante", lambda: self.aside_step(1)),
             ("⛶", "Plein écran", self.aside_fullscreen),
             ("✕", "Fermer le lecteur", self.close_aside),
@@ -781,14 +771,16 @@ class MainWindow(QMainWindow):
 
         # Une seule ligne sous l'image, et seulement sur une fiche : reculer,
         # les touches qui decident, la note, avancer.
-        self.prev_button = QPushButton("◂", sort_page)
+        self.prev_button = QPushButton("", sort_page)
+        dress(self.prev_button, "chevron-left", 20)
         self.prev_button.setToolTip("Élément précédent   (←)")
-        self.prev_button.setFixedWidth(30)
+        self.prev_button.setFixedWidth(34)
         self.prev_button.setFocusPolicy(Qt.NoFocus)
         self.prev_button.clicked.connect(lambda: self.step(-1))
-        self.next_button = QPushButton("▸", sort_page)
+        self.next_button = QPushButton("", sort_page)
+        dress(self.next_button, "chevron-right", 20)
         self.next_button.setToolTip("Élément suivant   (→)")
-        self.next_button.setFixedWidth(30)
+        self.next_button.setFixedWidth(34)
         self.next_button.setFocusPolicy(Qt.NoFocus)
         self.next_button.clicked.connect(lambda: self.step(1))
 
@@ -961,6 +953,7 @@ class MainWindow(QMainWindow):
         # Le fil part de la racine choisie, et non du premier niveau empile :
         # changer d'onglet vidait la pile, et le fil se reduisait alors au seul
         # dossier courant — on ne pouvait plus remonter.
+        self._list_leaf = ""
         self.crumbs.set_path(self._origin_for(self.root), self.root)
         self._apply_selectors()
         self.commands.rebuild(self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer"))
@@ -1532,11 +1525,10 @@ class MainWindow(QMainWindow):
         self.index = 0
         self.start_harvest()
         self._apply_selectors()
-        self.crumbs.set_path(
-            self.top_root(), self.root
-        )
         # Un mot-cle n'est pas un dossier : sans ce rappel, le fil d'Ariane
         # restait sur la racine et l'on ne savait plus ce qu'on regardait.
+        self._list_leaf = item.name
+        self.crumbs.set_path(self.top_root(), self.root)
         self.crumbs.append_leaf(item.name)
         self.show_banner(
             f"{len(self.items)} vidéo(s) portant « {item.path.name} »", "info"
@@ -1548,6 +1540,11 @@ class MainWindow(QMainWindow):
 
     def go_parent(self) -> None:
         """Remonte d'un cran : par ou l'on est venu, sinon vers le parent reel."""
+        if not self.browsing and self.tab != TAB_SPLIT:
+            # Sur la fiche d'un dossier, « remonter » rend la liste d'ou on
+            # l'a ouverte. Le bouton ne faisait rien : on etait deja, pour
+            # lui, a la racine.
+            return self.show_board_at(self.index)
         if self.go_up():
             return
         if self.root is None:
@@ -1884,7 +1881,7 @@ class MainWindow(QMainWindow):
             self.item_title.setText("Aucun mot-clé")
             self.item_subtitle.setText(
                 "Ajoutez les vôtres par « ⋯ › Mots-clés automatiques… », ou "
-                "choisissez « Mots fréquents » pour les laisser deviner."
+                "choisissez « Fréquents » pour les laisser deviner."
                 if self.tag_family == "mine"
                 else "Aucun mot ne revient assez souvent dans ces noms de fichiers."
             )
@@ -2011,8 +2008,8 @@ class MainWindow(QMainWindow):
             self.item_title.setText(item.name)
             # Le compte de fichiers melait aux videos les images et les textes
             # qui trainent a cote : on ne trie pas ceux-la.
-            parts = [
-                human_size(item.size),
+            # Un mot-cle n'a pas de poids connu : « 0 o » ne disait rien.
+            parts = ([human_size(item.size)] if item.size else []) + [
                 f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}",
             ]
             if item.subdir_count:
@@ -2620,6 +2617,12 @@ class MainWindow(QMainWindow):
         except ValueError:
             folder = self.root or top
         self.crumbs.set_path(top, folder)
+        # Le nom de ce qu'on regarde finit le fil, une seule fois : un
+        # dossier y est deja ; une video et un mot-cle s'y ajoutent.
+        if item.is_tag:
+            self.crumbs.append_leaf(item.name)
+        elif item.kind != MODE_FOLDERS:
+            self.crumbs.append_leaf(item.name)
 
         if item.pending:
             self.show_banner(f"Transfert en cours vers {item.status_detail}…", "info")
@@ -2684,7 +2687,47 @@ class MainWindow(QMainWindow):
     def total_pages(self, item) -> int:
         if item.kind != MODE_FOLDERS:
             return 1
-        return page_count(item.videos, self.cfg["thumb_count"])
+        return page_count(self._preview_videos(item), self.cfg["thumb_count"])
+
+    def _preview_videos(self, item) -> list:
+        """Les videos d'un dossier ou d'un mot-cle qui passent les filtres.
+
+        Poser « verticales, cinq etoiles » puis ouvrir un mot-cle doit montrer
+        ses videos verticales a cinq etoiles, et non toutes. La recherche par
+        nom, elle, a deja choisi le mot-cle : on ne la reapplique pas dedans.
+        """
+        if item.kind != MODE_FOLDERS or not item.videos:
+            return item.videos
+        rules = self.criteria or {}
+        pick = rules.get("stars_pick", -1)
+        pick = -1 if pick is None else pick
+        wanted = rules.get("orientations")
+        narrowing = (bool(self.cfg["only_unseen"])
+                     or (wanted is not None and len(wanted) == 1)
+                     or bool(rules.get("duration_op"))
+                     or rules.get("resolution", 0) > 0
+                     or (pick >= 0 and self.tab != TAB_FOLDERS))
+        if not narrowing:
+            return item.videos
+        key = (item.item_id, len(item.videos), repr(sorted(rules.items())),
+               bool(self.cfg["only_unseen"]), self.tab)
+        cache = self.__dict__.setdefault("_preview_cache", {})
+        if key in cache:
+            return cache[key]
+        keep = self._matcher(ignore_text=True)
+        flat = self._flat_cache
+        kept = []
+        for video in item.videos:
+            probe = flat.get(str(video))
+            if probe is None:
+                probe = Item(path=Path(video), kind=MODE_FILES, videos=[video],
+                             video_count=1, file_count=1)
+            if keep(probe):
+                kept.append(video)
+        if len(cache) > 300:
+            cache.clear()
+        cache[key] = kept
+        return kept
 
     def _plan_key(self, item, page: int) -> str:
         """Identifiant porte par les signaux : il doit distinguer les pages."""
@@ -2707,9 +2750,14 @@ class MainWindow(QMainWindow):
                  else SinglePlayer.STRIP_COUNT)
         key = self._plan_key(item, page)
         plan = self.plans.get(key)
+        videos = self._preview_videos(item)
+        if not videos:
+            if current:
+                self.grid.set_no_videos("aucune vidéo ne passe les filtres")
+            return
         if plan is None:
             self.preview.request_plan(
-                key, item.videos, count,
+                key, videos, count,
                 page=page, one_per_video=item.kind == MODE_FOLDERS,
                 urgent=current,
                 blind=item.kind == MODE_FOLDERS,
@@ -2915,15 +2963,27 @@ class MainWindow(QMainWindow):
         else:
             item.videos.sort(key=lambda path: str(path).lower())
 
+    def _refresh_random_here(self) -> None:
+        """Le hasard « dans ce qu'on regarde » : seulement si l'on regarde une
+        partie — des resultats filtres, ou un dossier ou l'on est entre."""
+        narrowed = bool(self.levels) or bool(self._active_filters())
+        self.controls.random_here.setVisible(
+            self.browsing and self.tab != TAB_SPLIT and bool(self.items) and narrowed)
+
     def _show_counts(self) -> None:
         """Une seule ligne dit ce qui est montre, ce qui est masque, et ou l'on en est."""
         self.controls.set_filters(self._active_filters())
+        self._refresh_random_here()
         hidden = self._sortable_count() - len(self.items)
         if self.browsing:
             first, last = self.board._page_bounds()
-            shown = f"{first + 1 if self.items else 0}–{last} sur {len(self.items)}"
+            shown = (f"{first + 1 if self.items else 0}–{last} sur "
+                     f"{self._thousands(len(self.items))}")
+            self.controls.count.setToolTip(
+                f"{self._thousands(hidden)} élément(s) masqué(s) par les filtres"
+                if hidden else "")
             self.controls.set_page(
-                shown + (f"  ·  {hidden} filtrés" if hidden else ""),
+                shown,
                 self.board.page > 0,
                 self.board.page < self.board.total_pages() - 1,
             )
@@ -3188,10 +3248,7 @@ class MainWindow(QMainWindow):
             self.show_item(self.index)
 
     def _mark_grid_count(self) -> None:
-        for count, button in self.grid_count_buttons.items():
-            button.setProperty("chosen", "true" if count == self.cfg["thumb_count"] else "false")
-            button.style().unpolish(button)
-            button.style().polish(button)
+        self.grid_chips.set_value(int(self.cfg["thumb_count"]))
 
     def _active_filters(self) -> list:
         """Ce qui masque des elements en ce moment, en clair."""
@@ -3358,9 +3415,19 @@ class MainWindow(QMainWindow):
             self.backfill.pause()
         self.viewer.setCurrentWidget(self.wall)
         if self._wall_pinned:
+            tall = wide = 0
+            for video in self._wall_pinned:
+                info = INDEX.probe(video) or {}
+                width, height = info.get("width") or 0, info.get("height") or 0
+                if width and height:
+                    tall += height > width
+                    wide += width >= height
+            self.wall.set_shape("vertical" if tall > wide else
+                                "horizontal" if wide else None)
             self.wall.set_pool(self._wall_pinned)
             self.wall.set_caption(len(self.wall.pool), pinned=True)
         else:
+            self.wall.set_shape(None)
             pool, unknown = self.vertical_pool()
             heavy = 0
             if len(self.wall.panes) >= 4:
@@ -3389,7 +3456,19 @@ class MainWindow(QMainWindow):
         self.probe_for_wall()
 
     def open_video_path(self, path: str) -> None:
-        """Ouvre dans la fiche une vidéo désignée par son chemin."""
+        """Ouvre dans la fiche une vidéo désignée par son chemin.
+
+        Depuis le mur, on quitte le mur : la fiche d'une video est la meme
+        partout — son dossier, ses voisines, ses etoiles, ses destinations.
+        L'ouvrir sans changer d'onglet donnait une fiche amputee, ni notes ni
+        commandes, qui n'existait que la.
+        """
+        if self.tab == TAB_SPLIT:
+            if self.wall_full:
+                self.toggle_wall_fullscreen(False)
+            self.set_tab(TAB_FOLDERS)
+            self.play_in_app(path)
+            return
         for position, item in enumerate(self.items):
             if str(item.path) == path:
                 self.on_board_open(position)
@@ -3508,6 +3587,8 @@ class MainWindow(QMainWindow):
 
         top = self.top_root()
         if tab == TAB_SPLIT:
+            # Le fil ne porte plus la fiche qu'on vient de quitter.
+            self.crumbs.set_path(top, self.root)
             # Le mur ne change ni de dossier ni de mode : il regarde autrement
             # ce que l'on a deja sous la main.
             self.show_wall()
@@ -3778,6 +3859,12 @@ class MainWindow(QMainWindow):
         sheet = not self.browsing and not wall
         self.tag_chips.setVisible(self.tab == TAB_TAGS and not sheet)
         self.tags_button.setVisible(self.tab == TAB_TAGS and not sheet)
+        # Sur la premiere ligne, les familles de mots-cles prennent la place
+        # de l'etat de la collection, qui ne dit rien de plus ici.
+        if self.tab == TAB_TAGS and not sheet:
+            self.state_button.hide()
+        elif self.progress.isHidden():
+            self.state_button.show()
         self.controls.set_browsing(self.browsing)
         self.controls.set_mode({TAB_SPLIT: "wall", TAB_FOLDERS: "folders",
                                 TAB_TAGS: "tags"}.get(self.tab, "videos"))
@@ -3801,26 +3888,24 @@ class MainWindow(QMainWindow):
         # video, il la relancait, ce qui n'a aucun sens.
         self.random_here_button.setVisible(sheet and folder
                                            and bool(item.videos))
-        self.controls.random_here.setVisible(self.browsing and not wall
-                                             and bool(self.items))
+        self.reveal_button.setText(
+            "Ouvrir le dossier" if folder or (item is not None and item.is_tag)
+            else "Emplacement")
+        # Le hasard « dans ce qu'on regarde » n'a de sens que si l'on regarde
+        # une partie : des resultats filtres, ou un dossier ou l'on est entre.
+        self._refresh_random_here()
         # Un dossier s'ouvre d'un clic sur son titre : c'est la que l'on
         # vient de decider qu'il fallait y descendre.
-        if sheet and folder and not item.is_tag:
-            self.item_title.setCursor(Qt.PointingHandCursor)
-            self.item_title.setToolTip(
-                f"{item.name}\n\nCliquer pour entrer dans le dossier   (Ctrl+↓)")
-        else:
-            self.item_title.unsetCursor()
         # Une seule ligne sous l'image, et seulement sur une fiche.
         self.bottom_bar.setVisible(sheet and not self.cinema)
         for button in (self.prev_button, self.next_button):
             button.setVisible(bool(self.items))
-        self.stars.setVisible(sheet and item is not None
-                              and item.kind != MODE_FOLDERS)
+        # Les dossiers se notent comme les videos ; un mot-cle, non.
+        self.stars.setVisible(sheet and item is not None and not item.is_tag)
         root = self.root
         self.up_button.setEnabled(
-            bool(self.levels) or (root is not None
-                                  and Path(root).parent != Path(root)))
+            sheet or bool(self.levels)
+            or (root is not None and Path(root).parent != Path(root)))
 
     def _origin_for(self, current):
         """Le plus haut dossier dont `current` descend : la racine du fil."""
@@ -3848,7 +3933,14 @@ class MainWindow(QMainWindow):
         ramenée à ce qui reste au-dessus de lui.
         """
         target = Path(path)
+        item = self.current
+        if (not self.browsing and item is not None and item.kind == MODE_FOLDERS
+                and not item.is_tag and Path(item.path) == target):
+            return self.enter_current()
         if self.root is not None and target == self.root:
+            # Depuis une fiche, cliquer le dossier ou l'on est rend sa liste.
+            if not self.browsing:
+                self.show_board_at(self.index)
             return
         if not target.is_dir():
             self.show_banner(f"Introuvable : {target}", "error")
@@ -3885,6 +3977,8 @@ class MainWindow(QMainWindow):
         if self.root is not None:
             top = self.top_root()
             self.crumbs.set_path(top, self.root)
+            if self._list_leaf:
+                self.crumbs.append_leaf(self._list_leaf)
         self.item_subtitle.setText("")
         self.stars.hide()
         # En planche, la barre de pages compte les cartes et non les apercus.
@@ -3956,12 +4050,24 @@ class MainWindow(QMainWindow):
             return self.aside_bar.hide()
         if self._pointer_on(area):
             self.aside_player.marks.hide()
+            self._show_pause(self.aside_bar, self.aside_player)
             self._place_aside_bar()
             self.aside_bar.show()
             self.aside_bar.raise_()
         else:
             self.aside_bar.hide()
             self.aside_player.marks.place_on(area)
+
+    @staticmethod
+    def _show_pause(bar, player) -> None:
+        """Le bouton du milieu dit ce qu'il fera : pause si ca joue."""
+        button = bar.buttons.itemAt(1).widget()
+        playing = (player.player.playbackState()
+                   == player.player.PlaybackState.PlayingState)
+        wanted = "pause" if playing else "play"
+        if button.property("glyph") != wanted:
+            button.setProperty("glyph", wanted)
+            button.setIcon(icon(wanted))
 
     @staticmethod
     def _pointer_on(widget) -> bool:
@@ -3986,6 +4092,7 @@ class MainWindow(QMainWindow):
             return
         if self.isActiveWindow() and self._pointer_on(area):
             self.single.marks.hide()
+            self._show_pause(self.single_bar, self.single)
             self.single_bar.set_name(item.name)
             self.single_bar.place_on(area)
             self.single_bar.show()
@@ -4154,6 +4261,13 @@ class MainWindow(QMainWindow):
         if not target.exists():
             return self.show_banner(f"Introuvable : {target.name}", "error")
         try:
+            item = self.current
+            if (target.is_dir() and item is not None and self.tab != TAB_SPLIT
+                    and item.kind == MODE_FOLDERS):
+                # Un dossier s'ouvre, on y entre : le selectionner dans son
+                # parent obligeait a un double-clic de plus.
+                subprocess.Popen(f'explorer "{target}"')
+                return
             subprocess.Popen(self.reveal_command(target))
         except OSError as exc:
             self.show_banner(f"Explorateur indisponible : {exc}", "error")
@@ -4298,7 +4412,8 @@ class MainWindow(QMainWindow):
             where = "cette liste"
         else:
             item = self.current
-            pool = [str(video) for video in (item.videos if item else [])]
+            pool = [str(video) for video in
+                    (self._preview_videos(item) if item else [])]
             where = f"« {item.name} »" if item else ""
         if not pool:
             self.show_banner("Aucune vidéo ici", "quiet")
@@ -4445,7 +4560,7 @@ class MainWindow(QMainWindow):
         sortable = self._sortable
         return [item for item in items if sortable(item) and keep(item)]
 
-    def _matcher(self):
+    def _matcher(self, ignore_text: bool = False):
         """Le filtre, pret a courir : reglages lus une fois, pas par element.
 
         Relire la configuration, reanalyser la recherche et redecouper les
@@ -4456,10 +4571,15 @@ class MainWindow(QMainWindow):
         cfg = self.cfg
         only_unseen = bool(cfg["only_unseen"])
         seen = INDEX.seen
-        query = rules.get("include", cfg["filter_include"])
+        query = "" if ignore_text else rules.get("include", cfg["filter_include"])
         parsed = self._parsed(query) if query else None
         loose = self._loose
-        exclude = self._terms(rules.get("exclude", cfg["filter_exclude"]))
+        exclude = [] if ignore_text else self._terms(
+            rules.get("exclude", cfg["filter_exclude"]))
+        # La note porte sur ce que l'onglet montre : les dossiers dans
+        # « Dossiers », les videos ailleurs. Un mot-cle n'a pas de note ; ce
+        # sont ses videos qu'on filtre, une fois dedans.
+        rate_folders = self.tab == TAB_FOLDERS
         ratings = self.ratings.data
         stars_min = rules.get("stars", -1) if rules else -1
         stars_pick = rules.get("stars_pick", -1) if rules else -1
@@ -4490,7 +4610,8 @@ class MainWindow(QMainWindow):
                     low = name.lower()
                     if any(term in low for term in exclude):
                         return False
-            if stars_min >= 0 or stars_pick >= 0:
+            if ((stars_min >= 0 or stars_pick >= 0) and not is_tag
+                    and (item.kind == MODE_FOLDERS) == rate_folders):
                 stars = ratings.get(str(item.path), 0)
                 if stars_min >= 0 and stars < stars_min:
                     return False
@@ -4643,6 +4764,7 @@ class MainWindow(QMainWindow):
         self.cfg.save()
 
         current = self.current
+        self.plans = {k: v for k, v in self.plans.items() if k.startswith("board@")}
         self.items = self._filtered()
         if not self.items:
             self._retry_loosely()
@@ -5171,6 +5293,7 @@ class MainWindow(QMainWindow):
         self.cfg.save()
         self.grid.set_muted(muted)
         self.single.set_muted(muted)
+        self.wall.set_muted(muted)
         self._refresh_mute()
         self.show_banner("Son coupé" if muted else "Son activé", "quiet")
 

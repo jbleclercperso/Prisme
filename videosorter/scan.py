@@ -21,7 +21,12 @@ LOOSE_LABEL = "(sans dossier)"
 
 # Au-delà, on arrête de collecter les chemins de vidéos d'un même dossier :
 # dix aperçus n'en demandent pas plus et cela borne la mémoire sur les gros lots.
-MAX_VIDEOS_PER_ITEM = 400
+# Toutes les videos d'un dossier, et non les quatre cents premieres : le
+# plafond amputait l'onglet Videos, le hasard et les mots frequents de tout
+# ce qui depassait, dans les gros dossiers — c'est-a-dire l'essentiel.
+MAX_VIDEOS_PER_ITEM = 10_000_000
+# Ce que les versions plafonnees ont laisse dans l'index.
+OLD_CAP = 400
 
 
 @dataclass
@@ -751,6 +756,13 @@ class RefreshThread(QThread):
         shown = set(self.known_ids) - set(gone)
 
         known_sigs = {} if self.force or not self.use_cache else INDEX.signatures(ids)
+        if known_sigs and mode == MODE_FOLDERS:
+            # Un dossier retenu du temps du plafond — quatre cents videos
+            # sur davantage — se relit une fois, en entier.
+            cached = INDEX.folders([key for key in ids if key in known_sigs])
+            for key, item in cached.items():
+                if len(item.videos) < item.video_count and len(item.videos) >= OLD_CAP:
+                    known_sigs.pop(key, None)
 
         # Premier tri, sans rien lire : qui peut rester en l'etat, qui doit etre
         # reparcouru. C'est ici que se joue la fluidite d'un relancement — sur
