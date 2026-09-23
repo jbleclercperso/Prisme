@@ -213,6 +213,10 @@ DEFAULTS = {
     "tunnel_kind": "cloudflare",
     "share_salt": "",
     "share_digest": "",
+    # Des dossiers masques par choix — leur contenu n'apparait nulle part
+    # tant que l'interrupteur est leve.
+    "veiled_names": ["BIN"],
+    "show_veiled": False,
     "skip_hidden": True,
     "use_scan_cache": True,      # reutiliser l analyse precedente
     "sort_mode": "random",       # random | duration_desc | size_asc | …

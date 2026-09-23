@@ -2832,6 +2832,74 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         window.set_tunnel_kind("cloudflare")
     check(window.cfg["tunnel_kind"] == "cloudflare", "et l'on revient en arrière")
 
+    print("\n[75] Un dossier mis de côté, et l'interrupteur qui le révèle")
+    from videosorter.scan import (
+        _is_hidden as _caché, set_veiled, under_veiled, veiled,
+    )
+
+    set_veiled(["BIN"], False)
+    check(veiled("BIN") and veiled("bin") and veiled("Bin"),
+          "le nom est masqué quelle que soit sa casse")
+    check(not veiled("Vacances"), "et les autres ne le sont pas")
+    check(under_veiled(Path("X:/BIN/2019/film.mp4")),
+          "ce qui est dessous l'est aussi")
+    check(not under_veiled(Path("X:/binome/film.mp4")),
+          "mais « binome » n'est pas « bin » — pas de masquage par préfixe")
+
+    class _Entree:
+        name = "BIN"
+
+        def stat(self, **_k):
+            raise OSError
+
+    check(_caché(_Entree()),
+          "tous les parcours le sautent : c'est le point qu'ils traversent tous")
+
+    # Un vrai dossier, avec de vraies vidéos, doit disparaître partout.
+    cellier = base / "voile"
+    shutil.rmtree(cellier, ignore_errors=True)
+    (cellier / "BIN").mkdir(parents=True)
+    (cellier / "Garde").mkdir(parents=True)
+    modele = next(iter(sorted(root.rglob("*.mp4"))))
+    shutil.copy2(modele, cellier / "BIN" / "secret.mp4")
+    shutil.copy2(modele, cellier / "Garde" / "ordinaire.mp4")
+
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(cellier, MODE_FOLDERS)
+    check(wait_for(app, lambda: not window.scanning, 60), "analyse du cellier")
+    noms = [item.path.name for item in window.items]
+    check("Garde" in noms, f"le dossier ordinaire est là ({noms})")
+    check("BIN" not in noms, f"et le dossier masqué n'y est pas ({noms})")
+    check(not any("secret.mp4" in str(v) for v in window._videos_from_items()),
+          "sa vidéo non plus, nulle part")
+
+    # Et le partage à distance n'en montre pas davantage.
+    from videosorter import web as _web_voile
+    rayon = _web_voile.Library(cellier, window.cfg["expand_parents"],
+                               window.cfg["thumb_width"])
+    check(not any("secret" in str(chemin) for chemin in rayon.videos.values()),
+          "l'adresse publique ne montre pas ce que la fenêtre cache")
+    check(any("ordinaire" in str(chemin) for chemin in rayon.videos.values()),
+          "mais elle montre le reste")
+
+    # L'interrupteur.
+    window.toggle_veiled()
+    check(window.cfg["show_veiled"] is True, "l'interrupteur se lève")
+    window.start_root(cellier, MODE_FOLDERS, force=True)
+    check(wait_for(app, lambda: not window.scanning, 60), "on refait la liste")
+    noms = [item.path.name for item in window.items]
+    check("BIN" in noms, f"le dossier masqué réapparaît ({noms})")
+    revu = _web_voile.Library(cellier, window.cfg["expand_parents"],
+                              window.cfg["thumb_width"])
+    check(any("secret" in str(chemin) for chemin in revu.videos.values()),
+          "et le partage le montre aussi")
+
+    window.toggle_veiled()
+    check(window.cfg["show_veiled"] is False, "puis se rabaisse")
+    check(under_veiled(Path("X:/BIN/f.mp4")), "et le masque reprend")
+    window.start_root(root, MODE_FOLDERS, force=True)
+    wait_for(app, lambda: not window.scanning, 60)
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

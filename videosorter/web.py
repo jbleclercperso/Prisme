@@ -36,7 +36,9 @@ from .config import THUMB_DIR  # noqa: F401  (le cache des vignettes)
 from .index import INDEX
 from .media import BLIND_START, thumb_path
 from .query import matches_text
-from .scan import MODE_FOLDERS, cached_items, human_duration, human_size
+from .scan import (
+    MODE_FOLDERS, cached_items, human_duration, human_size, under_veiled,
+)
 
 # Combien de temps une session reste ouverte sans qu'on ait à se réauthentifier.
 SESSION_HOURS = 24 * 14
@@ -108,11 +110,15 @@ class Library:
         videos = {}
         by_folder = {}
         for item in cached_items(self.root, MODE_FOLDERS, self.expand):
-            if item.is_tag or not item.videos:
+            if item.is_tag or not item.videos or under_veiled(item.path):
+                # Ce qui est masqué ici l'est aussi au dehors : l'adresse
+                # publique ne doit pas montrer ce que la fenêtre cache.
                 continue
             key = self.mark(item.path)
             inside = []
             for video in item.videos:
+                if under_veiled(video):
+                    continue
                 mark = self.mark(video)
                 videos[mark] = Path(video)
                 inside.append(mark)

@@ -176,6 +176,40 @@ def is_video(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXTS
 
 
+# Des dossiers qu'on ne veut simplement pas voir — ni leurs videos, ni leurs
+# vignettes, ni leurs mots. Ce ne sont pas des dossiers caches au sens de
+# Windows : c'est un choix, et il se defait d'un interrupteur.
+VEILED = {"bin"}
+SHOW_VEILED = False
+
+
+def veiled(name: str) -> bool:
+    """Ce nom est-il de ceux qu'on masque ? La casse n'y change rien."""
+    return not SHOW_VEILED and str(name).casefold() in VEILED
+
+
+def under_veiled(path) -> bool:
+    """Ce chemin traverse-t-il un dossier masque ?
+
+    L'index garde ce qu'il a vu autrefois : masquer a l'enumeration ne suffit
+    donc pas, il faut aussi ecarter a l'affichage ce qui y dort deja.
+    """
+    if SHOW_VEILED:
+        return False
+    try:
+        return any(part.casefold() in VEILED for part in Path(path).parts)
+    except (TypeError, ValueError):
+        return False
+
+
+def set_veiled(names, show: bool) -> None:
+    """Pose la liste et l'interrupteur, d'un seul geste."""
+    global SHOW_VEILED
+    VEILED.clear()
+    VEILED.update(str(name).casefold() for name in (names or []) if str(name).strip())
+    SHOW_VEILED = bool(show)
+
+
 def _is_hidden(entry) -> bool:
     """Teste l'attribut caché, en préférant les données déjà lues par scandir.
 
@@ -185,6 +219,11 @@ def _is_hidden(entry) -> bool:
     """
     name = entry.name if hasattr(entry, "name") else Path(entry).name
     if name.startswith("."):
+        return True
+    # Le voile passe par ici : c'est le seul point que tous les parcours
+    # traversent — l'analyse, la preparation des vignettes, l'audit, les
+    # doublons, les empreintes, les plans, les titres.
+    if veiled(name):
         return True
     try:
         stat_result = entry.stat(follow_symlinks=False) if hasattr(entry, "stat")             else Path(entry).stat()

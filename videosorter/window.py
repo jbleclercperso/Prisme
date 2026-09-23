@@ -49,6 +49,7 @@ BANNER_TONES = {
     "error": "#3a2226",    # ce qui a echoue
 }
 from .scan import (
+    set_veiled, under_veiled,
     MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, Item, RefreshThread,
     cached_items, detect_mode, human_duration, human_resolution, human_size,
     known_media, list_entries,
@@ -206,6 +207,7 @@ class MainWindow(QMainWindow):
         self.trash.changed.connect(self.on_trash_changed)
 
         self.transfers = TransferQueue(self)
+        set_veiled(cfg["veiled_names"], cfg["show_veiled"])
         self._commands_signature = None
         self._top_tags = None          # ((racine, nb videos), items) deja calcules
         self._tags_thread = None
@@ -399,6 +401,7 @@ class MainWindow(QMainWindow):
             ("-", None),
             ("Raccourcis et recherche…", self.show_help),
             ("Journal des gels de l'interface", self.open_stall_log),
+            ("Afficher les dossiers masqués", self.toggle_veiled),
             ("Partage à distance…", self.open_share),
             ("Où sont les vignettes…", self.show_cache_place),
             ("Ignorer la mise à l'échelle de Windows", self.toggle_dpi),
@@ -414,6 +417,7 @@ class MainWindow(QMainWindow):
         self.searches_menu.aboutToShow.connect(self._fill_searches_menu)
         self.more_button.setMenu(self.overflow)
         self._name_backfill_action()
+        self._name_veil_action()
 
         # Une disposition qui se replie : une rangee rigide impose sa
         # largeur a la fenetre entiere, qui ne peut alors plus
@@ -2115,6 +2119,49 @@ class MainWindow(QMainWindow):
              "prochain lancement.")
             + "\n\nCe choix se fige au démarrage : fermez et rouvrez Prisme.")
 
+    def toggle_veiled(self) -> None:
+        """Montre, ou remasque, les dossiers mis de côté.
+
+        Le masque vaut partout à la fois : listes, vignettes, mots-clés, mur,
+        doublons, et le partage à distance. Le lever demande donc de refaire
+        la liste — rien n'est relu sur le disque pour autant.
+        """
+        wanted = not self.cfg["show_veiled"]
+        self.cfg["show_veiled"] = wanted
+        self.cfg.save()
+        set_veiled(self.cfg["veiled_names"], wanted)
+        self._name_veil_action()
+        self._top_tags = None
+        self.plans = {}
+        if self.share_server is not None:
+            self.share_server.library.refresh()
+        if self.root is not None:
+            self.items = [i for i in self.all_items if self._matches(i)]
+            if self.tab == TAB_VIDEOS:
+                self.show_videos_tab()
+            self.apply_sort()
+            if self.browsing:
+                self.refresh_board()
+            self._show_counts()
+        names = ", ".join(self.cfg["veiled_names"]) or "—"
+        self.show_banner(
+            f"Dossiers masqués affichés : {names}." if wanted
+            else f"Dossiers masqués de nouveau cachés : {names}.",
+            "info" if wanted else "quiet")
+
+    def _name_veil_action(self) -> None:
+        """L'entrée du menu dit ce qu'elle fera, et sur quoi."""
+        names = ", ".join(self.cfg["veiled_names"]) or "aucun"
+        label = ("Masquer de nouveau les dossiers mis de côté"
+                 if self.cfg["show_veiled"]
+                 else f"Afficher les dossiers masqués ({names})")
+        for action in self.overflow.actions():
+            text = action.text()
+            if text.startswith("Afficher les dossiers masqués") or \
+                    text.startswith("Masquer de nouveau"):
+                action.setText(label)
+                return
+
     def show_cache_place(self) -> None:
         """Dit ou vit le cache, et comment le partager avec un autre PC."""
         from .config import INDEX_PATH, SHARED_DIR, THUMB_DIR
@@ -2856,7 +2903,7 @@ class MainWindow(QMainWindow):
                 continue
             for video in item.videos:
                 key = str(video)
-                if key in seen:
+                if key in seen or under_veiled(video):
                     continue
                 seen.add(key)
                 found.append(video)
@@ -4130,6 +4177,9 @@ class MainWindow(QMainWindow):
         qui montrent quelque chose. Il ne compte pas non plus comme « filtre » :
         ce n'est pas l'utilisateur qui l'a ecarte.
         """
+        if not item.is_tag and under_veiled(item.path):
+            # Ce que l'index garde d'un dossier masque ne doit pas reparaitre.
+            return False
         return not (item.kind == MODE_FOLDERS and not item.is_tag
                     and not item.video_count)
 
