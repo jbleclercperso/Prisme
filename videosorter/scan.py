@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from functools import cached_property
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,6 +55,11 @@ class Item:
         if self.loose_only:
             return f"{self.path.name} {LOOSE_LABEL}"
         return self.path.name
+
+    @cached_property
+    def sort_name(self) -> str:
+        """Le nom en minuscules, pour trier : calcule une fois."""
+        return self.name.lower()
 
     @property
     def item_id(self) -> str:
@@ -188,23 +194,43 @@ def veiled(name: str) -> bool:
     return not SHOW_VEILED and str(name).casefold() in VEILED
 
 
+# La reponse, par dossier. Cent mille videos tiennent dans quelques
+# centaines de dossiers : on decide une fois pour chacun, et non a chaque
+# video — decomposer chaque chemin coutait trois secondes par clic de filtre.
+_VEIL_MEMO: dict = {}
+
+
 def under_veiled(path) -> bool:
     """Ce chemin traverse-t-il un dossier masque ?
 
     L'index garde ce qu'il a vu autrefois : masquer a l'enumeration ne suffit
     donc pas, il faut aussi ecarter a l'affichage ce qui y dort deja.
     """
-    if SHOW_VEILED:
+    if SHOW_VEILED or not VEILED:
         return False
-    try:
-        return any(part.casefold() in VEILED for part in Path(path).parts)
-    except (TypeError, ValueError):
-        return False
+    text = str(path)
+    cut = max(text.rfind("\\"), text.rfind("/"))
+    folder, name = (text[:cut], text[cut + 1:]) if cut >= 0 else ("", text)
+    hit = _VEIL_MEMO.get(folder)
+    if hit is None:
+        low = folder.casefold()
+        # Le plus souvent, aucun nom masque n'apparait meme en sous-chaine :
+        # on le sait sans rien decouper.
+        if not any(name_ in low for name_ in VEILED):
+            hit = False
+        else:
+            hit = any(part in VEILED
+                      for part in low.replace("/", "\\").split("\\"))
+        if len(_VEIL_MEMO) > 200_000:
+            _VEIL_MEMO.clear()
+        _VEIL_MEMO[folder] = hit
+    return hit or name.casefold() in VEILED
 
 
 def set_veiled(names, show: bool) -> None:
     """Pose la liste et l'interrupteur, d'un seul geste."""
     global SHOW_VEILED
+    _VEIL_MEMO.clear()
     VEILED.clear()
     VEILED.update(str(name).casefold() for name in (names or []) if str(name).strip())
     SHOW_VEILED = bool(show)

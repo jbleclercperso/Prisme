@@ -12,6 +12,7 @@ from pathlib import Path
 from PySide6.QtGui import QIntValidator
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
+    QWidgetAction,
     QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
     QSizePolicy, QVBoxLayout, QWidget,
 )
@@ -73,6 +74,17 @@ QPushButton#crumb[last="true"] { color: #ffffff; font-weight: 600; }
 QLabel#crumbSep { color: #4d5563; font-size: 14px; }
 """
 
+
+# Les chiffres de la note, en or, sur une rangee : on voit d'un coup ce qu'on
+# choisit, et celui qui est pris.
+RATING_CHOICE_STYLE = (
+    "QPushButton { background: transparent; border: 1px solid transparent;"
+    " border-radius: 6px; padding: 4px 8px; color: #c9d1db; font-size: 13px; }"
+    "QPushButton[gold=\"true\"] { color: #f5c542; font-size: 15px;"
+    " font-weight: 700; }"
+    "QPushButton:hover { background: #222a35; }"
+    "QPushButton[chosen=\"true\"] { border-color: #4c8dff;"
+    " background: #1d2a40; }")
 
 class Segmented(QWidget):
     """Deux ou trois choix exclusifs, celui en cours restant visiblement allumé."""
@@ -241,6 +253,9 @@ class Breadcrumb(QWidget):
         while self.layout_.count():
             child = self.layout_.takeAt(0)
             if child.widget():
+                # Cachee tout de suite : detruite plus tard seulement, elle
+                # restait un instant affichee sous le nouveau chemin.
+                child.widget().hide()
                 child.widget().deleteLater()
         if current is None:
             return
@@ -290,6 +305,7 @@ class ControlBar(QWidget):
     released = Signal()
     unseenChanged = Signal(bool)
     clearRequested = Signal()
+    starsChanged = Signal(int)       # -1 : toutes ; 0 a 5 : exactement
 
     RESOLUTIONS = (
         ("toutes", 0), ("360p", 360), ("480p", 480), ("720p", 720),
@@ -322,6 +338,48 @@ class ControlBar(QWidget):
         self.sorts.chosen.connect(self.sortChanged)
         row.addWidget(self.sorts)
 
+        # La note : non pas « au moins », mais « exactement ». On cherche
+        # ses cinq etoiles, pas tout ce qui en a au moins quatre. Le choix
+        # tient sur une rangee — tout, 1 a 5 en chiffres d'or, sans note —
+        # et non plus dans une colonne d'etoiles qu'il fallait dechiffrer.
+        self.stars_pick = -1
+        self.rating_pick = QPushButton("★ Note", self)
+        self.rating_pick.setObjectName("sortChip")
+        self.rating_pick.setCursor(Qt.PointingHandCursor)
+        self.rating_pick.setFocusPolicy(Qt.NoFocus)
+        self.rating_pick.setProperty("chosen", "false")
+        self.rating_pick.setToolTip("N'afficher que les éléments de cette note")
+        self.rating_menu = QMenu(self.rating_pick)
+        self.rating_menu.setStyleSheet(
+            "QMenu { background: #151a21; border: 1px solid #2a313b;"
+            " border-radius: 8px; padding: 6px; }")
+        strip = QWidget(self.rating_menu)
+        strip_row = QHBoxLayout(strip)
+        strip_row.setContentsMargins(4, 2, 4, 2)
+        strip_row.setSpacing(4)
+        self.rating_choices: dict = {}
+        for value, text, tip in ([(-1, "Toutes", "Toutes les notes")]
+                                 + [(n, str(n), f"Notés exactement {n}")
+                                    for n in range(1, 6)]
+                                 + [(0, "Sans", "Sans note")]):
+            choice = QPushButton(text, strip)
+            choice.setObjectName("ratingChoice")
+            choice.setCursor(Qt.PointingHandCursor)
+            choice.setFocusPolicy(Qt.NoFocus)
+            choice.setToolTip(tip)
+            choice.setProperty("gold", "true" if value > 0 else "false")
+            choice.setMinimumWidth(34 if value > 0 else 58)
+            choice.setStyleSheet(RATING_CHOICE_STYLE)
+            choice.clicked.connect(
+                lambda _c=False, v=value: self._choose_rating(v))
+            strip_row.addWidget(choice)
+            self.rating_choices[value] = choice
+        action = QWidgetAction(self.rating_menu)
+        action.setDefaultWidget(strip)
+        self.rating_menu.addAction(action)
+        self.rating_pick.setMenu(self.rating_menu)
+        row.addWidget(self.rating_pick)
+
         # Ce qui reste a voir : ni decide, ni deja regarde. Au bout d'une
         # semaine sur cent mille videos, c'est la seule vue qui compte.
         self.unseen = QPushButton("Non vus", self)
@@ -336,20 +394,18 @@ class ControlBar(QWidget):
                 self.unseen.property("chosen") != "true"))
         row.addWidget(self.unseen)
 
-        # Verticales, horizontales : les deux cochees par defaut, on en ote
-        # une pour ne voir que l'autre. Ce qu'on ne sait pas encore passe.
-        self.orientation_buttons: dict = {}
-        for key, text in (("vertical", "Verticales"), ("horizontal", "Horizontales")):
-            button = QPushButton(text, self)
-            button.setObjectName("sortChip")
-            button.setCursor(Qt.PointingHandCursor)
-            button.setFocusPolicy(Qt.NoFocus)
-            button.setProperty("chosen", "true")
-            button.setToolTip("Cliquer pour ne plus voir ces vidéos, "
-                              "recliquer pour les revoir")
-            button.clicked.connect(lambda _c=False, k=key: self._toggle_orientation(k))
-            row.addWidget(button)
-            self.orientation_buttons[key] = button
+        # Le format : un seul bouton, qui dit ce qu'il montre. Deux boutons
+        # « Verticales » et « Horizontales » allumes ensemble ne disaient pas
+        # si allume voulait dire montre ou retire. Chaque clic passe au
+        # suivant : tous les formats, verticales seules, horizontales seules.
+        self.orientation = "all"
+        self.format_button = QPushButton("", self)
+        self.format_button.setObjectName("sortChip")
+        self.format_button.setCursor(Qt.PointingHandCursor)
+        self.format_button.setFocusPolicy(Qt.NoFocus)
+        self.format_button.clicked.connect(self._cycle_orientation)
+        row.addWidget(self.format_button)
+        self._show_orientation()
 
         # Dossiers d'au moins, d'au plus tant de videos. Visible en onglet
         # Dossiers seulement.
@@ -370,7 +426,12 @@ class ControlBar(QWidget):
             row.addWidget(field)
 
         self.random_here = _button("⚄", self.randomHere.emit)
+        self.random_here.setObjectName("sortChip")
+        # Le de doit se lire : a douze points, on ne le reconnaissait pas.
+        self.random_here.setStyleSheet("font-size: 17px; padding: 0 9px;")
+        self.random_here.setToolTip("Un élément au hasard, dans cette liste")
         self.random_here.hide()
+        row.addWidget(self.random_here)
 
         # La densite se regle comme on regle un zoom : deux boutons et le
         # chiffre entre eux. Une liste deroulante et son etiquette « par rangee »
@@ -454,19 +515,33 @@ class ControlBar(QWidget):
         )
 
     # -- lecture ---------------------------------------------------------
-    def _toggle_orientation(self, key: str) -> None:
-        button = self.orientation_buttons[key]
-        chosen = button.property("chosen") != "true"
-        if not chosen and all(
-                b.property("chosen") != "true" for k, b in
-                self.orientation_buttons.items() if k != key):
-            # En decocher une quand l'autre l'est deja : on ne verrait plus
-            # rien. On bascule donc sur l'autre.
-            for k, b in self.orientation_buttons.items():
-                self._mark(b, k != key)
-        else:
-            self._mark(button, chosen)
+    FORMATS = ("all", "vertical", "horizontal")
+    FORMAT_TEXT = {"all": "▯▭ Tous formats", "vertical": "▯ Verticales",
+                   "horizontal": "▭ Horizontales"}
+
+    def _cycle_orientation(self) -> None:
+        order = self.FORMATS
+        self.set_orientation(order[(order.index(self.orientation) + 1) % len(order)])
         self.changed.emit()
+
+    def set_orientation(self, key: str) -> None:
+        self.orientation = key if key in self.FORMATS else "all"
+        self._show_orientation()
+
+    def _show_orientation(self) -> None:
+        button = self.format_button
+        button.setText(self.FORMAT_TEXT[self.orientation])
+        following = self.FORMATS[(self.FORMATS.index(self.orientation) + 1) % 3]
+        button.setToolTip(
+            f"Montré : {self.FORMAT_TEXT[self.orientation][2:].lower()}.\n"
+            f"Cliquer : {self.FORMAT_TEXT[following][2:].lower()}.\n"
+            "Une vidéo dont le format n'est pas encore connu n'apparaît "
+            "que dans « tous formats ».")
+        self._mark(button, self.orientation != "all")
+
+    def _choose_rating(self, value: int) -> None:
+        self.rating_menu.close()
+        self.starsChanged.emit(value)
 
     @staticmethod
     def _mark(button, on: bool) -> None:
@@ -475,13 +550,13 @@ class ControlBar(QWidget):
         button.style().polish(button)
 
     def orientations(self) -> list:
-        return [k for k, b in self.orientation_buttons.items()
-                if b.property("chosen") == "true"]
+        if self.orientation == "all":
+            return ["vertical", "horizontal"]
+        return [self.orientation]
 
     def set_orientations(self, keys) -> None:
-        keys = set(keys or ()) or {"vertical", "horizontal"}
-        for key, button in self.orientation_buttons.items():
-            self._mark(button, key in keys)
+        keys = [k for k in (keys or ()) if k in ("vertical", "horizontal")]
+        self.set_orientation(keys[0] if len(keys) == 1 else "all")
 
     def set_folder_bounds(self, low: int, high: int) -> None:
         for field, value in ((self.folder_min, low), (self.folder_max, high)):
@@ -497,6 +572,7 @@ class ControlBar(QWidget):
             "include": self.include.text(),
             "exclude": self.exclude.text(),
             "orientations": self.orientations(),
+            "stars_pick": self.stars_pick,
             "folder_min": int(self.folder_min.text() or 0),
             "folder_max": int(self.folder_max.text() or 0),
             "duration_op": "",
@@ -514,6 +590,19 @@ class ControlBar(QWidget):
 
     def set_sort(self, mode: str) -> None:
         self.sorts.set_value(mode)
+
+    def set_stars(self, pick: int) -> None:
+        """Pose le choix, et le dit sur le bouton."""
+        self.stars_pick = int(pick)
+        if pick < 0:
+            self.rating_pick.setText("★ Note")
+        elif pick == 0:
+            self.rating_pick.setText("★ Sans note")
+        else:
+            self.rating_pick.setText(f"★ {pick}")
+        self._mark(self.rating_pick, pick >= 0)
+        for value, choice in self.rating_choices.items():
+            self._mark(choice, value == pick)
 
     def set_unseen(self, on: bool) -> None:
         self.unseen.setProperty("chosen", "true" if on else "false")
@@ -554,7 +643,7 @@ class ControlBar(QWidget):
 
     def set_page(self, text: str, has_previous: bool, has_next: bool) -> None:
         self.count.setText(text)
-        self.count.setVisible(bool(text))
+        self.count.setVisible(bool(text) and getattr(self, "_mode", "") != "wall")
         self.previous.setEnabled(has_previous)
         self.next.setEnabled(has_next)
 
@@ -580,9 +669,9 @@ class ControlBar(QWidget):
         folders = mode == "folders"
         self.sorts.setVisible(not wall)
         self.sorts.buttons["stars"].setVisible(not folders)
+        self.rating_pick.setVisible(not wall)
         self.unseen.setVisible(not wall and not folders)
-        for button in self.orientation_buttons.values():
-            button.setVisible(not wall and not folders)
+        self.format_button.setVisible(not wall and not folders)
         self.folder_min.setVisible(folders)
         self.folder_max.setVisible(folders)
         self.column_chips.setVisible(folders and browsing)
@@ -590,6 +679,7 @@ class ControlBar(QWidget):
             widget.setVisible(browsing and not wall and not folders)
         for widget in (self.previous, self.next):
             widget.setVisible(browsing and not wall)
+        self.count.setVisible(not wall and bool(self.count.text()))
         if wall:
             self.clear.hide()
 
@@ -641,12 +731,6 @@ class _Field(QLineEdit):
             self.released.emit()
             return
         super().keyPressEvent(event)
-
-
-def _caption(text: str) -> QLabel:
-    label = QLabel(text)
-    label.setObjectName("hint")
-    return label
 
 
 def _combo(pairs: list) -> QComboBox:

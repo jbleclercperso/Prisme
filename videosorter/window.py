@@ -1,6 +1,7 @@
 """Fenêtre principale : enchaînement des éléments et exécution des actions."""
 from __future__ import annotations
 
+import operator
 import os
 import subprocess
 import time
@@ -8,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtGui import QCursor
-from PySide6.QtCore import QSize, QTimer, QUrl, Qt
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, QTimer, QUrl, Qt
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QListWidget,
     QMainWindow, QMessageBox, QProgressBar, QProgressDialog, QPushButton,
@@ -22,7 +23,7 @@ from .dupes import (
 )
 from .help import HelpDialog
 from .board import COLUMN_CHOICES, BoardView
-from .actions import ActionError, HistoryEntry
+from .actions import HistoryEntry
 from .config import APP_DIR, APP_NAME, Config
 from .header import (
     CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, TAB_FOLDERS,
@@ -33,13 +34,15 @@ from .header import (
 from . import media
 from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
-from .tagging import MIN_BUCKET, TagsThread, build_tag_items, top_words
+from .tagging import MIN_BUCKET, TagsThread, build_tag_items
 from .split import DEFAULT_PANES, SplitWall
 from .access import JOURNAL
 from .perf import LOG as STALL_LOG, WATCH, mark
 from .quiet import QUIET_TITLE, QuietPage
 from .share_dialog import ShareDialog
-from .query import available as fuzzy_available, matches_text
+from .query import (
+    available as fuzzy_available, matches as matches_parsed, parse as parse_query,
+)
 
 # Les tons du bandeau d'etat. Ils etaient ecrits en dur a chaque appel, avec
 # sept teintes pour quatre intentions.
@@ -52,7 +55,7 @@ BANNER_TONES = {
 from .scan import (
     set_veiled, under_veiled,
     MODE_FILES, MODE_FLAT, MODE_FOLDERS, PARENT_PREFIX, Item, RefreshThread,
-    cached_items, detect_mode, human_duration, human_resolution, human_size,
+    cached_items, human_duration, human_resolution, human_size,
     known_media, list_entries,
 )
 from .index import INDEX
@@ -61,17 +64,19 @@ from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
 from .widgets import (
-    FlowLayout, PeekOverlay, RadialMenu, app_icon, draw_icon,
+    OverBar, PeekOverlay, RadialMenu, app_icon, draw_icon,
     STYLESHEET, CommandBar, DestinationsDialog, PreviewGrid, SinglePlayer,
     StarStrip, TagsDialog, TrashDialog,
 )
 
 PAGE_WELCOME, PAGE_SORT, PAGE_DONE, PAGE_QUIET = 0, 1, 2, 3
 
+# Ce que dit le bouton rouge. « Dossier _TRASH » ne disait rien a personne :
+# on lit un nom de dossier, pas ce qui va arriver au fichier.
 DELETE_LABELS = {
-    "recycle": "Corbeille",
+    "recycle": "Mettre à la corbeille",
     "permanent": "Supprimer définitivement",
-    "local_trash": "Dossier _TRASH",
+    "local_trash": "Écarter — récupérable",
 }
 
 
@@ -144,6 +149,10 @@ class DonePage(QWidget):
         layout.addStretch(1)
 
 
+# La cle du tri par nom, calculee une fois par element et non a chaque tri.
+_BY_NAME = operator.attrgetter("sort_name")
+
+
 class MainWindow(QMainWindow):
     def __init__(self, cfg: Config):
         super().__init__()
@@ -177,9 +186,7 @@ class MainWindow(QMainWindow):
         self._backfill_started = 0.0
         self._plain_items: list = []
         self._plain_root = None
-        # Deux facons de regarder la fiche : la planche contact d'un dossier, et
-        # le cinema d'une video.
-        self.contact = False
+        # Le cinema : la video seule, sans rien autour.
         self.cinema = False
         # La racine que l on a choisie : le fil d Ariane en part toujours,
         # quels que soient les onglets traverses depuis.
@@ -281,33 +288,29 @@ class MainWindow(QMainWindow):
         # impossible a retrecir, et tout debordait de l'ecran. La page se
         # laisse desormais comprimer, quitte a rogner ce qu'elle montre.
         layout.setSizeConstraint(QLayout.SetNoConstraint)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
 
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(10)
-        self.crumbs = Breadcrumb(sort_page)
-        self.crumbs.jumped.connect(self.jump_to)
-        # Le fil d'Ariane prend ce qu'il lui faut, les reglages le reste :
-        # l'inverse les comprimait dans une colonne ou ils se repliaient
-        # sur quatre rangees.
-        self.crumbs.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
-        header_row.addWidget(self.crumbs, 0)
+        # Deux lignes au-dessus de l'image, jamais plus. La premiere dit ou
+        # l'on est et ce qui se passe ; la seconde, ce qu'on peut regler ici —
+        # les filtres sur la planche, le titre et ses gestes sur une fiche.
+        # Chaque ligne en plus etait une rangee de vignettes en moins.
+        row_one = QHBoxLayout()
+        row_one.setContentsMargins(0, 0, 0, 0)
+        row_one.setSpacing(8)
+        row_two = QHBoxLayout()
+        row_two.setContentsMargins(0, 0, 0, 0)
+        row_two.setSpacing(10)
 
-        # Ce qui se fabrique, dit en trois mots a cote du fil d'Ariane.
-        self.activity_label = QLabel("", sort_page)
-        self.activity_label.setObjectName("hint")
-        header_row.addWidget(self.activity_label)
+        self.tabs = Segmented("", [
+            (TAB_FOLDERS, "Dossiers", "Chaque dossier comme une carte"),
+            (TAB_VIDEOS, "Vidéos", "Toutes les vidéos en vrac, au hasard"),
+            (TAB_TAGS, "Mots-clés", "Les vidéos réunies par les mots de leurs noms"),
+            (TAB_SPLIT, "Mur", "Plusieurs vidéos à la fois"),
+        ], sort_page)
+        self.tabs.chosen.connect(self.set_tab)
+        row_one.addWidget(self.tabs, 0)
 
-        self.pending_label = QLabel("", sort_page)
-        self.pending_label.setObjectName("pending")
-        self.pending_label.hide()
-        header_row.addWidget(self.pending_label)
-
-        # Deux portees, deux boutons. Le general pioche dans toute la
-        # collection ; le local, dans le seul element affiche. Ils etaient
-        # confondus derriere un raccourci, et l un des deux se cherchait.
         # Remonter d'un cran, d'ou qu'on soit. `go_up` ne savait revenir que
         # par ou l'on etait descendu : arrive par un mot-cle, par l'historique
         # ou par une racine choisie, la pile etait vide et rien ne remontait.
@@ -319,12 +322,49 @@ class MainWindow(QMainWindow):
         self.up_button.setToolTip("Remonter au dossier parent   (Ctrl+↑)")
         self.up_button.setFocusPolicy(Qt.NoFocus)
         self.up_button.clicked.connect(self.go_parent)
+        row_one.addWidget(self.up_button, 0)
 
+        self.crumbs = Breadcrumb(sort_page)
+        self.crumbs.jumped.connect(self.jump_to)
+        # Le fil d'Ariane prend la place qui reste, et cede la sienne quand
+        # il n'y en a plus : il ne doit jamais elargir la fenetre.
+        self.crumbs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.crumbs.setMinimumWidth(40)
+        row_one.addWidget(self.crumbs, 1)
+
+        # Ce qui se fabrique, dit en trois mots a cote du fil d'Ariane.
+        self.activity_label = QLabel("", sort_page)
+        self.activity_label.setObjectName("hint")
+        # Un message long se coupe ; il n'elargit jamais la fenetre.
+        self.activity_label.setMinimumWidth(10)
+        row_one.addWidget(self.activity_label, 0)
+
+        self.pending_label = QLabel("", sort_page)
+        self.pending_label.setObjectName("pending")
+        self.pending_label.hide()
+        row_one.addWidget(self.pending_label, 0)
+
+        self.progress = QProgressBar(sort_page)
+        # Une barre muette de quatre pixels ne disait pas s'il restait dix
+        # dossiers ou six cents : sur un partage reseau, l'attente se compte en
+        # minutes et l'on veut savoir ou elle en est. Elle vit sur la premiere
+        # ligne : une rangee a elle seule coutait une rangee de vignettes.
+        self.progress.setTextVisible(True)
+        self.progress.setFormat("%v / %m analysés")
+        self.progress.setFixedHeight(16)
+        self.progress.setFixedWidth(130)
+        # Pendant une analyse, la barre tient lieu d'etat de la collection :
+        # les deux cote a cote debordaient d'un ecran agrandi.
+        self.progress.installEventFilter(self)
+        row_one.addWidget(self.progress, 0)
+
+        # « Analyser » vit dans le menu.
         self.scan_button = QPushButton("⟲  Analyser", sort_page)
         self.scan_button.setObjectName("scanState")
         self.scan_button.setProperty("running", "false")
         self.scan_button.setFocusPolicy(Qt.NoFocus)
         self.scan_button.clicked.connect(self.toggle_scan)
+        self.scan_button.hide()
 
         # L'etat de la collection, toujours sous les yeux : combien de videos
         # sont repertoriees, combien ont leur vignette, et de quand ca date.
@@ -333,13 +373,15 @@ class MainWindow(QMainWindow):
         self.state_button.setObjectName("collectionState")
         self.state_button.setFocusPolicy(Qt.NoFocus)
         self.state_button.setCursor(Qt.PointingHandCursor)
-        # Son texte ne doit jamais dicter la largeur de la fenetre.
+        # Assez large pour se lire, jamais assez pour dicter la fenetre.
         self.state_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.state_button.setMinimumWidth(110)
         self.state_button.setStyleSheet(
             "QPushButton#collectionState { background: transparent; border: 0;"
             " color: #8b94a1; font-size: 12px; padding: 0 8px; }"
             "QPushButton#collectionState:hover { color: #e9eef4; }")
         self.state_button.clicked.connect(self.verify_collection)
+        row_one.addWidget(self.state_button, 0)
 
         self.random_button = QPushButton("⚄  Aléatoire", sort_page)
         self.random_button.setObjectName("random")
@@ -347,13 +389,7 @@ class MainWindow(QMainWindow):
                                       "collection   (Ctrl+H)")
         self.random_button.setFocusPolicy(Qt.NoFocus)
         self.random_button.clicked.connect(self.pick_random)
-
-        self.random_here_button = QPushButton("⚄  Ici", sort_page)
-        self.random_here_button.setObjectName("randomHere")
-        self.random_here_button.setToolTip(
-            "Une vidéo au hasard, dans l'élément affiché seulement")
-        self.random_here_button.setFocusPolicy(Qt.NoFocus)
-        self.random_here_button.clicked.connect(self.pick_random_here)
+        row_one.addWidget(self.random_button, 0)
 
         # L'arborescence se montrait et se cachait depuis un menu : un reglage
         # qu'on bascule sans arret n'a rien a faire derriere trois clics.
@@ -365,6 +401,7 @@ class MainWindow(QMainWindow):
         self.tree_button.setToolTip("Afficher le panneau des dossiers   (Ctrl+T)")
         self.tree_button.setFocusPolicy(Qt.NoFocus)
         self.tree_button.clicked.connect(lambda checked: self.toggle_tree(checked))
+        row_one.addWidget(self.tree_button, 0)
 
         self.mute_button = QPushButton("", sort_page)
         self.mute_button.setIconSize(QSize(20, 20))
@@ -372,20 +409,25 @@ class MainWindow(QMainWindow):
         self.mute_button.setFixedWidth(42)
         self.mute_button.setFocusPolicy(Qt.NoFocus)
         self.mute_button.clicked.connect(self.toggle_mute)
-        header_row.addWidget(self.mute_button)
+        row_one.addWidget(self.mute_button, 0)
 
         # Le repli. Un rond gris, sans legende : il ne doit rien annoncer a
         # qui regarde par-dessus l'epaule, et se trouver sans reflechir.
         self.quiet_button = QPushButton("●", sort_page)
         self.quiet_button.setObjectName("quietSwitch")
         self.quiet_button.setFixedWidth(30)
-        self.quiet_button.setToolTip("Passer à autre chose   (Ctrl+K)")
+        self.quiet_button.setToolTip(
+            "Passer à autre chose : Prisme s'efface derrière une page neutre.\n"
+            "Ctrl+K, Échap ou un double-clic pour revenir.   (Ctrl+K)")
         self.quiet_button.setFocusPolicy(Qt.NoFocus)
         self.quiet_button.clicked.connect(self.enter_quiet)
-        header_row.addWidget(self.quiet_button)
+        row_one.addWidget(self.quiet_button, 0)
 
         self.more_button = QPushButton("⋯", sort_page)
         self.more_button.setFixedWidth(42)
+        # Trois points a treize points de corps : on ne voyait qu'une poussiere.
+        self.more_button.setStyleSheet("font-size: 20px; font-weight: 700;"
+                                       " padding: 0 0 4px 0;")
         self.more_button.setToolTip("Destinations, corbeille, arborescence…")
         self.more_button.setFocusPolicy(Qt.NoFocus)
         self.overflow = build_overflow(self, [
@@ -429,23 +471,9 @@ class MainWindow(QMainWindow):
         self.more_button.setMenu(self.overflow)
         self._name_backfill_action()
         self._name_veil_action()
+        row_one.addWidget(self.more_button, 0)
 
-        # Une disposition qui se replie : une rangee rigide impose sa
-        # largeur a la fenetre entiere, qui ne peut alors plus
-        # retrecir — et sur un ecran agrandi, tout deborde par la
-        # droite. Ici, ce qui ne tient pas passe a la ligne.
-        selectors = FlowLayout(spacing=10)
-        selectors.setContentsMargins(0, 0, 0, 0)
-        selectors.setSpacing(12)
-        self.tabs = Segmented("", [
-            (TAB_FOLDERS, "Dossiers", "Chaque dossier comme une carte"),
-            (TAB_VIDEOS, "Vidéos", "Toutes les vidéos en vrac, au hasard"),
-            (TAB_TAGS, "Mots-clés", "Les vidéos réunies par les mots de leurs noms"),
-            (TAB_SPLIT, "Mur", "Trois vidéos verticales à la fois"),
-        ], sort_page)
-        self.tabs.chosen.connect(self.set_tab)
-        selectors.addWidget(self.tabs)
-
+        # -- deuxieme ligne : ce qui se regle ici ---------------------------
         self.tag_chips = Chips([
             ("mine", "Mes mots-clés", "Ceux que vous avez saisis"),
             ("top", "Mots fréquents", "Les mots qui reviennent le plus dans vos noms"),
@@ -453,41 +481,28 @@ class MainWindow(QMainWindow):
         self.tag_chips.chosen.connect(self.set_tag_family)
         # Le seul endroit ou l'on pense a ses mots-cles est celui ou on les
         # regarde : les faire chercher dans un menu n'avait pas de sens.
-        self.tags_button = QPushButton("＋ Mes mots-clés…", sort_page)
+        self.tags_button = QPushButton("＋", sort_page)
+        self.tags_button.setFixedWidth(34)
         self.tags_button.setToolTip(
-            "Un mot par ligne. Chacun réunit les vidéos dont le nom le porte.")
+            "Mes mots-clés : un mot par ligne. Chacun réunit les vidéos "
+            "dont le nom le porte.")
         self.tags_button.setFocusPolicy(Qt.NoFocus)
         self.tags_button.clicked.connect(self.edit_tags)
         self.tags_button.hide()
         self.tag_chips.hide()
-        selectors.addWidget(self.tag_chips)
-        selectors.addWidget(self.tags_button)
-
-        selectors.addWidget(self.up_button)
-        # « Analyser » vit dans le menu ; le hasard local va sous l'image.
-        self.scan_button.hide()
-        selectors.addWidget(self.state_button)
-        selectors.addWidget(self.random_button)
-        selectors.addWidget(self.tree_button)
-        selectors.addWidget(self.mute_button)
-        selectors.addWidget(self.more_button)
-        # Les deux rangees du haut dans un seul widget : le plein ecran du
-        # mur et le cinema doivent pouvoir tout effacer d'un geste.
-        self.top_bar = QWidget(sort_page)
-        top_box = QVBoxLayout(self.top_bar)
-        top_box.setContentsMargins(0, 0, 0, 0)
-        top_box.setSpacing(6)
-        top_box.addLayout(selectors)
-        top_box.addLayout(header_row)
-        layout.addWidget(self.top_bar)
+        row_two.addWidget(self.tag_chips, 0)
+        row_two.addWidget(self.tags_button, 0)
 
         self.controls = ControlBar(COLUMN_CHOICES, sort_page)
         self.controls.changed.connect(self.on_controls_changed)
         self.controls.released.connect(self.setFocus)
         self.controls.sortChanged.connect(self.set_sort)
         self.controls.unseenChanged.connect(self.set_only_unseen)
+        self.controls.starsChanged.connect(self.set_stars_pick)
         self.controls.set_unseen(bool(self.cfg["only_unseen"]))
         self.controls.set_orientations(self.cfg["orientations"])
+        self.controls.set_stars(int(self.cfg["stars_pick"] if
+                                    self.cfg["stars_pick"] is not None else -1))
         self.controls.set_folder_bounds(int(self.cfg["folder_min"] or 0),
                                         int(self.cfg["folder_max"] or 0))
         # Les criteres valent des le depart, pas seulement apres un premier
@@ -501,127 +516,17 @@ class MainWindow(QMainWindow):
         self.controls.set_terms(self.cfg["filter_include"], self.cfg["filter_exclude"])
         self.controls.set_sort(self.cfg["sort_mode"] or "random")
         self.controls.set_columns(self.cfg["board_columns"])
-        header_row.addWidget(self.controls, 1)
+        row_two.addWidget(self.controls, 1)
         self.tabs.set_value(self.tab)
         self.tag_chips.set_value(self.tag_family)
         self.controls.set_browsing(self.browsing)
 
-        self.progress = QProgressBar(sort_page)
-        # Une barre muette de quatre pixels ne disait pas s'il restait dix
-        # dossiers ou six cents : sur un partage reseau, l'attente se compte en
-        # minutes et l'on veut savoir ou elle en est.
-        self.progress.setTextVisible(True)
-        self.progress.setFormat("%v / %m analysés")
-        self.progress.setFixedHeight(16)
-        layout.addWidget(self.progress)
-
-        header = QFrame(sort_page)
-        header.setObjectName("card")
-        # Repliable comme les rangees du haut : titre, informations et
-        # boutons alignes de force imposaient leur somme a la fenetre,
-        # qui ne pouvait plus retrecir.
-        header_layout = FlowLayout(header, spacing=14)
-        header_layout.setContentsMargins(14, 7, 14, 7)
-        self.item_title = QLabel("—", header)
-        self.item_title.setObjectName("title")
-        self.item_parent = QLabel("", header)
-        self.item_parent.setObjectName("parentPath")
-        self.item_subtitle = QLabel("", header)
-        self.item_subtitle.setObjectName("subtitle")
-        # Le chemin est deja dans le fil d'Ariane : le repeter sur sa propre
-        # ligne prenait de la hauteur pour rien. Il reste en infobulle.
-        self.item_parent.hide()
-        for label in (self.item_title, self.item_subtitle):
-            label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        # Avec une politique « Ignored » et un facteur nul, le titre recevait
-        # zero pixel : il etait bien la, et invisible. Il prend desormais la
-        # plus grosse part de la ligne, les chiffres se contentant du reste.
-        header_layout.addWidget(self.item_title)
-        header_layout.addWidget(self.item_subtitle)
-
-        # « Entrer » se lit au bout de la ligne qui decrit le dossier — poids,
-        # nombre de videos, date — la ou l'on vient de decider qu'il fallait y
-        # descendre. Il etait perdu dans la rangee des onglets, loin de son objet.
-        # Deux facons de regarder l'element courant, la ou on le regarde. Ce ne
-        # sont pas des onglets : on ne change pas de collection, on change de
-        # focale sur ce qu'on a deja sous les yeux.
-        self.contact_button = QPushButton("▦ Planche contact", header)
-        self.contact_button.setCheckable(True)
-        self.contact_button.setToolTip(
-            "Une ligne par vidéo, cinq instants par ligne   (Ctrl+L)")
-        self.contact_button.setFocusPolicy(Qt.NoFocus)
-        self.contact_button.clicked.connect(self.toggle_contact)
-        self.contact_button.hide()
-
-        # Avancer et reculer sans le clavier : trois vignettes d'affilee se
-        # jugent a la souris, et lacher la souris pour une fleche rompt le geste.
-        self.prev_button = QPushButton("◂", header)
-        self.prev_button.setToolTip("Élément précédent   (←)")
-        self.prev_button.setFixedWidth(30)
-        self.prev_button.setFocusPolicy(Qt.NoFocus)
-        self.prev_button.clicked.connect(lambda: self.step(-1))
-        self.next_button = QPushButton("▸", header)
-        self.next_button.setToolTip("Élément suivant   (→)")
-        self.next_button.setFixedWidth(30)
-        self.next_button.setFocusPolicy(Qt.NoFocus)
-        self.next_button.clicked.connect(lambda: self.step(1))
-
-        self.cinema_button = QPushButton("⛶ Cinéma", header)
-        self.cinema_button.setCheckable(True)
-        self.cinema_button.setToolTip(
-            "L'image seule, sans rien autour   (Ctrl+J)")
-        self.cinema_button.setFocusPolicy(Qt.NoFocus)
-        self.cinema_button.clicked.connect(self.toggle_cinema)
-        self.cinema_button.hide()
-
-        self.enter_button = QPushButton("Entrer dans le dossier  ▸", header)
-        self.enter_button.setObjectName("enter")
-        self.enter_button.setToolTip("Trier le contenu de ce dossier   (Ctrl+↓)")
-        self.enter_button.setFocusPolicy(Qt.NoFocus)
-        self.enter_button.clicked.connect(self.enter_current)
-        # Ouvrir l'explorateur **sur** le fichier, pas seulement sur son
-        # dossier : on le retrouve deja selectionne, prêt a etre glisse,
-        # renomme ou copie. Le raccourci existait (Ctrl+E), mais rien ne le
-        # disait a l'ecran.
-        self.reveal_button = QPushButton("⌸", header)
-        self.reveal_button.setObjectName("paneGesture")
-        self.reveal_button.setFixedSize(30, 24)
-        self.reveal_button.setToolTip(
-            "Ouvrir le dossier, le fichier déjà sélectionné   (Ctrl+E)")
-        self.reveal_button.setFocusPolicy(Qt.NoFocus)
-        self.reveal_button.clicked.connect(self.reveal_current)
-        header_layout.addWidget(self.reveal_button)
-        header_layout.addWidget(self.contact_button)
-        header_layout.addWidget(self.cinema_button)
-        header_layout.addWidget(self.enter_button)
-        # Dans un dossier : combien d'apercus a la fois. Meme geste que le mur.
-        self.grid_chips = QWidget(header)
-        grid_row = QHBoxLayout(self.grid_chips)
-        grid_row.setContentsMargins(0, 0, 0, 0)
-        grid_row.setSpacing(4)
-        self.grid_count_buttons: dict = {}
-        for count in (2, 4, 6, 8, 10):
-            button = QPushButton(str(count), self.grid_chips)
-            button.setObjectName("splitButton")
-            button.setFocusPolicy(Qt.NoFocus)
-            button.setToolTip(f"{count} aperçus à la fois")
-            button.clicked.connect(lambda _c=False, n=count: self.set_thumb_count(n))
-            grid_row.addWidget(button)
-            self.grid_count_buttons[count] = button
-        self.grid_chips.hide()
-        header_layout.addWidget(self.grid_chips)
-        self._mark_grid_count()
-        # En planche, ce bloc repetait le fil d'Ariane et une phrase d'aide, sur
-        # trois lignes, au detriment d'une rangee entiere de vignettes.
-        self.item_card = header
-        layout.addWidget(header)
-
         # Elle n'existe que le temps d'une selection : une barre d'actions
         # permanente occuperait une rangee pour ne rien dire la plupart du temps.
         self.picked_bar = QWidget(sort_page)
-        picked_row = FlowLayout(self.picked_bar, spacing=8)
+        picked_row = QHBoxLayout(self.picked_bar)
         picked_row.setContentsMargins(0, 0, 0, 0)
-        picked_row.setSpacing(8)
+        picked_row.setSpacing(6)
         self.picked_label = QLabel("", self.picked_bar)
         self.picked_label.setObjectName("pending")
         picked_row.addWidget(self.picked_label)
@@ -639,15 +544,111 @@ class MainWindow(QMainWindow):
             button.clicked.connect(slot)
             picked_row.addWidget(button)
         self.picked_bar.hide()
-        # En bout de la ligne des filtres, pas sur une ligne a elle : une
-        # rangee de plus pour quatre boutons coutait une rangee de vignettes.
-        header_row.addWidget(self.picked_bar, 0)
+        self.picked_bar.setMinimumWidth(120)
+        # En bout de la ligne des filtres, pas sur une ligne a elle.
+        row_two.addWidget(self.picked_bar, 0)
 
-        self.banner = QLabel("", sort_page)
+        # Sur une fiche, la seconde ligne est celle du titre : le nom, ce
+        # qu'on en sait, et les gestes qui s'y rapportent — ouvrir le
+        # dossier, le cinema, le hasard local, le nombre d'apercus.
+        header = QFrame(sort_page)
+        header.setObjectName("titleLine")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(2, 0, 0, 0)
+        header_layout.setSpacing(10)
+        self.item_title = QLabel("—", header)
+        self.item_title.setObjectName("title")
+        self.item_title.setTextFormat(Qt.PlainText)
+        # Le titre prend la place qui reste, et se coupe plutot que d'elargir
+        # la fenetre. Dans une disposition qui passait a la ligne, la meme
+        # politique lui donnait zero pixel : il etait la, et invisible.
+        self.item_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.item_title.setMinimumWidth(80)
+        self.item_title.installEventFilter(self)
+        self.item_parent = QLabel("", header)
+        self.item_parent.setObjectName("parentPath")
+        self.item_parent.hide()
+        self.item_subtitle = QLabel("", header)
+        self.item_subtitle.setObjectName("subtitle")
+        self.item_subtitle.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        self.item_subtitle.setMinimumWidth(40)
+        header_layout.addWidget(self.item_title, 1)
+        header_layout.addWidget(self.item_subtitle, 0)
+
+        # Ouvrir l'explorateur **sur** le fichier, pas seulement sur son
+        # dossier : on le retrouve deja selectionne, pret a etre glisse,
+        # renomme ou copie.
+        self.reveal_button = QPushButton("⌸", header)
+        self.reveal_button.setObjectName("paneGesture")
+        self.reveal_button.setFixedSize(30, 24)
+        self.reveal_button.setToolTip(
+            "Ouvrir le dossier, le fichier déjà sélectionné   (Ctrl+E)")
+        self.reveal_button.setFocusPolicy(Qt.NoFocus)
+        self.reveal_button.clicked.connect(self.reveal_current)
+        header_layout.addWidget(self.reveal_button, 0)
+
+        self.cinema_button = QPushButton("⛶", header)
+        self.cinema_button.setObjectName("paneGesture")
+        self.cinema_button.setFixedSize(30, 24)
+        self.cinema_button.setCheckable(True)
+        self.cinema_button.setToolTip(
+            "Cinéma : l'image seule, sans rien autour   (Ctrl+J)")
+        self.cinema_button.setFocusPolicy(Qt.NoFocus)
+        self.cinema_button.clicked.connect(self.toggle_cinema)
+        self.cinema_button.hide()
+        header_layout.addWidget(self.cinema_button, 0)
+
+        # Le hasard dans l'element affiche seulement : un signe, pas un
+        # bandeau de toute la largeur sous l'image.
+        self.random_here_button = QPushButton("⚄", header)
+        self.random_here_button.setObjectName("paneGesture")
+        self.random_here_button.setFixedSize(30, 24)
+        self.random_here_button.setToolTip(
+            "Une vidéo au hasard, dans ce dossier seulement")
+        self.random_here_button.setFocusPolicy(Qt.NoFocus)
+        self.random_here_button.clicked.connect(self.pick_random_here)
+        header_layout.addWidget(self.random_here_button, 0)
+
+        # Dans un dossier : combien d'apercus a la fois. Meme geste que le mur.
+        self.grid_chips = QWidget(header)
+        grid_row = QHBoxLayout(self.grid_chips)
+        grid_row.setContentsMargins(0, 0, 0, 0)
+        grid_row.setSpacing(4)
+        self.grid_count_buttons: dict = {}
+        for count in (2, 4, 6, 8, 10):
+            button = QPushButton(str(count), self.grid_chips)
+            button.setObjectName("splitButton")
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setToolTip(f"{count} aperçus à la fois")
+            button.clicked.connect(lambda _c=False, n=count: self.set_thumb_count(n))
+            grid_row.addWidget(button)
+            self.grid_count_buttons[count] = button
+        self.grid_chips.hide()
+        header_layout.addWidget(self.grid_chips, 0)
+        self._mark_grid_count()
+        self.item_card = header
+        row_two.addWidget(header, 1)
+
+        # Les deux rangees du haut dans un seul widget : le plein ecran du
+        # mur et le cinema doivent pouvoir tout effacer d'un geste.
+        self.top_bar = QWidget(sort_page)
+        top_box = QVBoxLayout(self.top_bar)
+        top_box.setContentsMargins(0, 0, 0, 0)
+        top_box.setSpacing(8)
+        top_box.addLayout(row_one)
+        top_box.addLayout(row_two)
+        layout.addWidget(self.top_bar)
+
+        # Le bandeau d'information flotte au-dessus du contenu, le temps de
+        # se lire : pose dans la page, il poussait tout vers le bas a chaque
+        # message, et la planche sautait. Fenetre-outil, pour passer aussi
+        # devant une video.
+        self.banner = QLabel("", self, Qt.Tool | Qt.FramelessWindowHint
+                             | Qt.WindowDoesNotAcceptFocus)
+        self.banner.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.banner.setObjectName("statusBanner")
         self.banner.setWordWrap(True)
         self.banner.hide()
-        layout.addWidget(self.banner)
 
         # Le panneau d'arborescence occupe la gauche, le lecteur le reste.
         middle = QHBoxLayout()
@@ -703,7 +704,7 @@ class MainWindow(QMainWindow):
         self.wall.siblingRequested.connect(self.wall_sibling)
         self.wall.unseenToggled.connect(self._wall_unseen)
         # Les reglages du mur — nombre, orientation, non vus, plein ecran — en
-        # bout de la ligne du titre, pas sur une ligne a eux.
+        # bout de la ligne de recherche, pas sur une ligne a eux.
         self.wall.controls.setParent(self.controls)
         self.controls.layout().itemAt(0).layout().addWidget(self.wall.controls)
         self.wall.controls.hide()
@@ -722,24 +723,19 @@ class MainWindow(QMainWindow):
         self.tunnel_trouble = ""
         self.viewer.addWidget(self.board)
         self.viewer.addWidget(self.wall)
-        # L'image, et dessous une seule rangee : fleche, barre d'avancement,
-        # hasard local, fleche. Les fleches quittent l'entete, qui n'en est
-        # que plus courte.
-        center = QWidget(sort_page)
-        center_box = QVBoxLayout(center)
-        center_box.setContentsMargins(0, 0, 0, 0)
-        center_box.setSpacing(4)
-        center_box.addWidget(self.viewer, 1)
-        self.nav_row = QWidget(center)
-        nav = QHBoxLayout(self.nav_row)
-        nav.setContentsMargins(0, 0, 0, 0)
-        nav.setSpacing(8)
-        nav.addWidget(self.prev_button, 0)
-        nav.addWidget(self.single.under, 1)
-        nav.addWidget(self.random_here_button, 0)
-        nav.addWidget(self.next_button, 0)
-        center_box.addWidget(self.nav_row, 0)
-        middle.addWidget(center, 1)
+        middle.addWidget(self.viewer, 1)
+
+        # Le bandeau de la fiche : au survol de l'image, le nom, le temps
+        # restant et les gestes ; le reste du temps, un trait tres fin. La
+        # meme regle que sur le mur et la planche.
+        self.single_bar = OverBar(self)
+        for text, tip, slot in (
+            ("◂", "Précédente   (←)", lambda: self.step(-1)),
+            ("▸", "Suivante   (→)", lambda: self.step(1)),
+            ("⛶", "Cinéma   (Ctrl+J)", self.toggle_cinema),
+        ):
+            self.single_bar.add_gesture(text, tip, slot)
+        self.single.progressed.connect(self.single_bar.set_progress)
 
         # Le lecteur de cote : on y envoie une video d'un clic droit, et la
         # planche continue de vivre a gauche — on peut changer de page, cocher,
@@ -758,35 +754,43 @@ class MainWindow(QMainWindow):
         self.aside_player.finished.connect(lambda: self.aside_step(1))
         aside_box.addWidget(self.aside_player, 1)
 
-        # Le bandeau se pose **sur** l'image, en bas, au lieu de la surmonter :
-        # une rangee de boutons au-dessus coutait quarante pixels de hauteur a
-        # chaque fois, et c'est la hauteur qui fait voir une video.
-        self.aside_bar = QWidget(self.aside)
-        self.aside_bar.setObjectName("asideBar")
-        bar_row = QHBoxLayout(self.aside_bar)
-        bar_row.setContentsMargins(10, 4, 6, 4)
-        bar_row.setSpacing(6)
-        self.aside_title = QLabel("", self.aside_bar)
-        self.aside_title.setObjectName("parentPath")
-        self.aside_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        bar_row.addWidget(self.aside_title, 1)
+        # Le bandeau flotte sur l'image et ne parait qu'au survol : une
+        # rangee permanente coutait quarante pixels de hauteur, et c'est la
+        # hauteur qui fait voir une video.
+        self.aside_bar = OverBar(self)
+        self.aside_title = self.aside_bar.name
         for text, tip, slot in (
             ("◂", "Précédente", lambda: self.aside_step(-1)),
             ("▸", "Suivante", lambda: self.aside_step(1)),
             ("⛶", "Plein écran", self.aside_fullscreen),
             ("✕", "Fermer le lecteur", self.close_aside),
         ):
-            button = QPushButton(text, self.aside_bar)
-            button.setFixedWidth(30)
-            button.setToolTip(tip)
-            button.setFocusPolicy(Qt.NoFocus)
-            button.clicked.connect(slot)
-            bar_row.addWidget(button)
-        aside_box.addWidget(self.aside_bar)
+            self.aside_bar.add_gesture(text, tip, slot)
+        self.aside_player.progressed.connect(self.aside_bar.set_progress)
+
+        # Un battement suffit a savoir si la souris est sur l'image : le
+        # widget video natif ne rend pas les evenements de survol.
+        self.aside_watch = QTimer(self)
+        self.aside_watch.setInterval(120)
+        self.aside_watch.timeout.connect(self._watch_bars)
+        self.aside_watch.start()
         self.aside.hide()
         self.aside_index = -1
         middle.addWidget(self.aside, 1)
         layout.addLayout(middle, 1)
+
+        # Une seule ligne sous l'image, et seulement sur une fiche : reculer,
+        # les touches qui decident, la note, avancer.
+        self.prev_button = QPushButton("◂", sort_page)
+        self.prev_button.setToolTip("Élément précédent   (←)")
+        self.prev_button.setFixedWidth(30)
+        self.prev_button.setFocusPolicy(Qt.NoFocus)
+        self.prev_button.clicked.connect(lambda: self.step(-1))
+        self.next_button = QPushButton("▸", sort_page)
+        self.next_button.setToolTip("Élément suivant   (→)")
+        self.next_button.setFixedWidth(30)
+        self.next_button.setFocusPolicy(Qt.NoFocus)
+        self.next_button.clicked.connect(lambda: self.step(1))
 
         self.stars = StarStrip(22, sort_page)
         self.stars.rated.connect(self.rate_current)
@@ -797,11 +801,16 @@ class MainWindow(QMainWindow):
         self.commands.skipRequested.connect(self.on_command_skip)
         self.commands.moveRequested.connect(self.on_command_move)
         self.commands.rateRequested.connect(self.rate_current)
-        bottom = QHBoxLayout()
+        self.bottom_bar = QWidget(sort_page)
+        bottom = QHBoxLayout(self.bottom_bar)
         bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(8)
+        bottom.addWidget(self.prev_button, 0)
         bottom.addWidget(self.commands, 1)
-        bottom.addWidget(self.stars, 0, Qt.AlignBottom)
-        layout.addLayout(bottom)
+        bottom.addWidget(self.stars, 0)
+        bottom.addWidget(self.next_button, 0)
+        layout.addWidget(self.bottom_bar)
+        self.nav_row = self.bottom_bar
 
         # Ce pense-bete etait une seule etiquette de cinq mille pixels de large.
         # Qt en faisait la largeur minimale de la fenetre entiere : elle ne
@@ -826,6 +835,7 @@ class MainWindow(QMainWindow):
         # l'on en a besoin serait trop tard.
         self.quiet_page = QuietPage(self)
         self.quiet_page.back.clicked.connect(self.leave_quiet)
+        self.quiet_page.leave.connect(self.leave_quiet)
         self.stack.addWidget(self.quiet_page)
 
         # Rien ne disait que des apercus etaient en fabrication : devant une
@@ -1007,7 +1017,7 @@ class MainWindow(QMainWindow):
     def _show_known(self, known: list, restore_id: str = "") -> None:
         """Affiche d'emblee ce que l'index savait de cette racine."""
         self.all_items = known
-        self.items = [item for item in known if self._matches(item)]
+        self.items = self._filtered(known)
         self.apply_sort()
         # Des que la liste est a l'ecran, on prepare ce qu'elle montrera : la
         # relecture du disque n'a pas a finir pour que les apercus commencent.
@@ -1150,9 +1160,21 @@ class MainWindow(QMainWindow):
         when = state.get("scanned_at") or state.get("counted_at")
         if when:
             parts.append(f"analysé {when}")
-        self.state_button.setText("   ·   ".join(parts))
+        # Court a l'ecran — le detail est dans l'infobulle. Une phrase
+        # entiere se faisait rogner jusqu'a ne plus rien vouloir dire, et
+        # l'on se demandait ce qu'etait ce bout de texte.
+        short = []
+        if videos:
+            short.append(f"{self._thousands(videos)} vidéos")
+        if live:
+            short.append(live)
+        elif audited:
+            short.append(f"{thumbs * 100 // max(1, audited)} % de vignettes")
+        self.state_button.setText("  ·  ".join(short) or "collection : ?")
+        self._state_full = "   ·   ".join(parts)
         self.state_button.setToolTip(
-            "Ce que le logiciel sait de la collection :\n"
+            (self._state_full + "\n\n" if getattr(self, "_state_full", "") else "")
+            + "Ce que le logiciel sait de la collection :\n"
             f"• vidéos répertoriées : {self._thousands(videos) if videos else 'pas encore comptées'}"
             f"{' (' + state['counted_at'] + ')' if state.get('counted_at') else ''}\n"
             f"• vignettes déjà faites : {self._thousands(thumbs) if audited else 'pas encore vérifiées'}"
@@ -1503,7 +1525,7 @@ class MainWindow(QMainWindow):
         self.all_items = [Item(path=Path(video), kind=MODE_FILES, videos=[video],
                                video_count=1, file_count=1)
                           for video in item.videos]
-        self.items = [entry for entry in self.all_items if self._matches(entry)]
+        self.items = self._filtered()
         self.apply_sort()
         self.mode = MODE_FLAT
         self.content = CONTENT_VIDEOS
@@ -1795,7 +1817,7 @@ class MainWindow(QMainWindow):
                 self.all_items = [i for i in self.all_items if not i.is_tag]
                 if not self.all_items:
                     self.all_items = list(getattr(self, "_plain_items", []))
-                self.items = [i for i in self.all_items if self._matches(i)]
+                self.items = self._filtered()
                 self.apply_sort()
             return
         plain = [i for i in self.all_items if not i.is_tag]
@@ -1842,7 +1864,7 @@ class MainWindow(QMainWindow):
                 self.update_counter()
                 return
             self.all_items = found if self.tab == TAB_TAGS else found + plain
-            self.items = [item for item in self.all_items if self._matches(item)]
+            self.items = self._filtered()
             self.apply_sort()
             self.start_harvest()
             if self.browsing:
@@ -1879,7 +1901,7 @@ class MainWindow(QMainWindow):
         # Dans son onglet, un mot-cle n'est pas un en-tete pose sur la liste des
         # dossiers : c'est toute la liste.
         self.all_items = found if self.tab == TAB_TAGS else found + plain
-        self.items = [item for item in self.all_items if self._matches(item)]
+        self.items = self._filtered()
         self.apply_sort()
         self.start_harvest()
         if self.browsing:
@@ -2085,6 +2107,17 @@ class MainWindow(QMainWindow):
             self.burst_timer.stop()
             self.show_banner("Rafale arrêtée.", "quiet")
 
+    def set_stars_pick(self, pick: int) -> None:
+        """N'affiche que les éléments notés ainsi. -1 rend tout."""
+        self.controls.set_stars(pick)
+        self.cfg["stars_pick"] = int(pick)
+        self.cfg.save_soon()
+        self.on_controls_changed()
+        if pick > 0 and not self.items:
+            self.show_banner(
+                f"Aucun élément noté {'★' * pick}. "
+                "Les notes se posent avec les touches 1 à 5.", "quiet")
+
     def set_only_unseen(self, on: bool) -> None:
         self.cfg["only_unseen"] = bool(on)
         self.cfg.save_soon()
@@ -2154,15 +2187,30 @@ class MainWindow(QMainWindow):
         if self.stack.currentIndex() == PAGE_QUIET:
             return
         self._quiet_from = self.stack.currentIndex()
+        self.banner.hide()
+        self.single_bar.hide()
+        self.single.marks.hide()
         self._hush_players()
         self.wall.stop()
         self.close_aside()
         self.single.peek_end()
         self.radial.close_menu()
+        first = not self.cfg["quiet_explained"]
         self.quiet_page.start()
         self.stack.setCurrentIndex(PAGE_QUIET)
         self.setWindowTitle(QUIET_TITLE)
         self.quiet_page.setFocus()
+        if first:
+            # Une page dont on ne sait plus sortir pieg e au lieu de proteger :
+            # la premiere fois, elle dit comment on la quitte. Une seule fois.
+            self.cfg["quiet_explained"] = True
+            self.cfg.save()
+            QMessageBox.information(
+                self, "Passer à autre chose",
+                "Prisme s'efface derrière une page qui ne dit rien de ce que "
+                "vous faisiez.\n\nPour revenir : Ctrl+K, la touche Échap, "
+                "ou un double-clic n'importe où sur la page.\n\nCe message "
+                "ne reparaîtra plus.")
 
     def leave_quiet(self) -> None:
         """On revient là où l'on était."""
@@ -2198,7 +2246,7 @@ class MainWindow(QMainWindow):
         if self.share_server is not None:
             self.share_server.library.refresh()
         if self.root is not None:
-            self.items = [i for i in self.all_items if self._matches(i)]
+            self.items = self._filtered()
             if self.tab == TAB_VIDEOS:
                 self.show_videos_tab()
             self.apply_sort()
@@ -2664,8 +2712,7 @@ class MainWindow(QMainWindow):
                 key, item.videos, count,
                 page=page, one_per_video=item.kind == MODE_FOLDERS,
                 urgent=current,
-                blind=item.kind == MODE_FOLDERS and not self.contact,
-                contact=self.contact and item.kind == MODE_FOLDERS,
+                blind=item.kind == MODE_FOLDERS,
             )
             return
         if current:
@@ -2846,7 +2893,7 @@ class MainWindow(QMainWindow):
             self.items.sort(key=lambda i: known_media(i)[1],
                             reverse=self.sort_mode.endswith("desc"))
         else:
-            self.items.sort(key=lambda i: i.name.lower())
+            self.items.sort(key=_BY_NAME)
 
     def _sort_videos(self, item) -> None:
         """Reclasse les vidéos d'un dossier selon le mode choisi.
@@ -2856,18 +2903,22 @@ class MainWindow(QMainWindow):
         """
         if item.kind != MODE_FOLDERS or not item.videos:
             return
-        if not self.sort_mode:
+        # Par nom, sauf si l'on classe par duree : passer de 4 a 6 apercus
+        # rebattait les videos, parce que le classement suivait des durees
+        # qui arrivaient au fil de l'eau. Les premieres restent les premieres.
+        if self.sort_mode in ("duration_desc", "duration_asc"):
+            def duration_of(path):
+                return (INDEX.probe(path) or {}).get("duration", 0.0)
+            item.videos.sort(key=lambda path: (duration_of(path),
+                                               str(path).lower()),
+                             reverse=self.sort_mode == "duration_desc")
+        else:
             item.videos.sort(key=lambda path: str(path).lower())
-            return
-        def duration_of(path):
-            return (INDEX.probe(path) or {}).get("duration", 0.0)
-        item.videos.sort(key=duration_of, reverse=self.sort_mode == "desc")
 
     def _show_counts(self) -> None:
         """Une seule ligne dit ce qui est montre, ce qui est masque, et ou l'on en est."""
         self.controls.set_filters(self._active_filters())
-        hidden = (sum(1 for i in self.all_items if self._sortable(i))
-                  - len(self.items))
+        hidden = self._sortable_count() - len(self.items)
         if self.browsing:
             first, last = self.board._page_bounds()
             shown = f"{first + 1 if self.items else 0}–{last} sur {len(self.items)}"
@@ -2903,9 +2954,25 @@ class MainWindow(QMainWindow):
         """Un bandeau, quatre tons : info, quiet, done, error. Rien d'autre."""
         color = BANNER_TONES.get(tone, BANNER_TONES["info"])
         self.banner.setText(text)
-        self.banner.setStyleSheet(f"background: {color}; color: #e9eef4;")
+        self.banner.setStyleSheet(
+            f"QLabel {{ background: {color}; color: #e9eef4; border-radius: 8px;"
+            " padding: 8px 14px; font-weight: 600; }")
+        if self.stack.currentIndex() == PAGE_QUIET or self.isMinimized():
+            return
+        self._place_banner()
         self.banner.show()
+        self.banner.raise_()
         self.banner_timer.start(4000)
+
+    def _place_banner(self) -> None:
+        """En haut de la zone d'image, centre : il se lit sans rien pousser."""
+        anchor = self.viewer if self.viewer.isVisible() else self.centralWidget()
+        width = max(240, min(680, anchor.width() - 40))
+        height = self.banner.heightForWidth(width)
+        if height <= 0:
+            height = self.banner.sizeHint().height()
+        corner = anchor.mapToGlobal(QPoint((anchor.width() - width) // 2, 10))
+        self.banner.setGeometry(corner.x(), corner.y(), width, height)
 
     # ------------------------------------------------------------------
     # Actions
@@ -2996,7 +3063,7 @@ class MainWindow(QMainWindow):
         if not self._plain_items or self._plain_root != self.root:
             return False
         self.all_items = list(self._plain_items)
-        self.items = [i for i in self.all_items if self._matches(i)]
+        self.items = self._filtered()
         self.mode = MODE_FOLDERS
         self.apply_sort()
         self.index = 0
@@ -3135,6 +3202,9 @@ class MainWindow(QMainWindow):
                           + (" — à peu près" if self._loose else ""))
         if self.cfg["only_unseen"]:
             active.append("non vus seulement")
+        pick = int(self.cfg["stars_pick"] if self.cfg["stars_pick"] is not None else -1)
+        if pick >= 0:
+            active.append("sans note" if pick == 0 else f"notés {'★' * pick}")
         chosen = self.controls.orientations()
         if len(chosen) == 1:
             active.append("verticales seulement" if chosen[0] == "vertical"
@@ -3149,6 +3219,8 @@ class MainWindow(QMainWindow):
     def reset_filters(self) -> None:
         """Tout retirer d'un geste : recherche, non vus, orientation, bornes."""
         self.controls.set_terms("", "")
+        self.controls.set_stars(-1)
+        self.cfg["stars_pick"] = -1
         self.controls.set_orientations(("vertical", "horizontal"))
         self.controls.set_folder_bounds(0, 0)
         self.cfg["only_unseen"] = False
@@ -3173,9 +3245,7 @@ class MainWindow(QMainWindow):
     def toggle_wall_fullscreen(self, on: bool | None = None) -> None:
         """Le mur seul, sur tout l'écran. Échap ramène tout le reste."""
         self.wall_full = (not self.wall_full) if on is None else bool(on)
-        chrome = (self.top_bar, self.crumbs, self.tabs, self.controls,
-                  self.commands, self.progress, self.stars, self.item_card,
-                  self.nav_row, self.picked_bar)
+        chrome = (self.top_bar, self.bottom_bar)
         if self.wall_full:
             self._wall_kept = (self.tree.isVisible(), self.aside.isVisible(),
                                self.windowState())
@@ -3357,7 +3427,7 @@ class MainWindow(QMainWindow):
             fresh[key] = item
         self._flat_cache = fresh
         self.all_items = list(fresh.values())
-        self.items = [i for i in self.all_items if self._matches(i)]
+        self.items = self._filtered()
         self.mode = MODE_FLAT
         self.apply_sort()
         self.index = 0
@@ -3702,48 +3772,55 @@ class MainWindow(QMainWindow):
         """Aligne l'entête sur l'état réel, pour qu'il dise où l'on se trouve."""
         self.tabs.set_value(self.tab)
         self.tag_chips.set_value(self.tag_family)
-        self.tag_chips.setVisible(self.tab == TAB_TAGS)
-        self.tags_button.setVisible(self.tab == TAB_TAGS)
+        wall = self.tab == TAB_SPLIT
+        # Une fiche est ce qu'on regarde quand on ne parcourt pas — hors du
+        # mur, qui n'en a pas.
+        sheet = not self.browsing and not wall
+        self.tag_chips.setVisible(self.tab == TAB_TAGS and not sheet)
+        self.tags_button.setVisible(self.tab == TAB_TAGS and not sheet)
         self.controls.set_browsing(self.browsing)
         self.controls.set_mode({TAB_SPLIT: "wall", TAB_FOLDERS: "folders",
                                 TAB_TAGS: "tags"}.get(self.tab, "videos"))
-        # La fiche ne dit rien qu'on ne lise deja ailleurs quand on parcourt.
-        self.item_card.setVisible(not self.browsing)
-        self.wall.controls.setVisible(self.tab == TAB_SPLIT and not self.wall_full)
+        # La seconde ligne : les filtres sur une planche, le titre sur une
+        # fiche. Jamais les deux — c'etait trois lignes avant l'image.
+        self.controls.setVisible(not sheet)
+        self.item_card.setVisible(sheet)
+        self.picked_bar.setVisible(not sheet and bool(self.board.picked_ids)
+                                   and not wall)
+        self.wall.controls.setVisible(wall and not self.wall_full)
         item = self.current
-        self.grid_chips.setVisible(
-            not self.browsing and self.tab != TAB_SPLIT and item is not None
-            and item.kind == MODE_FOLDERS and not item.locked)
-        item = self.current
-        self.contact_button.setVisible(
-            not self.browsing and item is not None
-            and item.kind == MODE_FOLDERS and not item.locked)
-        self.contact_button.setChecked(self.contact)
+        folder = (item is not None and item.kind == MODE_FOLDERS
+                  and not item.locked)
+        self.grid_chips.setVisible(sheet and folder)
         self.cinema_button.setVisible(
-            not self.browsing and item is not None
-            and item.kind != MODE_FOLDERS)
+            sheet and item is not None and item.kind != MODE_FOLDERS)
         self.cinema_button.setChecked(self.cinema)
-        for button in (self.prev_button, self.next_button):
-            button.setVisible(not self.browsing and bool(self.items))
-        self.enter_button.setVisible(
-            not self.browsing and item is not None
-            and item.kind == MODE_FOLDERS and not item.locked
-        )
-        self.stars.setVisible(not self.browsing)
-        self.reveal_button.setVisible(not self.browsing and item is not None
+        self.reveal_button.setVisible(sheet and item is not None
                                       and not item.is_tag and not item.locked)
+        # Le hasard local ne vaut que devant un dossier : devant une seule
+        # video, il la relancait, ce qui n'a aucun sens.
+        self.random_here_button.setVisible(sheet and folder
+                                           and bool(item.videos))
+        self.controls.random_here.setVisible(self.browsing and not wall
+                                             and bool(self.items))
+        # Un dossier s'ouvre d'un clic sur son titre : c'est la que l'on
+        # vient de decider qu'il fallait y descendre.
+        if sheet and folder and not item.is_tag:
+            self.item_title.setCursor(Qt.PointingHandCursor)
+            self.item_title.setToolTip(
+                f"{item.name}\n\nCliquer pour entrer dans le dossier   (Ctrl+↓)")
+        else:
+            self.item_title.unsetCursor()
+        # Une seule ligne sous l'image, et seulement sur une fiche.
+        self.bottom_bar.setVisible(sheet and not self.cinema)
+        for button in (self.prev_button, self.next_button):
+            button.setVisible(bool(self.items))
+        self.stars.setVisible(sheet and item is not None
+                              and item.kind != MODE_FOLDERS)
         root = self.root
         self.up_button.setEnabled(
             bool(self.levels) or (root is not None
                                   and Path(root).parent != Path(root)))
-        # Le hasard local ne vaut que devant un dossier : devant une seule
-        # video, il la relancait, ce qui n'a aucun sens.
-        self.random_here_button.setVisible(
-            self.browsing or (item is not None and item.kind == MODE_FOLDERS
-                              and bool(item.videos)))
-        self.nav_row.setVisible(self.tab != TAB_SPLIT and not self.cinema)
-        self.single.under.setVisible(
-            not self.browsing and item is not None and item.kind != MODE_FOLDERS)
 
     def _origin_for(self, current):
         """Le plus haut dossier dont `current` descend : la racine du fil."""
@@ -3832,6 +3909,13 @@ class MainWindow(QMainWindow):
 
     def _board_position_of(self, key: str) -> int:
         item_id = key[len("board@"):]
+        # La vignette arrive presque toujours pour la page affichee : on y
+        # cherche d'abord, plutot que de parcourir cent mille elements a
+        # chaque image recue.
+        first, last = self.board._page_bounds()
+        for position in range(max(0, first), min(last, len(self.items))):
+            if self.items[position].item_id == item_id:
+                return position
         for position, item in enumerate(self.items):
             if item.item_id == item_id:
                 return position
@@ -3853,7 +3937,6 @@ class MainWindow(QMainWindow):
         self.aside_title.setText(item.name)
         self.aside_title.setToolTip(str(item.path))
         self.aside.show()
-        self._place_aside_bar()
         self.aside_player.set_muted(self.cfg["muted"])
         self.aside_player.set_loop(False)
         self.aside_player.set_item(video)
@@ -3861,13 +3944,57 @@ class MainWindow(QMainWindow):
         # et fabriquer cinq images pour rien retardait celles de la planche.
 
     def _place_aside_bar(self) -> None:
-        """Le bandeau vit sous l'image, dans la mise en page.
+        """Repose le bandeau sur l'image — il suit le lecteur, il ne le pousse pas."""
+        self.aside_bar.place_on(self.aside_player.video_area)
 
-        Pose dessus, il disparaissait : le widget video de Windows est une
-        fenetre native qui se dessine par-dessus. On ne pouvait donc plus ni
-        fermer le lecteur ni passer au suivant.
-        """
-        self.aside_bar.show()
+    def _watch_aside(self) -> None:
+        """Montre le bandeau tant que la souris est sur l'image, l'efface sinon."""
+        area = self.aside_player.video_area
+        if (self.aside.isHidden() or self.aside_index < 0
+                or not area.isVisible() or not self.isActiveWindow()):
+            self.aside_player.marks.hide()
+            return self.aside_bar.hide()
+        if self._pointer_on(area):
+            self.aside_player.marks.hide()
+            self._place_aside_bar()
+            self.aside_bar.show()
+            self.aside_bar.raise_()
+        else:
+            self.aside_bar.hide()
+            self.aside_player.marks.place_on(area)
+
+    @staticmethod
+    def _pointer_on(widget) -> bool:
+        corner = widget.mapToGlobal(QPoint(0, 0))
+        return QRect(corner.x(), corner.y(), widget.width(),
+                     widget.height()).contains(QCursor.pos())
+
+    def _watch_bars(self) -> None:
+        """Le meme geste pour toutes les images qui jouent : un trait tres fin
+        en permanence, le bandeau complet au survol."""
+        self._watch_aside()
+        area = self.single.video_area
+        item = self.current
+        playing = (self.stack.currentIndex() == PAGE_SORT
+                   and not self.isMinimized() and area.isVisible()
+                   and self.viewer.currentWidget() is self.single
+                   and item is not None and item.kind != MODE_FOLDERS
+                   and not self.single.peeking)
+        if not playing:
+            self.single_bar.hide()
+            self.single.marks.hide()
+            return
+        if self.isActiveWindow() and self._pointer_on(area):
+            self.single.marks.hide()
+            self.single_bar.set_name(item.name)
+            self.single_bar.place_on(area)
+            self.single_bar.show()
+            self.single_bar.raise_()
+        else:
+            self.single_bar.hide()
+            self.single.marks.place_on(area)
+        if self.banner.isVisible():
+            self._place_banner()
 
     def aside_fullscreen(self) -> None:
         """Donne tout l'ecran a la video ouverte a cote, et sait en revenir."""
@@ -3897,72 +4024,58 @@ class MainWindow(QMainWindow):
 
     def close_aside(self) -> None:
         self.aside_player.stop()
+        self.aside_bar.hide()
         self.aside.hide()
         self.aside_index = -1
-        self.setFocus()
-
-    def toggle_contact(self, on: bool | None = None) -> None:
-        """Bascule la fiche d'un dossier en planche contact.
-
-        Dix vignettes disent quelles vidéos sont là ; une planche contact dit ce
-        qu'elles racontent. Ce n'est pas la même question, et c'est pourquoi ce
-        n'est pas un onglet mais une bascule, posée là où l'on regarde.
-        """
-        self.contact = (not self.contact) if on is None else bool(on)
-        self.contact_button.setChecked(self.contact)
-        item = self.current
-        if item is None or item.kind != MODE_FOLDERS:
-            return
-        self.plans.pop(self._plan_key(item, self.page_of(item)), None)
-        self.grid.set_contact(self.contact)
-        self.grid.set_item(self._plan_key(item, self.page_of(item)),
-                           "planche contact…" if self.contact else "…")
-        self._request_previews(item, current=True)
         self.setFocus()
 
     def toggle_cinema(self, on: bool | None = None) -> None:
         """Ne laisse que l'image : tout le reste s'efface le temps de regarder."""
         self.cinema = (not self.cinema) if on is None else bool(on)
         self.cinema_button.setChecked(self.cinema)
-        for widget in (self.top_bar, self.crumbs, self.tabs, self.controls,
-                       self.commands, self.progress, self.stars, self.nav_row):
+        # L'image seule. On en sort par le bandeau qui parait au survol de
+        # l'image (⛶), par Ctrl+J ou par Échap : rien d'autre ne reste.
+        for widget in (self.top_bar, self.bottom_bar):
             widget.setVisible(not self.cinema)
-        # La fiche reste, mais reduite a ce qui permet d'en sortir et de
-        # continuer : sans cela, une fois entre dans le cinema, plus rien ne
-        # permettait d'en revenir.
-        self.item_card.setVisible(True)
-        for widget in (self.item_subtitle, self.contact_button,
-                       self.enter_button):
-            widget.setVisible(not self.cinema and widget.isEnabled())
-        self.cinema_button.setText("✕ Quitter le cinéma" if self.cinema
-                                   else "⛶ Cinéma")
         if not self.cinema and getattr(self, "_back_to_board", False):
             self._back_to_board = False
             self.show_board_at(self.index)
         if self.cinema:
             self.tree.hide()
-            # Regarder et commander sont deux moments distincts : en cinema,
-            # la fiche s'efface, et le moindre mouvement de souris la rappelle
-            # pour deux secondes.
-            self.item_card.hide()
-            self.setMouseTracking(True)
-            self.chrome_timer.start(2000)
+        else:
+            self._apply_selectors()
         self.setFocus()
 
     def _wake_chrome(self) -> None:
-        """Rappelle la fiche le temps d'un geste, puis la laisse repartir."""
-        if not self.cinema:
-            return
-        self.item_card.show()
-        self.chrome_timer.start(2000)
+        """Le cinema n'a plus de chrome a rappeler : le bandeau de survol,
+        pose sur l'image, en tient lieu."""
 
     def _sleep_chrome(self) -> None:
-        if self.cinema:
-            self.item_card.hide()
+        pass
 
     def mouseMoveEvent(self, event):
         super().mouseMoveEvent(event)
         self._wake_chrome()
+
+    def eventFilter(self, watched, event):
+        if (watched is getattr(self, "progress", None)
+                and event.type() in (QEvent.Show, QEvent.Hide)
+                and hasattr(self, "state_button")):
+            self.state_button.setVisible(event.type() == QEvent.Hide)
+        if (watched is getattr(self, "item_title", None)
+                and event.type() == QEvent.MouseButtonRelease
+                and event.button() == Qt.LeftButton):
+            item = self.current
+            if (not self.browsing and item is not None
+                    and item.kind == MODE_FOLDERS and not item.locked):
+                self.enter_current()
+                return True
+        return super().eventFilter(watched, event)
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if self.banner.isVisible():
+            self._place_banner()
 
     def on_video_finished(self) -> None:
         """La vidéo est allée à son terme : on passe à la suivante.
@@ -4179,15 +4292,19 @@ class MainWindow(QMainWindow):
     def pick_random_here(self) -> None:
         """Tire au hasard parmi les vidéos du seul élément affiché."""
         import random
-        item = self.current
-        pool = [str(video) for video in (item.videos if item else [])]
+        if self.browsing:
+            # Sur la planche, « ici » est la liste affichee, filtres compris.
+            pool = [str(v) for i in self.items if not i.locked for v in i.videos]
+            where = "cette liste"
+        else:
+            item = self.current
+            pool = [str(video) for video in (item.videos if item else [])]
+            where = f"« {item.name} »" if item else ""
         if not pool:
             self.show_banner("Aucune vidéo ici", "quiet")
             return
         video = random.choice(pool)
-        self.show_banner(
-            f"Au hasard dans « {item.name} » : {Path(video).name}", "info"
-        )
+        self.show_banner(f"Au hasard dans {where} : {Path(video).name}", "info")
         self.play_in_app(video)
 
     def pick_random(self) -> None:
@@ -4274,6 +4391,36 @@ class MainWindow(QMainWindow):
     def _terms(text: str) -> list:
         return [term.strip().lower() for term in text.split(",") if term.strip()]
 
+    def _parsed(self, query: str):
+        """La requete, analysee une fois par changement et non par element.
+
+        On la reanalysait pour chacune des cent mille videos, a chaque clic.
+        """
+        if query != getattr(self, "_parsed_for", None):
+            self._parsed_for = query
+            self._parsed_value = parse_query(query)
+        return self._parsed_value
+
+    def _sortable_count(self) -> int:
+        """Combien d'elements pourraient s'afficher, filtres mis a part."""
+        return len(self._sortable_items())
+
+    def _sortable_items(self) -> list:
+        """Les elements affichables, filtres mis a part — gardes tant que la
+        liste ne change pas.
+
+        Les recalculer a chaque clic, trois fois, sur cent mille elements,
+        c'etait l'essentiel de la lenteur des filtres.
+        """
+        from . import scan as _scan
+        key = (id(self.all_items), len(self.all_items), _scan.SHOW_VEILED,
+               frozenset(_scan.VEILED))
+        if self.scanning or key != getattr(self, "_sortable_key", None):
+            self._sortable_key = key
+            sortable = self._sortable
+            self._sortable_list = [i for i in self.all_items if sortable(i)]
+        return self._sortable_list
+
     def _sortable(self, item) -> bool:
         """Un dossier sans une seule video n'a rien a trier.
 
@@ -4288,74 +4435,99 @@ class MainWindow(QMainWindow):
                     and not item.video_count)
 
     def _matches(self, item) -> bool:
-        if not self._sortable(item):
-            return False
-        if self.cfg["only_unseen"] and not item.is_tag and (
-                item.status or INDEX.is_seen(item.item_id)):
-            return False
+        return self._sortable(item) and self._matcher()(item)
+
+    def _filtered(self, items=None) -> list:
+        """Ce qui passe les filtres, parmi `items` (tout, par defaut)."""
+        keep = self._matcher()
+        if items is None:
+            return [item for item in self._sortable_items() if keep(item)]
+        sortable = self._sortable
+        return [item for item in items if sortable(item) and keep(item)]
+
+    def _matcher(self):
+        """Le filtre, pret a courir : reglages lus une fois, pas par element.
+
+        Relire la configuration, reanalyser la recherche et redecouper les
+        exclusions pour chacune des cent mille videos coutait l'essentiel
+        d'un clic sur « Non vus » ou « Verticales ».
+        """
         rules = self.criteria or {}
-        # Un seul champ, mais quelques mots de plus que les siens : « plage
-        # -hiver », « plage or mer », « "saison 2" ». C'est ce qui a permis de
-        # retirer la barre de filtres sans rien perdre.
-        query = rules.get("include", self.cfg["filter_include"])
-        if query and not matches_text(item.name, query, self._loose):
-            return False
-        exclude = self._terms(rules.get("exclude", self.cfg["filter_exclude"]))
-        if exclude and any(term in item.name.lower() for term in exclude):
-            return False
-        return self._matches_numeric(item)
+        cfg = self.cfg
+        only_unseen = bool(cfg["only_unseen"])
+        seen = INDEX.seen
+        query = rules.get("include", cfg["filter_include"])
+        parsed = self._parsed(query) if query else None
+        loose = self._loose
+        exclude = self._terms(rules.get("exclude", cfg["filter_exclude"]))
+        ratings = self.ratings.data
+        stars_min = rules.get("stars", -1) if rules else -1
+        stars_pick = rules.get("stars_pick", -1) if rules else -1
+        if stars_pick is None:
+            stars_pick = -1
+        folder_min = (rules.get("folder_min") or 0) if rules else 0
+        folder_max = (rules.get("folder_max") or 0) if rules else 0
+        wanted = rules.get("orientations") if rules else None
+        orient = next(iter(wanted)) if wanted is not None and len(wanted) == 1 else None
+        duration_op = rules.get("duration_op") if rules else None
+        duration_s = rules.get("duration_s", 0) if rules else 0
+        res = rules.get("resolution", 0) if rules else 0
+        res_op = rules.get("resolution_op") if rules else None
+        needs_media = bool(duration_op or res > 0)
+        probe = INDEX.probe
 
-    def _matches_numeric(self, item) -> bool:
-        """Durée, résolution et note. Ce qu'on ignore encore passe le filtre."""
-        rules = self.criteria
-        if not rules:
-            return True
-
-        stars_min = rules.get("stars", -1)
-        if stars_min >= 0 and self.ratings.get(item.path) < stars_min:
-            return False
-
-        if item.kind == MODE_FOLDERS and not item.is_tag:
-            low = rules.get("folder_min") or 0
-            high = rules.get("folder_max") or 0
-            if low and item.video_count < low:
+        def keep(item) -> bool:
+            is_tag = item.is_tag
+            if only_unseen and not is_tag and (item.status or item.item_id in seen):
                 return False
-            if high and item.video_count > high:
-                return False
-        else:
-            wanted = rules.get("orientations")
-            if wanted is not None and len(wanted) == 1:
+            if parsed is not None or exclude:
+                name = item.name
+                # Un seul champ, mais quelques mots de plus que les siens :
+                # « plage -hiver », « plage or mer », « "saison 2" ».
+                if parsed is not None and not matches_parsed(name, parsed, loose):
+                    return False
+                if exclude:
+                    low = name.lower()
+                    if any(term in low for term in exclude):
+                        return False
+            if stars_min >= 0 or stars_pick >= 0:
+                stars = ratings.get(str(item.path), 0)
+                if stars_min >= 0 and stars < stars_min:
+                    return False
+                # La note choisie au menu : exactement celle-la.
+                if stars_pick >= 0 and stars != stars_pick:
+                    return False
+            if item.kind == MODE_FOLDERS and not is_tag:
+                if folder_min and item.video_count < folder_min:
+                    return False
+                if folder_max and item.video_count > folder_max:
+                    return False
+            elif orient is not None:
                 # Strict : ce dont on ignore l'orientation est ecarte aussi.
                 # Le laisser passer donnait « Verticales » plein
                 # d'horizontales — tout ce qui n'avait pas encore ete sonde.
-                info = INDEX.probe(item.path) or {}
+                info = probe(item.path) or {}
                 width, height = info.get("width") or 0, info.get("height") or 0
                 if not (width and height):
                     return False
-                kind = "vertical" if height > width else "horizontal"
-                if kind not in wanted:
+                if ("vertical" if height > width else "horizontal") != orient:
                     return False
-
-        needs_media = rules.get("duration_op") or rules.get("resolution", 0) > 0
-        if not needs_media:
+            if not needs_media:
+                return True
+            duration, height = known_media(item)
+            if duration_op and duration > 0:
+                if duration_op == "gt" and duration <= duration_s:
+                    return False
+                if duration_op == "lt" and duration >= duration_s:
+                    return False
+            if res and height > 0:
+                if res_op == "gte" and height < res:
+                    return False
+                if res_op == "lte" and height > res:
+                    return False
             return True
-        duration, height = known_media(item)
 
-        op = rules.get("duration_op")
-        if op and duration > 0:
-            wanted = rules.get("duration_s", 0)
-            if op == "gt" and duration <= wanted:
-                return False
-            if op == "lt" and duration >= wanted:
-                return False
-
-        wanted_height = rules.get("resolution", 0)
-        if wanted_height and height > 0:
-            if rules.get("resolution_op") == "gte" and height < wanted_height:
-                return False
-            if rules.get("resolution_op") == "lte" and height > wanted_height:
-                return False
-        return True
+        return keep
 
     def on_controls_changed(self) -> None:
         if self.tab == TAB_SPLIT:
@@ -4366,6 +4538,60 @@ class MainWindow(QMainWindow):
             self.show_wall()
             return
         return self._on_controls_changed()
+
+    def _explain_orientation(self) -> None:
+        """Un écran vide après un filtre d'orientation mérite une explication.
+
+        Le filtre est strict : il écarte ce dont l'orientation n'est pas
+        connue. Sur une collection peu analysée, cela peut tout écarter — et
+        rien ne le disait, ce qui ressemblait à une panne.
+        """
+        chosen = self.controls.orientations()
+        if len(chosen) != 1 or self.items:
+            return
+        unsure = 0
+        for item in self.all_items:
+            if item.is_tag or item.kind == MODE_FOLDERS:
+                continue
+            info = INDEX.probe(item.path) or {}
+            if not (info.get("width") and info.get("height")):
+                unsure += 1
+        if not unsure:
+            return
+        quoi = "verticale" if chosen[0] == "vertical" else "horizontale"
+        self.show_banner(
+            f"Aucune vidéo {quoi} connue — {self._thousands(unsure)} n'ont pas "
+            "encore été analysées. Leur résolution se cherche en ce moment ; "
+            "⋯ → « Repérer les plans » la trouve pour toutes d'un coup.",
+            "info")
+        self.learn_orientations()
+
+    def learn_orientations(self) -> None:
+        """Sonde en fond la résolution de ce qu'on ne connaît pas encore."""
+        if self.wall_prober is not None:
+            return
+        unknown = [str(item.path) for item in self.all_items
+                   if not item.is_tag and item.kind != MODE_FOLDERS
+                   and not (INDEX.probe(item.path) or {}).get("width")]
+        if not unknown:
+            return
+        import random as _random
+        _random.shuffle(unknown)
+        self.wall_prober = InfoScan(unknown[:120], self)
+        self.wall_prober.done.connect(self._orientations_learned)
+        self.wall_prober.start()
+
+    def _orientations_learned(self, count: int) -> None:
+        self.wall_prober = None
+        if not count:
+            return
+        before = len(self.items)
+        self.items = self._filtered()
+        if len(self.items) != before:
+            self.apply_sort()
+            if self.browsing:
+                self.refresh_board()
+            self._show_counts()
 
     def _on_controls_changed(self) -> None:
         """Un reglage a bouge : on refiltre, puis on reclasse."""
@@ -4390,7 +4616,7 @@ class MainWindow(QMainWindow):
         if self._loose or not query or not self.all_items:
             return False
         self._loose = True
-        found = [item for item in self.all_items if self._matches(item)]
+        found = self._filtered()
         if not found:
             self._loose = False
             return False
@@ -4417,7 +4643,7 @@ class MainWindow(QMainWindow):
         self.cfg.save()
 
         current = self.current
-        self.items = [item for item in self.all_items if self._matches(item)]
+        self.items = self._filtered()
         if not self.items:
             self._retry_loosely()
         self.apply_sort()
@@ -4830,8 +5056,6 @@ class MainWindow(QMainWindow):
                 return self.act_undo()
             if key == Qt.Key_T:
                 return self.toggle_tree()
-            if key == Qt.Key_L:
-                return self.toggle_contact()
             if key == Qt.Key_A:
                 return self.pick_all()
             if key == Qt.Key_N:

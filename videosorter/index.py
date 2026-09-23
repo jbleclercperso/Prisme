@@ -105,8 +105,8 @@ class Index:
     COMMIT_EVERY = 200
     COMMIT_AFTER = 2.0     # secondes
 
-    def __init__(self, path: Path = INDEX_PATH):
-        self.path = Path(path)
+    def __init__(self, path: Path | None = None):
+        self.path = Path(path) if path else INDEX_PATH
         self.lock = threading.RLock()
         self.db: sqlite3.Connection | None = None
         self.pending = 0

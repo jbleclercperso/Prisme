@@ -84,8 +84,8 @@ def describe(ip: str, agent: str) -> str:
 class Journal:
     """Le journal, ouvert une fois, écrit depuis plusieurs fils."""
 
-    def __init__(self, path: Path = LOG_PATH):
-        self.path = Path(path)
+    def __init__(self, path: Path | None = None):
+        self.path = Path(path) if path else LOG_PATH
         self.lock = threading.Lock()
         self.db = None
         self.open()

@@ -163,18 +163,24 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     ]
     window.cfg.set_destinations(many)
     window.commands.rebuild(many, "Corbeille")
-    caps = window.commands.layout_.count()
-    check(caps == 28, f"les 20 destinations sont toutes affichées (obtenu {caps - 8})")
+    caps = len(window.commands.caps())
+    check(caps == 22, f"les 20 destinations sont toutes affichées (obtenu {caps - 2})")
     # Sur un exemplaire dedie : redimensionner la barre vivante la fait
     # reagencer par sa disposition parente, ce qui fausse la mesure.
     from videosorter.widgets import CommandBar
     probe_bar = CommandBar()
     probe_bar.rebuild(many, "Corbeille")
-    narrow = probe_bar.layout_.heightForWidth(400)
-    wide = probe_bar.layout_.heightForWidth(2400)
-    check(narrow > wide > 0,
-          f"la barre passe à la ligne quand elle manque de place "
-          f"({narrow} px à 400, {wide} px à 2400)")
+    probe_bar.resize(400, 40)
+    probe_bar._fit()
+    narrow = probe_bar.compact
+    probe_bar.resize(4000, 40)
+    probe_bar._fit()
+    wide = probe_bar.compact
+    check(narrow and not wide,
+          "une seule ligne : faute de place, les vignettes se resserrent "
+          "au lieu d'ouvrir une deuxième rangée")
+    check(all(c.text.isHidden() for c in probe_bar.caps()) is False,
+          "et se rouvrent quand la place revient")
 
     # Une lettre lointaine doit déclencher le déplacement.
     letter = KEY_ORDER[12]           # au-delà des chiffres
@@ -219,21 +225,18 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         {"key": "6", "label": "Souris", "path": str(tri / "souris")},
     ])
     window.commands.rebuild(window.cfg.destinations, "Corbeille")
-    caps = [
-        window.commands.layout_.itemAt(i).widget()
-        for i in range(window.commands.layout_.count())
-    ]
-    check(len(caps) == 9,
-          f"neuf vignettes : Suppr, Espace, 5 notes, effacer, 1 destination "
-          f"({len(caps)})")
+    caps = window.commands.caps()
+    check(len(caps) == 3,
+          f"trois vignettes : Suppr, Espace, 1 destination — les notes vivent "
+          f"dans les étoiles ({len(caps)})")
     check(all(c.cursor().shape() == Qt.PointingHandCursor for c in caps),
           "les vignettes se signalent comme cliquables")
-    check("touche 6" in caps[8].toolTip(), "l'infobulle rappelle la touche")
+    check("touche 6" in caps[2].toolTip(), "l'infobulle rappelle la touche")
 
     window.show_item(first_untouched(window))
     name = window.current.name
     index_before = window.index
-    QTest.mouseClick(caps[8], Qt.LeftButton)
+    QTest.mouseClick(caps[2], Qt.LeftButton)
     settle(app, window)
     check((tri / "souris" / name).exists(),
           f"un clic sur la vignette « 1 » envoie « {name} » vers sa destination")
@@ -256,9 +259,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     # Relâcher en dehors de la vignette ne doit rien déclencher.
     window.show_item(first_untouched(window))
     intact = window.current.name
-    QTest.mousePress(caps[8], Qt.LeftButton)
-    QTest.mouseRelease(caps[8], Qt.LeftButton, Qt.NoModifier,
-                       QPoint(caps[8].width() + 40, 5))
+    QTest.mousePress(caps[2], Qt.LeftButton)
+    QTest.mouseRelease(caps[2], Qt.LeftButton, Qt.NoModifier,
+                       QPoint(caps[2].width() + 40, 5))
     settle(app, window, 5)
     check(not (tri / "souris" / intact).exists(),
           "un clic relâché en dehors est sans effet")
@@ -420,10 +423,13 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.show_item(position)
     parent_item = window.current
     check(window.mode == MODE_FOLDERS, "on part du mode dossiers")
-    check(not window.enter_button.isHidden(), "le bouton « Entrer » est proposé")
+    check(not hasattr(window, "enter_button"),
+          "plus de gros bouton « Entrer » : le titre du dossier en tient lieu")
+    check(window.item_title.cursor().shape() == Qt.PointingHandCursor,
+          "le titre d'un dossier se signale comme cliquable")
     check(window.levels == [], "on est bien au niveau racine")
 
-    QTest.mouseClick(window.enter_button, Qt.LeftButton)
+    QTest.mouseClick(window.item_title, Qt.LeftButton)
     ok = wait_for(app, lambda: not window.scanning and window.root == parent_item.path, 60)
     check(ok, "la racine devient le dossier sur lequel on était")
     check(window.mode == MODE_FLAT,
@@ -479,13 +485,13 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     position = [i.name for i in window.items].index("Sous-dossiers")
     window.show_item(position)
-    QTest.mouseClick(window.enter_button, Qt.LeftButton)
+    window.enter_current()
     wait_for(app, lambda: not window.scanning and window.root.name == "Sous-dossiers", 60)
     check(window.mode == MODE_FOLDERS,
           f"pas de vidéo directe : on descend en mode dossiers (obtenu {window.mode})")
     check([i.name for i in window.items] == ["interne"],
           f"le sous-dossier est listé ({[i.name for i in window.items]})")
-    QTest.mouseClick(window.enter_button, Qt.LeftButton)
+    window.enter_current()
     wait_for(app, lambda: not window.scanning and window.root.name == "interne", 60)
     check(len(window.levels) == 2, "on peut descendre de plusieurs niveaux")
     check(window.mode == MODE_FLAT, "et le dernier niveau montre ses vidéos")
@@ -858,6 +864,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.4)
 
     print("\n[34] Pastilles de tri")
+    window.toggle_board(True)
+    pump(app, 0.2)
     filters = window.controls
     check(not filters.isHidden(), "la barre de réglages est visible")
     check(filters.criteria()["stars"] == -1, "et ne masque rien au départ")
@@ -923,32 +931,30 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(ok, "et ramène à l'endroit précédent")
 
     player = window.single
-    player.resize(900, 600)
-    player._on_position(0)
-    # Elle est passee sous l'image : posee dessus, la fenetre video native de
-    # Windows se dessinait par-dessus et on ne la voyait jamais. Plus fine,
-    # donc, mais reellement visible.
-    check(4 <= player.progress_rail.height() <= 10,
-          f"la barre d'avancement reste discrète ({player.progress_rail.height()} px)")
-    check(player.progress_rail.parent() is not player.video_area,
-          "et n'est plus posée sur l'image, où elle disparaissait")
-    check(not player.remaining.isHidden(),
-          "le temps restant s'affiche à côté d'elle")
-    check(not player.progress_rail.isHidden(), "et reste visible")
+    from videosorter.widgets import PlayMarks
+    # Un trait tres fin, pose SUR l'image par une fenetre-outil — la seule
+    # chose que la video native de Windows laisse passer devant elle.
+    check(isinstance(player.marks, PlayMarks) and player.marks.isWindow(),
+          "la fiche porte un trait d'avancement posé sur l'image")
+    check(player.marks.RAIL <= 4, f"très fin ({player.marks.RAIL} px)")
+    check(not hasattr(player, "under"),
+          "plus de rangée sous l'image pour une barre de huit pixels")
+    player.marks.set_progress(30_000, 120_000)
+    check(abs(player.marks.fraction - 0.25) < 0.01, "il suit la lecture")
     window.start_root(flat) if flat.exists() else None
     wait_for(app, lambda: not window.scanning, 30)
     if window.items and window.current.kind == MODE_FILES:
         wait_for(app, lambda: player.player.duration() > 0, 30)
         player.player.setPosition(1000)
         pump(app, 0.4)
-        check(player.remaining.text().startswith("−"),
-              f"le temps restant s'affiche (obtenu {player.remaining.text()!r})")
-        check(not player.remaining.isHidden(), "et il est visible")
+        check(window.single_bar.left.text().startswith("−"),
+              f"le bandeau de survol dit le temps restant "
+              f"(obtenu {window.single_bar.left.text()!r})")
 
     print("\n[38] Temps restant dans les aperçus")
-    check(window.grid.remaining is not None, "la grille d'aperçus en a un")
-    check(window.board.remaining is not None, "la planche aussi")
-    check(window.grid.remaining.isHidden(), "masqué tant que rien ne se lit")
+    check(window.grid.marks is not None, "la grille d'aperçus en a un")
+    check(window.board.marks is not None, "la planche aussi")
+    check(window.grid.marks.isHidden(), "masqué tant que rien ne se lit")
 
     print("\n[39] Trois modes de lecture de la racine")
     window.start_root(root, MODE_FOLDERS)
@@ -1009,22 +1015,18 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     print("\n[41] Notation visuelle et touches de destination")
     from videosorter.config import KEY_ORDER, RESERVED_KEYS
-    caps = [window.commands.layout_.itemAt(i).widget()
-            for i in range(window.commands.layout_.count())]
-    star_caps = [c for c in caps if type(c).__name__ == "StarCap"]
-    check(len(star_caps) == 5, f"cinq vignettes de notation ({len(star_caps)})")
-    check([c.count for c in star_caps] == [1, 2, 3, 4, 5],
-          "une par nombre d'etoiles")
-    check(star_caps[2].stars.value == 3, "la troisieme en dessine trois")
+    caps = window.commands.caps()
+    check(not [c for c in caps if type(c).__name__ == "StarCap"],
+          "plus de vignettes de notation : la ligne du bas reste une ligne")
     window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
     window.show_item(first_untouched(window))
     target = window.current
     window.ratings.set(target.path, 0)
-    star_caps[3].clicked.emit()
+    window.stars.rated.emit(4)
     pump(app, 0.2)
     check(window.ratings.get(target.path) == 4,
-          "cliquer la vignette « 4 » pose quatre etoiles")
+          "les étoiles, à droite, posent la note")
 
     print("\n[42] Une configuration ancienne migre ses touches")
     import json, tempfile
@@ -1567,8 +1569,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     ok = wait_for(app, lambda: not window.scanning and str(window.root) == origin, 60)
     check(ok, "un seul clic ramène à la racine, même la pile vidée")
 
-    print("\n[55] Planche contact, cinéma et enchaînement")
-    from videosorter.media import CONTACT_PER_VIDEO, CONTACT_ROWS, build_contact_plan
+    print("\n[55] Cinéma et enchaînement")
 
     window.set_tab(TAB_FOLDERS)
     window.start_root(root, MODE_FOLDERS)
@@ -1579,29 +1580,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.show_item(position)
     pump(app, 0.5)
 
-    check(not window.contact_button.isHidden(),
-          "un dossier propose sa planche contact")
+    check(not hasattr(window, "contact_button")
+          and not hasattr(window, "toggle_contact"),
+          "la planche contact a quitté l'application")
     check(window.cinema_button.isHidden(),
-          "et pas le cinéma, qui ne vaut que pour une vidéo")
-
-    folder = window.items[position]
-    plan = build_contact_plan(folder.videos)
-    rows = min(CONTACT_ROWS, len(folder.videos))
-    check(len(plan) == rows * CONTACT_PER_VIDEO,
-          f"la planche fait {rows} ligne(s) de {CONTACT_PER_VIDEO} ({len(plan)})")
-    first = [entry[0] for entry in plan[:CONTACT_PER_VIDEO]]
-    check(len(set(first)) == 1, "une seule vidéo par ligne")
-    moments = [round(entry[1], 2) for entry in plan[:CONTACT_PER_VIDEO]]
-    check(len(set(moments)) == CONTACT_PER_VIDEO or plan[0][2] <= 2,
-          f"des instants échelonnés en son sein ({moments})")
-
-    window.toggle_contact(True)
-    pump(app, 0.4)
-    check(window.contact, "la bascule tient")
-    check(window.contact_button.isChecked(), "et le bouton le montre")
-    window.toggle_contact(False)
-    pump(app, 0.3)
-    check(not window.contact, "et se relâche")
+          "un dossier ne propose pas le cinéma, qui ne vaut que pour une vidéo")
 
     # Le cinema efface tout ce qui n'est pas l'image.
     flat_position = next((i for i, it in enumerate(window.items)
@@ -1614,11 +1597,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(not window.cinema_button.isHidden(), "une vidéo propose le cinéma")
     window.toggle_cinema(True)
     pump(app, 0.3)
-    check(window.commands.isHidden() and window.controls.isHidden(),
+    check(window.bottom_bar.isHidden() and window.top_bar.isHidden(),
           "le cinéma efface les barres")
     window.toggle_cinema(False)
     pump(app, 0.3)
-    check(not window.commands.isHidden(), "et les rend")
+    check(not window.bottom_bar.isHidden() and not window.top_bar.isHidden(),
+          "et les rend")
 
     # La fin d'une video mene a la suivante, elle ne reboucle pas. Il faut une
     # liste qui en comporte plusieurs : le dossier plat a ete vide par les
@@ -1928,11 +1912,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(len(window.wall.pool) >= 4, f"« Toutes » : le vivier prend tout ({len(window.wall.pool)})")
     window.toggle_wall_fullscreen()
     pump(app, 0.4)
-    check(window.wall_full and window.tabs.isHidden() and window.wall.controls.isHidden()
+    check(window.wall_full and not window.tabs.isVisible() and not window.wall.controls.isVisible()
           and window.wall.panes[0].bar.isHidden(), "plein écran : plus rien autour")
     window.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
     pump(app, 0.4)
-    check(not window.wall_full and not window.tabs.isHidden(), "Échap : tout revient")
+    check(not window.wall_full and window.tabs.isVisible(), "Échap : tout revient")
     window.set_wall_count(3)
     window.set_wall_orientation("vertical")
 
@@ -2079,20 +2063,22 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "analyse de la racine")
     text = window.state_button.text()
     state = window.cfg["collection"]
-    check(int(state.get("videos") or 0) > 0 and "vidéos" in text and "analysé" in text,
-          f"la racine analysée donne un compte et une date ({text!r})")
+    check(int(state.get("videos") or 0) > 0 and "vidéos" in text
+          and "analysé" in window.state_button.toolTip(),
+          f"la racine analysée donne un compte, et sa date en infobulle ({text!r})")
     window._told_count(root, 19)
     check(window.state_button.text().startswith("19 vidéos")
           and window.cfg["collection"].get("counted_at"),
           "le comptage met le nombre à jour")
     window._told_audit(19, 5)
-    check("5 vignettes (26 %)" in window.state_button.text(),
+    check("26 % de vignettes" in window.state_button.text()
+          and "5 vignettes (26 %)" in window.state_button.toolTip(),
           f"la vérification dit combien de vignettes ({window.state_button.text()!r})")
     window.on_backfill_progress(3, 2, 19)
     check("préparation 5 / 19" in window.state_button.text(),
           "la préparation s'affiche en direct")
     window.on_backfill_done(3, 2, False)
-    check("5 vignettes" in window.state_button.text(), "et laisse son bilan")
+    check("% de vignettes" in window.state_button.text(), "et laisse son bilan")
     window._audit_after_count = True
     window._told_count(root, 19)
     check(window.audit is not None, "un clic enchaîne comptage puis vérification")
@@ -2217,8 +2203,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.clear_picked()
 
     check(window.controls.clear.isHidden(), "sans filtre, pas de « ✕ filtres »")
-    window.controls._toggle_orientation("horizontal")
+    window.controls._cycle_orientation()
     pump(app, 0.3)
+    check(window.controls.format_button.text().endswith("Verticales"),
+          f"un clic : le bouton dit ce qu'il montre "
+          f"({window.controls.format_button.text()!r})")
     check(not window.controls.clear.isHidden() and "verticales" in window.controls.clear.toolTip(),
           f"un filtre posé : le bouton dit lequel ({window.controls.clear.toolTip()!r})")
     check(len(window.items) == 0, "strict : sans orientation connue, rien ne passe pour « Verticales »")
@@ -2467,7 +2456,10 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
          for n in ("top_bar", "crumbs", "controls", "picked_bar", "item_card",
                    "viewer", "nav_row", "commands", "tree", "aside")
          if getattr(window, n, None) is not None), reverse=True)[:3]
-    check(need.width() <= 980 and need.height() <= 540,
+    # Les polices de l'affichage hors ecran sont bien plus larges que celles
+    # de Windows (les onglets : 460 points contre 287) ; la limite suit.
+    ratio = max(1.0, window.tabs.minimumSizeHint().width() / 290.0)
+    check(need.width() <= 980 * ratio and need.height() <= 540,
           f"la fenêtre descend à {need.width()} x {need.height()} — elle tient "
           f"(les plus larges : {gros})")
     hint = window.minimumSizeHint()
@@ -2908,6 +2900,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning, 60)
     before = window.stack.currentIndex()
+    window.cfg["quiet_explained"] = True     # sans la boîte, qui attendrait
     window.enter_quiet()
     pump(app, 0.3)
     check(window.stack.currentIndex() == PAGE_QUIET, "le repli prend toute la fenêtre")
@@ -2953,6 +2946,74 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         pump(app, 0.2)
     window._wall_pinned = []
 
+    print("\n[77] Une barre qui flotte, une adresse qu'on copie, un repli qui s'explique")
+    from PySide6.QtWidgets import QPushButton
+    from videosorter.widgets import OverBar
+    from videosorter.window import PAGE_QUIET
+
+    # -- le bandeau du lecteur de côté ------------------------------------
+    check(isinstance(window.aside_bar, OverBar),
+          "le bandeau du lecteur de côté flotte au-dessus de l'image")
+    check(window.aside_bar.parent() is window or window.aside_bar.isWindow(),
+          "c'est une fenêtre à part — la seule chose qui passe devant la vidéo")
+    check(window.aside_bar.buttons.count() == 4,
+          f"il porte ses quatre gestes ({window.aside_bar.buttons.count()})")
+    gestes = window.aside_bar.skin.findChildren(QPushButton)
+    check(gestes and all(b.width() >= 28 and b.height() >= 22 for b in gestes),
+          "dont les signes ont la place de se voir")
+    window.aside_bar.set_progress(30_000, 120_000)
+    check(window.aside_bar.left.text().startswith("−"),
+          f"le temps restant s'y lit ({window.aside_bar.left.text()!r})")
+    check(window.aside_bar.done.width() >= 0, "et l'avancement s'y dessine")
+    window.aside_bar.set_progress(0, 0)
+    check(window.aside_bar.left.text() == "", "rien à dire sans durée connue")
+    check(window.aside_bar.isHidden(), "au repos, il ne prend pas de place")
+
+    # -- l'adresse du partage : un champ, pas une étiquette ----------------
+    from videosorter.share_dialog import ShareDialog
+    board = ShareDialog(window, window)
+    try:
+        check(board.link.isReadOnly(), "l'adresse ne se modifie pas")
+        board.link.setText("https://essai.tailXXXX.ts.net/")
+        board._copy()
+        from PySide6.QtGui import QGuiApplication as _QGA
+        check(_QGA.clipboard().text() == "https://essai.tailXXXX.ts.net/",
+              f"mais elle se copie entière ({_QGA.clipboard().text()!r})")
+        check(board.link.hasSelectedText(),
+              "et se montre sélectionnée, pour qu'on voie ce qui est parti")
+    finally:
+        board.close()
+
+    # -- le repli dit comment on en sort -----------------------------------
+    window.cfg["quiet_explained"] = True     # sans la boîte, qui attendrait
+    depart = window.stack.currentIndex()
+    window.enter_quiet()
+    pump(app, 0.2)
+    check(window.stack.currentIndex() == PAGE_QUIET, "on se replie")
+    window.quiet_page.keyPressEvent(
+        QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+    pump(app, 0.2)
+    check(window.stack.currentIndex() == depart, "Échap ramène")
+    window.enter_quiet()
+    pump(app, 0.2)
+    window.quiet_page.leave.emit()
+    pump(app, 0.2)
+    check(window.stack.currentIndex() == depart, "un double-clic aussi")
+    check("Échap" in window.quiet_button.toolTip(),
+          "et le bouton dit ce qu'il fait avant qu'on le presse")
+
+    # -- l'état de la collection se lit ------------------------------------
+    window._note_state(videos=106903, thumbs=41230, audited=106903)
+    window._refresh_state()
+    court = window.state_button.text()
+    check(len(court) < 40 and "106 903" in court,
+          f"court à l'écran ({court!r})")
+    check("Ce que le logiciel sait" in window.state_button.toolTip()
+          and "106 903" in window.state_button.toolTip(),
+          "complet dans l'infobulle")
+    check(window.state_button.minimumWidth() >= 100,
+          "et assez large pour ne pas être rogné jusqu'à l'absurde")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,
@@ -2962,6 +3023,115 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           f"chacun reçoit une touche distincte ({[d['key'] for d in results]})")
     check([d["label"] for d in results] == ["2019", "2020", "2021"],
           "et le nom du dossier sert de libellé")
+
+    print("\n[78] Deux lignes en haut, une en bas, et chaque bouton ramène")
+    from videosorter.split import PANE_CHOICES
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.go_home()
+    pump(app, 0.3)
+    check(not window.controls.isHidden() and window.item_card.isHidden()
+          and window.bottom_bar.isHidden(),
+          "sur la planche : les filtres, ni titre ni commandes")
+    position = next(i for i, it in enumerate(window.items)
+                    if it.kind == MODE_FOLDERS and len(it.videos) >= 2)
+    window.toggle_board(False)
+    window.show_item(position)
+    pump(app, 0.5)
+    folder = window.current
+    check(window.controls.isHidden() and not window.item_card.isHidden(),
+          "sur une fiche, la seconde ligne est celle du titre")
+    check(window.item_title.text() == folder.name and window.item_title.width() > 60,
+          f"et le titre se voit ({window.item_title.text()!r}, "
+          f"{window.item_title.width()} px)")
+    check(not window.bottom_bar.isHidden() and window.stars.isHidden(),
+          "une ligne en bas ; pas d'étoiles pour un dossier")
+    check(not window.grid_chips.isHidden(), "le nombre d'aperçus est sur la ligne du titre")
+    check(all(t.badge.isHidden() for t in window.grid.tiles),
+          "les cases ne portent plus de numéro")
+
+    # Passer de 4 à 10 aperçus ne rebat pas les vidéos.
+    window.set_thumb_count(4)
+    wait_for(app, lambda: window._current_key() in window.plans, 30)
+    few = [e[0] for e in window.plans.get(window._current_key(), [])]
+    window.set_thumb_count(10)
+    wait_for(app, lambda: window._current_key() in window.plans, 30)
+    many = [e[0] for e in window.plans.get(window._current_key(), [])]
+    check(few and many[:len(few)] == few,
+          "de 4 à 10 aperçus, les premières vidéos restent les mêmes")
+
+    check(5 in PANE_CHOICES, "le mur propose cinq vidéos")
+    window.controls.set_stars(3)
+    check(window.controls.rating_pick.text() == "★ 3"
+          and window.controls.rating_choices[3].property("chosen") == "true",
+          "la note choisie se lit sur le bouton et dans la rangée")
+    window.controls.set_stars(-1)
+
+    # La note, en chiffre d'or, sur la carte.
+    window.toggle_board(True)
+    pump(app, 0.3)
+    first_card = window.board.cards[0]
+    window.ratings.set(window.items[0].path, 0)
+    window.on_board_rate(0, 5) if hasattr(window, "on_board_rate") else None
+    pump(app, 0.2)
+    check(first_card.rating.text() == "5" and not first_card.rating.isHidden(),
+          f"une carte notée montre sa note ({first_card.rating.text()!r})")
+    window.ratings.set(window.items[0].path, 0)
+
+    # Chaque onglet, depuis chaque endroit, mène à sa liste.
+    def tab_click(tab):
+        window.tabs.chosen.emit(tab)
+        wait_for(app, lambda: not window.scanning, 60)
+        pump(app, 0.3)
+
+    lost = []
+    for start in (TAB_FOLDERS, TAB_VIDEOS, TAB_SPLIT):
+        for target in (TAB_FOLDERS, TAB_VIDEOS, TAB_SPLIT):
+            if start == target:
+                continue
+            tab_click(start)
+            if start != TAB_SPLIT and window.items:
+                window.toggle_board(False)
+                window.show_item(0)
+                pump(app, 0.2)
+            tab_click(target)
+            if window.tab != target:
+                lost.append(f"{start}→{target} : onglet {window.tab}")
+            elif target != TAB_SPLIT and not (window.browsing and window.items):
+                lost.append(f"{start}→{target} : pas sur la liste")
+    check(not lost, f"chaque onglet mène à sa liste, d'où qu'on parte {lost}")
+
+    tab_click(TAB_FOLDERS)
+    window.toggle_board(False)
+    window.show_item(0)
+    pump(app, 0.2)
+    tab_click(TAB_FOLDERS)
+    check(window.at_home(), "recliquer l'onglet où l'on est ramène à sa liste")
+
+    tab_click(TAB_TAGS)
+    window.set_tag_family("top") if window.tag_family != "top" else None
+    wait_for(app, lambda: any(i.is_tag for i in window.items), 60)
+    tags = [i for i in window.items if i.is_tag]
+    if tags:
+        window.show_item(window.items.index(tags[0]))
+        window.enter_current()
+        wait_for(app, lambda: not window.scanning, 60)
+        pump(app, 0.3)
+        tab_click(TAB_TAGS)
+        check(window.at_home() and any(i.is_tag for i in window.items),
+              "dans un mot-clé, recliquer « Mots-clés » ramène aux mots")
+        window.show_item(window.items.index(
+            next(i for i in window.items if i.is_tag)))
+        window.enter_current()
+        wait_for(app, lambda: not window.scanning, 60)
+        tab_click(TAB_VIDEOS)
+        check(window.tab == TAB_VIDEOS and window.browsing and window.items
+              and not any(i.is_tag for i in window.items),
+              "et « Vidéos » mène aux vidéos, d'un seul clic")
+    else:
+        check(False, "des mots fréquents sont trouvés")
+    tab_click(TAB_FOLDERS)
 
 
 def main() -> int:

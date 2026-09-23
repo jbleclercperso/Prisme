@@ -109,8 +109,18 @@ def matches(name: str, parsed: tuple, loose: bool = False) -> bool:
     folded = fold(name)
     # Les exclusions restent litterales : ecarter « a peu pres hiver »
     # ferait disparaitre des videos sans qu'on comprenne pourquoi.
-    if any(term.lstrip(FUZZY) in folded for term in excluded):
+    if excluded and any(term.lstrip(FUZZY) in folded for term in excluded):
         return False
+    if not loose:
+        # Le cas courant — des mots exacts, sans « ou » ni « ~ » — sans
+        # passer par _hit : c'est lui qui court sur cent mille noms.
+        for group in required:
+            if len(group) == 1 and not group[0].startswith(FUZZY):
+                if group[0] not in folded:
+                    return False
+            elif not any(_hit(term, folded, loose) for term in group):
+                return False
+        return True
     return all(any(_hit(term, folded, loose) for term in group)
                for group in required)
 

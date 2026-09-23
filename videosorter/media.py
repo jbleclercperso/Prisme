@@ -286,31 +286,6 @@ def page_count(videos: list, count: int, one_per_video: bool = True) -> int:
     return max(1, -(-len(videos) // count))
 
 
-# Quatre videos, cinq instants chacune : la grille en compte cinq par rangee,
-# donc chaque video occupe exactement une ligne. On lit l'evolution de quatre
-# films d'un seul coup d'oeil, sans en lancer aucun.
-CONTACT_ROWS = 4
-CONTACT_PER_VIDEO = 5
-
-
-def build_contact_plan(videos: list, rows: int = CONTACT_ROWS,
-                       per_video: int = CONTACT_PER_VIDEO) -> list:
-    """Une ligne par video, `per_video` instants echelonnes a l'interieur.
-
-    Contrairement a la planche ordinaire, il faut ici connaitre la duree de
-    chaque video pour repartir ses instants : on la sonde donc, mais seulement
-    pour les quelques videos montrees, et seulement quand on demande cette vue.
-    """
-    plan = []
-    for video in videos[:rows]:
-        info = INDEX.probe(video) or probe(Path(video))
-        duration = info.get("duration") or 0.0
-        height = info.get("height") or 0
-        for index in range(per_video):
-            fraction = (index + 1) / (per_video + 1)
-            ts = duration * fraction if duration > 2 else 0.0
-            plan.append((str(video), max(0.0, ts), duration, height))
-    return plan
 
 
 # Au-dessus de ce seuil, ffmpeg considere que l'image a franchement change.
@@ -454,8 +429,7 @@ class PlanJob(QRunnable):
     """Sonde les vidéos retenues et calcule les instants des aperçus."""
 
     def __init__(self, signals: JobSignals, item_id: str, videos: list, count: int,
-                 page: int = 0, one_per_video: bool = True, blind: bool = False,
-                 contact: bool = False):
+                 page: int = 0, one_per_video: bool = True, blind: bool = False):
         super().__init__()
         self.signals = signals
         self.item_id = item_id
@@ -464,15 +438,13 @@ class PlanJob(QRunnable):
         self.page = page
         self.one_per_video = one_per_video
         self.blind = blind
-        self.contact = contact
         self.cancelled = False
 
     def run(self) -> None:
         if self.cancelled:
             return
-        plan = (build_contact_plan(self.videos) if self.contact
-                else build_preview_plan(self.videos, self.count, self.page,
-                                        self.one_per_video, self.blind))
+        plan = build_preview_plan(self.videos, self.count, self.page,
+                                  self.one_per_video, self.blind)
         if not self.cancelled:
             self.signals.plan_ready.emit(self.item_id, plan)
 
@@ -701,10 +673,9 @@ class PreviewManager(QObject):
 
     def request_plan(self, item_id: str, videos: list, count: int,
                      page: int = 0, one_per_video: bool = True,
-                     urgent: bool = True, blind: bool = False,
-                     contact: bool = False) -> None:
+                     urgent: bool = True, blind: bool = False) -> None:
         job = PlanJob(self.signals, item_id, videos, count, page, one_per_video,
-                      blind, contact)
+                      blind)
         self._track(job)
         self.pool.start(job, self.URGENT if urgent else self.AHEAD)
 

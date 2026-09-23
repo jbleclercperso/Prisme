@@ -32,7 +32,6 @@ SHORTCUTS = [
     ("Regarder", [
         ("Ctrl+J", "cinéma : l'image seule, sans rien autour"),
         ("Ctrl+J sur le mur", "le mur seul, plein écran — Échap pour revenir"),
-        ("Ctrl+L", "planche contact : une ligne par vidéo"),
         ("Ctrl+P", "basculer entre la planche et la fiche"),
         ("Ctrl+M", "couper ou rendre le son"),
         ("Ctrl+molette", "zoomer dans l'image"),
@@ -53,7 +52,8 @@ SHORTCUTS = [
         ("Ctrl+T", "afficher ou masquer l'arborescence"),
         ("Ctrl+F", "aller au champ de recherche"),
         ("Ctrl+R", "tout réanalyser"),
-        ("Ctrl+K", "passer à autre chose, et revenir du même geste"),
+        ("Ctrl+K", "passer à autre chose — Échap ou un double-clic pour revenir"),
+        ("Chip « Note »", "n'afficher que les éléments notés ainsi — exactement, pas « au moins »"),
         ("Chip « Non vus »", "ne garder que ce qui n'a été ni décidé ni regardé"),
         ("⋯ → Rafale", "la suivante arrive toute seule après 8 s sans décision"),
         ("⋯ → Journal des gels", "quand l'interface s'est figée, combien de temps, après quoi"),

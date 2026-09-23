@@ -21,9 +21,12 @@ class Ratings(QObject):
 
     changed = Signal(str, int)
 
-    def __init__(self, path: Path = RATINGS_PATH, parent=None):
+    def __init__(self, path: Path | None = None, parent=None):
         super().__init__(parent)
-        self.path = path
+        # Lu a l'appel, jamais fige a la definition : c'est ce qui permet de
+        # deporter le fichier ailleurs — un bac a sable, un cache portable —
+        # sans que rien ne touche a celui de l'utilisateur.
+        self.path = Path(path) if path else RATINGS_PATH
         self.data: dict = {}
         self.dirty = False
         self.load()

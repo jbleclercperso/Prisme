@@ -13,7 +13,7 @@ from __future__ import annotations
 import random
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout, QHeaderView, QLabel, QProgressBar, QPushButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -46,7 +46,14 @@ KINDS = (".docx", ".xlsx", ".pdf", ".csv", ".zip", ".log", ".json")
 
 
 class QuietPage(QWidget):
-    """Une page qui ne dit rien de ce qu'on faisait."""
+    """Une page qui ne dit rien de ce qu'on faisait.
+
+    On en sort par tous les gestes qu'on tenterait : Échap, un double-clic
+    n'importe où, le point en bas, ou le raccourci. Une page dont on ne sait
+    plus sortir n'est pas discrète, elle est piégeuse.
+    """
+
+    leave = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -128,3 +135,13 @@ class QuietPage(QWidget):
 
     def stop(self) -> None:
         self.timer.stop()
+
+    def mouseDoubleClickEvent(self, event):
+        self.leave.emit()
+        event.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Escape, Qt.Key_F5):
+            self.leave.emit()
+            return
+        super().keyPressEvent(event)

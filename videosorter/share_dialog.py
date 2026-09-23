@@ -42,7 +42,9 @@ SHARE_STYLE = """
 QDialog { background: #0e1116; }
 QLabel { color: #b9c2cd; font-size: 13px; }
 QLabel#shareHead { color: #ffffff; font-size: 14px; font-weight: 600; }
-QLabel#shareLink { color: #e9eef4; font-size: 13px; }
+QLineEdit#shareLink { color: #e9eef4; font-size: 13px; background: #151a21;
+                      border: 1px solid #2b323d; border-radius: 6px;
+                      padding: 7px 9px; }
 QLabel#shareWarn { color: #d8c05a; font-size: 12px; }
 QLabel#shareCode { background: #ffffff; border-radius: 6px; padding: 6px; }
 QLineEdit { background: #151a21; border: 1px solid #262e39; border-radius: 6px;
@@ -118,10 +120,13 @@ class ShareDialog(QDialog):
         self.state = QLabel("", page)
         box.addWidget(self.state)
 
-        self.link = QLabel("", page)
+        # Un champ, non une etiquette : on y selectionne, on y fait Ctrl+C,
+        # et l'on voit tout de suite que c'est l'adresse a emporter.
+        self.link = QLineEdit(page)
         self.link.setObjectName("shareLink")
-        self.link.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.link.setWordWrap(True)
+        self.link.setReadOnly(True)
+        self.link.setPlaceholderText("l'adresse paraîtra ici")
+        self.link.setCursorPosition(0)
         box.addWidget(self.link)
 
         # -- l'adresse publique ---------------------------------------------
@@ -273,10 +278,14 @@ class ShareDialog(QDialog):
         self.refresh()
 
     def _copy(self) -> None:
-        address = self.window.share_link()
-        if address:
-            QGuiApplication.clipboard().setText(address)
-            self.tunnel_state.setText("Adresse copiée.")
+        """Copie ce qui est affiché — l'adresse publique quand elle existe."""
+        address = self.link.text().strip() or self.window.share_link()
+        if not address:
+            self.tunnel_state.setText("Aucune adresse à copier pour l'instant.")
+            return
+        QGuiApplication.clipboard().setText(address)
+        self.link.selectAll()
+        self.tunnel_state.setText(f"Copié : {address}")
 
     def _paint_code(self, address: str) -> None:
         """Dessine le code à scanner, et seulement quand l'adresse change."""
@@ -353,7 +362,9 @@ class ShareDialog(QDialog):
     def refresh(self) -> None:
         self.state.setText(self.window.share_state())
         address = self.window.share_link()
-        self.link.setText(address)
+        if address != self.link.text():
+            self.link.setText(address)
+            self.link.setCursorPosition(0)
         self.tunnel_state.setText(self.window.tunnel_state())
         public = self.window.tunnel_address
         self.open_tunnel.setText("Ouvrir l'adresse publique" if not public

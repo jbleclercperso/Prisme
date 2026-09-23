@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -217,6 +216,7 @@ DEFAULTS = {
     # tant que l'interrupteur est leve.
     "veiled_names": ["BIN"],
     "show_veiled": False,
+    "quiet_explained": False,    # le repli s'est-il deja explique une fois ?
     "skip_hidden": True,
     "use_scan_cache": True,      # reutiliser l analyse precedente
     "sort_mode": "random",       # random | duration_desc | size_asc | …
@@ -228,6 +228,7 @@ DEFAULTS = {
     "tags": [],
     "last_item": "",             # dernier element regarde, pour y revenir
     "collection": {},            # videos, vignettes, dates : l'etat affiche en haut
+    "stars_pick": -1,            # -1 : toutes les notes ; 0 a 5 : exactement
     "only_unseen": False,        # ne montrer que ce qui reste a voir
     "orientations": ["vertical", "horizontal"],  # ce qu'on veut voir
     "folder_min": 0,             # dossiers d'au moins tant de videos (0 : tous)
@@ -253,8 +254,8 @@ DEFAULTS = {
 class Config:
     """Petit wrapper JSON, tolerant aux fichiers absents ou corrompus."""
 
-    def __init__(self, path: Path = CONFIG_PATH):
-        self.path = path
+    def __init__(self, path: Path | None = None):
+        self.path = Path(path) if path else CONFIG_PATH
         self._timer = None
         self.data = json.loads(json.dumps(DEFAULTS))
         self.load()

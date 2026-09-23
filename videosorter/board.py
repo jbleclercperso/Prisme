@@ -20,12 +20,16 @@ from PySide6.QtWidgets import (
 
 from .perf import mark
 from .scan import MODE_FOLDERS, human_duration, human_resolution, human_size
-from .widgets import elide
+from .widgets import PlayMarks, elide
+
+RATING_STYLE = ("QLabel { color: #f5c542; background: rgba(8, 10, 13, 190);"
+                " border-radius: 4px; padding: 0 5px; font-size: 14px;"
+                " font-weight: 700; }")
 
 # Densites proposees : moins de colonnes, donc des cartes plus grandes.
 COLUMN_CHOICES = (2, 3, 4, 5, 6, 7, 8, 9, 10)
 DEFAULT_COLUMNS = 5
-CARD_GAP = 10
+CARD_GAP = 6
 MIN_CARD_WIDTH = 150
 # Une carte coute cher a construire : six cents d'un coup prenaient plusieurs
 # secondes. On n'en batit qu'une page, et l'on tourne les pages.
@@ -56,8 +60,10 @@ class BoardCard(QFrame):
         self.setCursor(Qt.PointingHandCursor)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(5)
+        # Des marges de quatre points : chaque pixel d'encadrement est pris
+        # a l'image, et une planche en porte quarante.
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(3)
 
         self.image = QLabel(self)
         self.image.setObjectName("boardImage")
@@ -77,6 +83,16 @@ class BoardCard(QFrame):
         self.duration_chip = QLabel("", self)
         self.duration_chip.setObjectName("tileDuration")
         self.duration_chip.hide()
+
+        # La note, en un chiffre d'or, en haut a gauche — sous la place de la
+        # case a cocher. Cinq etoiles dessinees sur chaque carte faisaient un
+        # damier ; un chiffre se lit d'un coup d'oeil.
+        self.stars_value = 0
+        self.rating = QLabel("", self)
+        self.rating.setObjectName("cardRating")
+        self.rating.setStyleSheet(RATING_STYLE)
+        self.rating.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.rating.hide()
 
         # Elle ne se montre qu'au survol, ou si elle est cochee : une case par
         # vignette, visible en permanence, ferait un damier avant de faire une
@@ -150,16 +166,20 @@ class BoardCard(QFrame):
         chip.move(area.right() - chip.width() - 8, area.top() + 8)
 
     def _place_handles(self) -> None:
-        """Coche en haut a gauche de l'image, croix en haut a droite."""
+        """Coche en haut a gauche de l'image, la note juste dessous."""
         area = self.image.geometry()
         self.pick.move(area.left() + 6, area.top() + 6)
         self.pick.raise_()
+        self.rating.adjustSize()
+        self.rating.move(area.left() + 6, area.top() + 30)
+        self.rating.raise_()
 
     def handle_rect(self) -> QRect:
-        """La bande du haut de l'image, en coordonnees globales."""
+        """La bande du haut de l'image, en coordonnees globales : la coche,
+        et la note dessous."""
         area = self.image.geometry()
         top_left = self.mapToGlobal(area.topLeft())
-        return QRect(top_left.x(), top_left.y(), area.width(), 34)
+        return QRect(top_left.x(), top_left.y(), area.width(), 58)
 
     def set_item(self, item, stars: int) -> None:
         self.item = item
@@ -170,6 +190,7 @@ class BoardCard(QFrame):
         self.image.setPixmap(QPixmap())
         self.image.setText("…")
         self.set_picked(False)
+        self.set_stars(stars)
         self.meta.setText(self._line())
         count = (f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}\n"
                  if item.kind == MODE_FOLDERS else "")
@@ -184,7 +205,12 @@ class BoardCard(QFrame):
         self.set_state(item.status)
 
     def set_stars(self, stars: int) -> None:
-        """La note ne s'affiche plus sur la carte : elle se pose sur la fiche."""
+        """La note en un chiffre d'or ; rien du tout sans note."""
+        self.stars_value = int(stars or 0)
+        self.rating.setText(str(self.stars_value) if self.stars_value else "")
+        self.rating.setVisible(self.stars_value > 0)
+        if self.stars_value:
+            self._place_handles()
 
     def set_state(self, status: str) -> None:
         marks = {"moved": "rangé", "deleted": "écarté", "skipped": "passé"}
@@ -223,7 +249,7 @@ class BoardCard(QFrame):
     def set_card_width(self, width: int) -> None:
         """Fixe la largeur, l'image gardant un cadre 16:9."""
         self.setFixedWidth(width)
-        self.image.setFixedHeight(int((width - 16) * 9 / 16))
+        self.image.setFixedHeight(int((width - 8) * 9 / 16))
         self._rescale()
 
     def _rescale(self) -> None:
@@ -304,7 +330,19 @@ class HoverHandles(QWidget):
         self.pick.setCursor(Qt.PointingHandCursor)
         self.pick.setFocusPolicy(Qt.NoFocus)
         self.pick.setFixedSize(20, 20)
-        layout.addWidget(self.pick, 0, Qt.AlignTop)
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        column.addWidget(self.pick, 0, Qt.AlignLeft)
+        # La note reste lisible pendant que l'apercu joue : la video, native,
+        # couvrirait celle de la carte.
+        self.rating = QLabel("", self)
+        self.rating.setObjectName("cardRating")
+        self.rating.setStyleSheet(RATING_STYLE)
+        self.rating.hide()
+        column.addWidget(self.rating, 0, Qt.AlignLeft)
+        column.addStretch(1)
+        layout.addLayout(column)
         layout.addStretch(1)
         self.card = None
         self.hide()
@@ -316,9 +354,16 @@ class HoverHandles(QWidget):
             self.pick.blockSignals(True)
             self.pick.setChecked(card.pick.isChecked())
             self.pick.blockSignals(False)
+            self.rating.setText(str(card.stars_value) if card.stars_value else "")
+            self.rating.setVisible(card.stars_value > 0)
+            self.setGeometry(QRect())
         if self.geometry() != rect:
             self.setGeometry(rect)
-            self.setMask(QRegion(self.pick.geometry()))
+            self.layout().activate()
+            region = QRegion(self.pick.geometry())
+            if not self.rating.isHidden():
+                region = region.united(QRegion(self.rating.geometry()))
+            self.setMask(region)
         if self.isHidden():
             self.show()
         self.raise_()
@@ -361,7 +406,7 @@ class BoardView(QWidget):
         self.canvas = QWidget()
         self.grid = QGridLayout(self.canvas)
         self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setSpacing(10)
+        self.grid.setSpacing(CARD_GAP)
         self.grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.scroll.setWidget(self.canvas)
         outer.addWidget(self.scroll)
@@ -376,11 +421,11 @@ class BoardView(QWidget):
         self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.video.hide()
 
-        # Temps restant de l'extrait survole, comme dans la grille d'apercus.
-        self.remaining = QLabel("", self.canvas)
-        self.remaining.setObjectName("remaining")
-        self.remaining.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.remaining.hide()
+        # Trait d'avancement et temps restant, poses sur l'image survolee.
+        # Sur un dossier, le temps restant se tait : la pastille dit deja
+        # combien de videos il contient, un compte a rebours par-dessus
+        # brouillait les deux.
+        self.marks = PlayMarks(self)
         # Aucune sortie audio : un aperçu survolé se regarde, il ne s'écoute
         # pas. Sans sortie, Qt ne décode pas la piste son du tout — c'est
         # autant de travail et de bande passante réseau en moins par vignette.
@@ -525,6 +570,7 @@ class BoardView(QWidget):
                 needed.append(position)
             else:
                 card.set_state(item.status)
+                card.set_stars(self._stars_of(item.path))
             # La coche appartient a l'element, pas a la carte : les cartes sont
             # reutilisees d'une page a l'autre.
             card.set_picked(item.item_id in self.picked_ids)
@@ -710,11 +756,6 @@ class BoardView(QWidget):
         if card is not None:
             self.scroll.ensureWidgetVisible(card, 40, 40)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self.items:
-            self._relayout()
-
     def _card_width(self) -> int:
         available = self.scroll.viewport().width() - CARD_GAP * (self.columns + 1)
         return max(MIN_CARD_WIDTH, available // max(1, self.columns))
@@ -750,7 +791,7 @@ class BoardView(QWidget):
         if self.hovered != -1 and self.hovered < len(self.cards):
             self.cards[self.hovered].set_hovered(False)
         self._blank()
-        self.remaining.hide()
+        self.marks.clear()
         self.hovered = found
         if found == -1:
             self.floating.detach()
@@ -840,24 +881,18 @@ class BoardView(QWidget):
             self.player.play()
 
     def _on_position(self, position: int) -> None:
-        if self.hovered == -1:
-            self.remaining.hide()
+        if self.hovered == -1 or self.video.isHidden():
+            self.marks.clear()
             return
         if position > self._segment_start + self.preview_seconds * 1000:
             self.player.setPosition(self._segment_start)
         duration = self.player.duration()
         if duration > 0 and self.hovered < len(self.cards):
             card = self.cards[self.hovered]
-            left = max(0, duration - position) / 1000.0
-            self.remaining.setText(f"−{human_duration(left)}")
-            self.remaining.adjustSize()
-            origin = card.image.mapTo(self.canvas, QPoint(0, 0))
-            self.remaining.move(
-                origin.x() + card.image.width() - self.remaining.width() - 8,
-                origin.y() + 8,
-            )
-            self.remaining.raise_()
-            self.remaining.show()
+            folder = card.item is not None and card.item.kind == MODE_FOLDERS
+            self.marks.with_left = not folder
+            self.marks.set_progress(position, duration)
+            self.marks.place_on(card.image)
 
     def _on_error(self, *_args) -> None:
         if 0 <= self.hovered < len(self.cards) and self.cards[self.hovered].video:
@@ -868,7 +903,7 @@ class BoardView(QWidget):
     def stop(self) -> None:
         self.player.stop()
         self._blank()
-        self.remaining.hide()
+        self.marks.clear()
         for card in self.cards:
             card.set_hovered(False)
         self.hovered = -1

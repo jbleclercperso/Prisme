@@ -10,6 +10,7 @@ La comparaison ignore casse et accents : « Été » trouve « ete » et « ETE 
 from __future__ import annotations
 
 import unicodedata
+from functools import lru_cache
 from pathlib import Path
 
 import re
@@ -179,6 +180,7 @@ def top_words(videos: list, limit: int = 100, minimum: int = 2) -> list:
     return [word for word, n in counts.most_common(limit) if n >= minimum]
 
 
+@lru_cache(maxsize=300_000)
 def fold(text: str) -> str:
     """Ramène un texte à une forme comparable : sans accents ni majuscules."""
     stripped = unicodedata.normalize("NFKD", text)

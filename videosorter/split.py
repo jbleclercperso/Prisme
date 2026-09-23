@@ -14,7 +14,7 @@ from __future__ import annotations
 import random
 
 from PySide6.QtCore import QTimer, QUrl, Qt, Signal
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
@@ -32,7 +32,7 @@ DEFAULT_PANES = 3
 # Delai entre deux demarrages de panneaux.
 STAGGER_MS = 650
 # Les nombres qui font un rectangle. Cinq ou sept n'en font pas.
-PANE_CHOICES = (2, 3, 4, 6, 8, 9, 10)
+PANE_CHOICES = (2, 3, 4, 5, 6, 8, 9, 10)
 ORIENTATIONS = (("vertical", "Verticales"), ("horizontal", "Horizontales"),
                 ("any", "Toutes"))
 
@@ -53,7 +53,7 @@ def grid_for(count: int, orientation: str, width: int = 0,
     count = max(1, count)
     if width <= 0 or height <= 0:
         rows = 1 if (orientation == "vertical" and count <= 5) else \
-            {2: 1, 3: 1, 4: 2, 6: 2, 8: 2, 9: 3, 10: 2}.get(count, 2)
+            {2: 1, 3: 1, 4: 2, 5: 1, 6: 2, 8: 2, 9: 3, 10: 2}.get(count, 2)
         return rows, -(-count // rows)
 
     shape = 9 / 16 if orientation == "vertical" else 16 / 9
