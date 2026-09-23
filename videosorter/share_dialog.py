@@ -7,7 +7,8 @@ ne se consultent jamais.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QThread, Qt, QTimer, Signal
+from PySide6.QtGui import QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMessageBox, QPushButton, QTabWidget, QTreeWidget,
@@ -15,6 +16,17 @@ from PySide6.QtWidgets import (
 )
 
 from .access import JOURNAL, spell, when
+from .tunnel import find as find_tunnel, install as install_tunnel, qr_png
+
+
+class Installer(QThread):
+    """Installe cloudflared sans figer la fenêtre : winget prend son temps."""
+
+    done = Signal(str, str)          # chemin trouve, ce qu'il faut en dire
+
+    def run(self) -> None:
+        where, said = install_tunnel()
+        self.done.emit(where, said)
 
 SHARE_STYLE = """
 QDialog { background: #0e1116; }
@@ -22,6 +34,7 @@ QLabel { color: #b9c2cd; font-size: 13px; }
 QLabel#shareHead { color: #ffffff; font-size: 14px; font-weight: 600; }
 QLabel#shareLink { color: #e9eef4; font-size: 13px; }
 QLabel#shareWarn { color: #d8c05a; font-size: 12px; }
+QLabel#shareCode { background: #ffffff; border-radius: 6px; padding: 6px; }
 QLineEdit { background: #151a21; border: 1px solid #262e39; border-radius: 6px;
             padding: 6px 9px; color: #e9eef4; }
 QTreeWidget { background: #11151b; border: 1px solid #1c222b; color: #cdd5df;
@@ -101,16 +114,113 @@ class ShareDialog(QDialog):
         self.link.setWordWrap(True)
         box.addWidget(self.link)
 
+        # -- l'adresse publique ---------------------------------------------
+        head = QLabel("Depuis l'extérieur", page)
+        head.setObjectName("shareHead")
+        box.addWidget(head)
+
+        self.tunnel_auto = QCheckBox(
+            "Ouvrir l'adresse publique au lancement", page)
+        self.tunnel_auto.setChecked(bool(self.window.cfg["tunnel_auto"]))
+        self.tunnel_auto.toggled.connect(self._auto)
+        box.addWidget(self.tunnel_auto)
+
+        row = QHBoxLayout()
+        self.open_tunnel = QPushButton("Ouvrir l'adresse publique", page)
+        self.open_tunnel.clicked.connect(self._open_tunnel)
+        row.addWidget(self.open_tunnel)
+        self.shut_tunnel = QPushButton("Fermer", page)
+        self.shut_tunnel.clicked.connect(self._shut_tunnel)
+        row.addWidget(self.shut_tunnel)
+        self.copy = QPushButton("Copier l'adresse", page)
+        self.copy.clicked.connect(self._copy)
+        row.addWidget(self.copy)
+        row.addStretch(1)
+        box.addLayout(row)
+
+        self.tunnel_state = QLabel("", page)
+        box.addWidget(self.tunnel_state)
+
+        self.code = QLabel("", page)
+        self.code.setObjectName("shareCode")
+        self.code.setAlignment(Qt.AlignCenter)
+        self.code.hide()
+        box.addWidget(self.code, 0, Qt.AlignLeft)
+        self.code_hint = QLabel(
+            "Scannez ce code avec l'appareil photo du téléphone.", page)
+        self.code_hint.hide()
+        box.addWidget(self.code_hint)
+
         warn = QLabel(
-            "Sur cette machine, l'adresse ci-dessus ne répond qu'ici. Pour y "
-            "accéder de l'extérieur, ouvrez un tunnel — la fiche « Partage à "
-            "distance » du menu ⋯ explique comment. Le tunnel évite d'ouvrir "
-            "le moindre port sur votre box.", page)
+            "L'adresse publique passe par un tunnel Cloudflare : rien n'est "
+            "ouvert sur votre box, et la liaison est chiffrée. Elle change à "
+            "chaque ouverture, et se ferme avec Prisme.", page)
         warn.setObjectName("shareWarn")
         warn.setWordWrap(True)
         box.addWidget(warn)
         box.addStretch(1)
+        self._shown_code = ""
+        self.installer = None
         return page
+
+    # -- le tunnel -----------------------------------------------------------
+    def _auto(self, on: bool) -> None:
+        self.window.cfg["tunnel_auto"] = bool(on)
+        self.window.cfg.save()
+
+    def _open_tunnel(self) -> None:
+        if not find_tunnel():
+            if QMessageBox.question(
+                    self, "Installer cloudflared",
+                    "Pour une adresse publique, Prisme a besoin de "
+                    "cloudflared — le programme de Cloudflare qui tient le "
+                    "tunnel.\n\nL'installer maintenant ? Cela passe par "
+                    "winget et prend une minute.") != QMessageBox.Yes:
+                return
+            self.open_tunnel.setEnabled(False)
+            self.tunnel_state.setText("Installation de cloudflared…")
+            self.installer = Installer(self)
+            self.installer.done.connect(self._installed)
+            self.installer.start()
+            return
+        if not self.window.start_tunnel():
+            self.refresh()
+
+    def _installed(self, where: str, said: str) -> None:
+        self.installer = None
+        self.open_tunnel.setEnabled(True)
+        self.tunnel_state.setText(said)
+        if where:
+            self.window.start_tunnel()
+        else:
+            QMessageBox.warning(self, "cloudflared", said)
+        self.refresh()
+
+    def _shut_tunnel(self) -> None:
+        self.window.stop_tunnel()
+        self.refresh()
+
+    def _copy(self) -> None:
+        address = self.window.share_link()
+        if address:
+            QGuiApplication.clipboard().setText(address)
+            self.tunnel_state.setText("Adresse copiée.")
+
+    def _paint_code(self, address: str) -> None:
+        """Dessine le code à scanner, et seulement quand l'adresse change."""
+        if address == self._shown_code:
+            return
+        self._shown_code = address
+        raw = qr_png(address) if address.startswith("https://") else b""
+        if not raw:
+            self.code.hide()
+            self.code_hint.hide()
+            return
+        picture = QPixmap()
+        picture.loadFromData(raw, "PNG")
+        self.code.setPixmap(picture)
+        self.code.show()
+        self.code_hint.show()
 
     def _save_word(self) -> None:
         given = self.word.text()
@@ -170,7 +280,16 @@ class ShareDialog(QDialog):
     # -- mise a jour ----------------------------------------------------------
     def refresh(self) -> None:
         self.state.setText(self.window.share_state())
-        self.link.setText(self.window.share_link())
+        address = self.window.share_link()
+        self.link.setText(address)
+        self.tunnel_state.setText(self.window.tunnel_state())
+        public = self.window.tunnel_address
+        self.open_tunnel.setText("Ouvrir l'adresse publique" if not public
+                                 else "Adresse publique ouverte")
+        self.open_tunnel.setEnabled(not public and self.installer is None)
+        self.shut_tunnel.setEnabled(bool(public))
+        self.copy.setEnabled(bool(address))
+        self._paint_code(public + "/" if public else "")
 
         self.visits.clear()
         for at, ip, label, event in JOURNAL.visits():

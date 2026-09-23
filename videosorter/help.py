@@ -59,7 +59,8 @@ SHORTCUTS = [
         ("⋯ → Analyser les titres", "lit le titre des métadonnées de chaque vidéo, pour les mots fréquents"),
         ("⋯ → Repérer les plans", "les vignettes se posent sur des changements de plan, non sur des fractions"),
         ("⋯ → Empreintes", "sonde ce qui manque ; ensuite les doublons sortent sans toucher au disque"),
-        ("⋯ → Partage à distance", "le mot de passe, l'interrupteur, l'adresse, et qui a regardé quoi"),
+        ("⋯ → Partage à distance", "le mot de passe, l'adresse publique à scanner, "
+                                   "et qui a regardé quoi"),
         ("⋯ → Où sont les vignettes", "leur dossier, et comment le partager avec un autre PC"),
         ("⋯ → Ignorer la mise à l'échelle", "sur un écran agrandi, rend à la fenêtre une taille qui tient"),
         ("Mur : ▸ ⚄ ⤢ ⛶", "la suivante du même dossier ; une autre n'importe où ; "

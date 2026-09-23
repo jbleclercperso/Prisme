@@ -140,7 +140,8 @@ a = Analysis(
     pathex=[r"{here}"],
     binaries=extra_binaries,
     datas=extra_datas,
-    hiddenimports=extra_hidden + ["PySide6.QtMultimediaWidgets", "rapidfuzz"],
+    hiddenimports=extra_hidden + ["PySide6.QtMultimediaWidgets", "rapidfuzz",
+                                  "segno"],
     excludes={excludes},
     noarchive=False,
 )

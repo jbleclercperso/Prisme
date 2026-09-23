@@ -206,6 +206,7 @@ DEFAULTS = {
     "share": True,
     "share_port": 8713,
     "share_host": "127.0.0.1",   # le tunnel fait le reste ; aucun port ouvert
+    "tunnel_auto": True,         # ouvrir l'adresse publique des le lancement
     "share_salt": "",
     "share_digest": "",
     "skip_hidden": True,

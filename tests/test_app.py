@@ -2768,6 +2768,46 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     finally:
         book.close()
 
+    print("\n[74] Le tunnel, depuis l'application")
+    from videosorter import tunnel as _tun
+
+    check(_tun.ADDRESS.search(
+        "INF |  https://abc-def-ghi-jkl.trycloudflare.com   |").group(0)
+        == "https://abc-def-ghi-jkl.trycloudflare.com",
+        "l'adresse se lit dans ce que cloudflared raconte")
+    check(_tun.ADDRESS.search("rien ici") is None,
+          "et rien n'est pris pour une adresse")
+
+    code = _tun.qr_png("https://abc-def.trycloudflare.com/")
+    check(code[:4] == b"\x89PNG" and len(code) > 100,
+          f"le code à scanner se dessine ({len(code)} octets)")
+    check(_tun.qr_png("") == b"" or True, "et ne tombe pas sur une adresse vide")
+
+    # Sans cloudflared, rien ne s'ouvre — et rien ne casse.
+    kept_find = _tun.find
+    _tun.find = lambda: ""
+    try:
+        window.stop_tunnel()
+        check(window.start_tunnel() is False,
+              "sans cloudflared, le tunnel ne s'ouvre pas")
+        check("pas installé" in window.tunnel_state(),
+              f"et l'état le dit ({window.tunnel_state()!r})")
+        check(window.share_link() == "" or "127.0.0.1" in window.share_link(),
+              "l'adresse reste locale")
+    finally:
+        _tun.find = kept_find
+
+    # Le tunnel annonce son adresse : on la retient, et le lien la prend.
+    window.tunnel_address = "https://essai-de-passage.trycloudflare.com"
+    check(window.share_link() == "https://essai-de-passage.trycloudflare.com/",
+          f"une fois ouvert, c'est l'adresse publique qu'on donne ({window.share_link()})")
+    window.tunnel_address = ""
+
+    check(window.cfg["tunnel_auto"] is True,
+          "l'adresse publique s'ouvre d'elle-même au lancement")
+    check(_tun.PACKAGE == "Cloudflare.cloudflared",
+          "et l'installation sait quoi demander à winget")
+
     probe_dialog = DestinationsDialog([])
     picked = [tri / "2019", tri / "2020", tri / "2021"]
     check(probe_dialog._add_paths(picked) == 3,

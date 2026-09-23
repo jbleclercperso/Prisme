@@ -3,3 +3,4 @@ Send2Trash>=1.8
 requests>=2.31
 beautifulsoup4>=4.12
 rapidfuzz>=3.0
+segno>=1.6

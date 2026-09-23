@@ -699,6 +699,9 @@ class MainWindow(QMainWindow):
         self._wall_unsure: list = []
         self.wall_prober = None
         self.share_server = None
+        self.tunnel = None
+        self.tunnel_address = ""
+        self.tunnel_trouble = ""
         self.viewer.addWidget(self.board)
         self.viewer.addWidget(self.wall)
         # L'image, et dessous une seule rangee : fleche, barre d'avancement,
@@ -2189,13 +2192,51 @@ class MainWindow(QMainWindow):
             port = self.share_server.start()
             self.cfg["share_port"] = port
             self.cfg.save_soon()
+            if self.cfg["tunnel_auto"]:
+                # L'adresse publique s'ouvre d'elle-meme : c'est elle qu'on
+                # veut, pas une commande a retaper a chaque fois.
+                QTimer.singleShot(400, self.start_tunnel)
         except OSError as exc:
             self.share_server = None
             self.show_banner(f"Partage impossible : {exc}", "error")
             return False
         return True
 
+    # -- le tunnel : une adresse publique, sans ouvrir de port -------------
+    def start_tunnel(self) -> bool:
+        """Ouvre l'adresse publique. Sans bruit si de quoi la faire manque."""
+        from .tunnel import Tunnel, find
+
+        if self.tunnel is not None and self.tunnel.running:
+            return True
+        if self.share_server is None or not find():
+            return False
+        self.tunnel_trouble = ""
+        self.tunnel = Tunnel(self.share_server.port, self)
+        self.tunnel.ready.connect(self._tunnel_ready)
+        self.tunnel.failed.connect(self._tunnel_failed)
+        self.tunnel.closed.connect(self._tunnel_closed)
+        return self.tunnel.start()
+
+    def _tunnel_ready(self, address: str) -> None:
+        self.tunnel_address = address
+        self.show_banner(f"Adresse publique ouverte : {address}", "done")
+
+    def _tunnel_failed(self, why: str) -> None:
+        self.tunnel_trouble = why
+        self.tunnel_address = ""
+
+    def _tunnel_closed(self) -> None:
+        self.tunnel_address = ""
+
+    def stop_tunnel(self) -> None:
+        if self.tunnel is not None:
+            self.tunnel.stop()
+            self.tunnel = None
+        self.tunnel_address = ""
+
     def stop_share(self) -> None:
+        self.stop_tunnel()
         if self.share_server is not None:
             self.share_server.stop()
             self.share_server = None
@@ -2232,9 +2273,23 @@ class MainWindow(QMainWindow):
                 f"servies depuis {self.share_server.library.root}")
 
     def share_link(self) -> str:
+        """L'adresse publique si le tunnel est ouvert, la locale sinon."""
+        if self.tunnel_address:
+            return self.tunnel_address + "/"
         if self.share_server is None:
             return ""
         return f"http://127.0.0.1:{self.share_server.port}/"
+
+    def tunnel_state(self) -> str:
+        from .tunnel import find
+
+        if not find():
+            return "cloudflared n'est pas installé."
+        if self.tunnel_address:
+            return "Adresse publique ouverte."
+        if self.tunnel is not None and self.tunnel.running:
+            return "Ouverture de l'adresse publique…"
+        return self.tunnel_trouble or "Adresse publique fermée."
 
     def open_share(self) -> None:
         ShareDialog(self, self).exec()
