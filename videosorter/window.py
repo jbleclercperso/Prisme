@@ -197,8 +197,13 @@ class MainWindow(QMainWindow):
         self.counter = None
         self.audit = None
         self._backfill_started = 0.0
+        # La collection : les dossiers de la racine choisie, et rien d'autre.
+        # Chaque onglet en tire sa liste ; seule l'analyse de la racine elle-
+        # meme la met a jour, meme quand un autre onglet est affiche.
         self._plain_items: list = []
         self._plain_root = None
+        self._plain_whole = False
+        self._scan_top = False
         # Le cinema : la video seule, sans rien autour.
         self.cinema = False
         # Ce que le fil d'Ariane ajoute au bout de la liste : le mot-cle ouvert.
@@ -982,6 +987,8 @@ class MainWindow(QMainWindow):
         self.mode = mode or self.mode_for_content()
         self.all_items = []
         self.items = []
+        self._scan_top = False
+        self.board.empty.setText("Rien à afficher ici.")
         self.plans = {}
         self.history = []
         self.index = 0
@@ -1005,6 +1012,14 @@ class MainWindow(QMainWindow):
             self.content = CONTENT_VIDEOS
             known = (cached_items(self.root, self.mode, self.cfg["expand_parents"])
                  if indexed else [])
+        # Analyser la racine elle-meme, c'est tenir la collection a jour.
+        self._scan_top = (self.mode == MODE_FOLDERS
+                          and Path(self.root) == Path(self.top_root()))
+        if self._scan_top:
+            self._plain_items = self.all_items
+            self._plain_root = self.root
+            # Complete des que l'index l'a donnee, ou que la lecture aboutit.
+            self._plain_whole = bool(known)
 
         self.preview.tune_for(self.root)
         self.trash.set_base(self.top_root())
@@ -1072,6 +1087,8 @@ class MainWindow(QMainWindow):
     def _show_known(self, known: list, restore_id: str = "") -> None:
         """Affiche d'emblee ce que l'index savait de cette racine."""
         self.all_items = known
+        if self._scan_top:
+            self._plain_items = known
         self.items = self._filtered(known)
         self.apply_sort()
         # Des que la liste est a l'ecran, on prepare ce qu'elle montrera : la
@@ -1097,9 +1114,9 @@ class MainWindow(QMainWindow):
         if self.tab == TAB_TAGS and self.mode == MODE_FOLDERS:
             # Les mots-cles n'attendent plus la fin de la relecture : ils se
             # tirent de ce que l'index connait deja, et se referont a la fin.
-            self._plain_items = [i for i in known if not i.is_tag]
-            self._plain_root = self.root
             self._add_tag_items()
+        elif self.tab == TAB_FAVS and self._scan_top:
+            self.show_favorites()
 
     def stop_scan(self) -> None:
         """Abandonne la relecture en cours, et la fait taire immediatement.
@@ -1115,6 +1132,11 @@ class MainWindow(QMainWindow):
         self.scanning = False
         if thread is None:
             return
+        if self._scan_top and not self._plain_whole:
+            # Une collection lue a moitie ne doit pas passer pour entiere : la
+            # prochaine visite de la racine la relira.
+            self._plain_root = None
+        self._scan_top = False
         for signal in (thread.progress, thread.patch, thread.finished_scan):
             try:
                 signal.disconnect()
@@ -1384,7 +1406,6 @@ class MainWindow(QMainWindow):
         self.stop_scan()
         self.browsing = True
         self.all_items = items
-        self._plain_items = []
         self.mode = MODE_FLAT
         self.sort_mode = ""            # l'ordre des groupes doit tenir
         self.items = list(items)
@@ -1654,6 +1675,18 @@ class MainWindow(QMainWindow):
         if not self.levels:
             return False
         level = self.levels.pop()
+        top = self.top_root()
+        on_sheet = not self.browsing
+        if (not self.levels and top is not None
+                and Path(level["root"]) == Path(top)
+                and self._show_tab_list(restore_id=level["item_id"])):
+            # Revenir au premier niveau, c'est retrouver la liste de l'onglet
+            # — les favoris, les mots-cles — sans relire toute la racine. Depuis
+            # une fiche, on retrouve la fiche du dossier d'ou l'on venait.
+            if on_sheet and self.current is not None \
+                    and self.current.item_id == level["item_id"]:
+                self.on_board_open(self.index)
+            return True
         self.start_root(
             level["root"], level["mode"],
             reset_levels=False, restore_id=level["item_id"],
@@ -1783,11 +1816,10 @@ class MainWindow(QMainWindow):
         relancement sur une collection stable n'appelle simplement jamais cette
         méthode — c'est le cas courant, et c'est ce qui rend l'ouverture immédiate.
         """
-        if (self.tab == TAB_TAGS and self.mode == MODE_FOLDERS and not self.levels
-                and not any(not i.is_tag for i in self.all_items)):
-            # Les mots-cles sont a l'ecran : la relecture corrige les dossiers
-            # dont ils sont tires, sans melanger des dossiers a la liste des
-            # mots. Ils seront recalcules a la fin, sur la liste complete.
+        if self._scan_top and self.all_items is not self._plain_items:
+            # Un autre onglet est a l'ecran (mots-cles, videos, favoris) : la
+            # relecture de la racine corrige la collection, sans rien melanger
+            # a la liste affichee. Chaque onglet s'y reservira.
             plain = {i.item_id: i for i in self._plain_items}
             for key in removed:
                 plain.pop(key, None)
@@ -1804,6 +1836,9 @@ class MainWindow(QMainWindow):
             self.all_items.append(item)
             if self._matches(item):
                 self._accept_item(item)
+        if self._scan_top:
+            # `_drop_items` refait la liste : la collection la suit.
+            self._plain_items = self.all_items
         if (added or removed) and self.browsing:
             self._board_dirty = True
         if self._board_dirty:
@@ -1902,18 +1937,13 @@ class MainWindow(QMainWindow):
             if any(i.is_tag for i in self.all_items):
                 self.all_items = [i for i in self.all_items if not i.is_tag]
                 if not self.all_items:
-                    self.all_items = list(getattr(self, "_plain_items", []))
+                    self.all_items = self._collection()
                 self.items = self._filtered()
                 self.apply_sort()
             return
-        plain = [i for i in self.all_items if not i.is_tag]
-        if plain:
-            # L'onglet des mots-cles remplace la liste par les dossiers
-            # virtuels : on garde de cote celle des dossiers reels, qui reste
-            # la seule source des videos a regrouper.
-            self._plain_items = plain
-        else:
-            plain = getattr(self, "_plain_items", [])
+        # Les mots se tirent de la collection entiere, jamais de la liste
+        # affichee : celle-ci peut etre celle des mots eux-memes.
+        plain = self._collection()
         videos = [video for item in plain for video in item.videos]
         # Deux familles : les mots qu'on a saisis, et ceux que les noms de
         # fichiers repetent d'eux-memes. Les seconds ne demandent aucune saisie
@@ -2002,14 +2032,22 @@ class MainWindow(QMainWindow):
         self._refresh_scan_button()
         elapsed = time.monotonic() - (getattr(self, "_scan_started", 0.0) or
                                       time.monotonic())
-        if mode == MODE_FOLDERS:
-            plain = [i for i in self.all_items if not i.is_tag]
-            # Sur l'onglet des mots-cles, la liste affichee est celle des mots :
-            # les dossiers sont deja tenus a jour a cote.
-            if plain or not self._plain_items:
-                self._plain_items = plain
-            self._plain_root = self.root
+        if mode == MODE_FOLDERS and self._scan_top:
+            # La collection a ete tenue a jour au fil de la relecture
+            # (`on_patch`) : les mots frequents sont a recalculer sur elle.
             self._top_tags = None
+            self._plain_whole = True
+            if (self.browsing and not self.levels
+                    and self.all_items is not self._plain_items):
+                # L'onglet affiche a pu s'ouvrir avant la fin de la lecture :
+                # il se complete, sans qu'on ait a le recliquer.
+                if self.tab == TAB_VIDEOS:
+                    before = len(self.all_items)
+                    self.show_videos_tab()
+                    if len(self.all_items) != before:
+                        self.refresh_board()
+                elif self.tab == TAB_FAVS:
+                    self.show_favorites()
             if self.origin is not None and Path(self.root) == Path(self.origin):
                 # L'analyse de la racine repertorie toute la collection : son
                 # total est la premiere reponse a « combien de videos ? ».
@@ -3218,9 +3256,9 @@ class MainWindow(QMainWindow):
         """
         seen = set()
         found = []
-        for item in self.all_items:
-            if item.is_tag:
-                continue
+        # La collection, et non la liste affichee : depuis les favoris ou un
+        # sous-dossier, l'onglet ne montrait que ceux-la.
+        for item in self._collection():
             for video in item.videos:
                 key = str(video)
                 if key in seen or under_veiled(video):
@@ -3229,10 +3267,17 @@ class MainWindow(QMainWindow):
                 found.append(video)
         return found
 
-    def remember_folders(self) -> None:
-        """Garde la liste des dossiers analysee, pour pouvoir la reposer."""
-        self._plain_items = [i for i in self.all_items if not i.is_tag]
-        self._plain_root = self.root
+    def _collection(self) -> list:
+        """Les dossiers de la racine, d'ou que l'on regarde.
+
+        Tant que la racine n'a pas ete lue, on se contente des vrais dossiers
+        de la liste affichee.
+        """
+        top = self.top_root()
+        if (self._plain_root is not None and top is not None
+                and Path(self._plain_root) == Path(top)):
+            return self._plain_items
+        return [i for i in self.all_items if not i.is_tag]
 
     def restore_folders(self) -> bool:
         """Remet la liste des dossiers déjà analysée, sans rien relire.
@@ -3241,9 +3286,12 @@ class MainWindow(QMainWindow):
         complète de la racine — plusieurs minutes sur un partage réseau, pour
         retrouver exactement ce qu'on venait de quitter.
         """
-        if not self._plain_items or self._plain_root != self.root:
+        if self._plain_root is None or self.root is None or \
+                Path(self._plain_root) != Path(self.root):
             return False
-        self.all_items = list(self._plain_items)
+        # La liste elle-meme, pas une copie : la relecture en cours continue
+        # de l'alimenter, et ce qu'on y range en disparait partout.
+        self.all_items = self._plain_items
         self.items = self._filtered()
         self.mode = MODE_FOLDERS
         self.apply_sort()
@@ -3593,9 +3641,32 @@ class MainWindow(QMainWindow):
         chemin. On y ouvre un dossier ou une video comme partout ailleurs.
         """
         loved = {key for key, value in self.ratings.data.items() if value}
-        folders = [item for item in (self._plain_items or [])
-                   if not item.is_tag and str(item.path) in loved]
+        collection = self._collection()
+        folders = [item for item in collection if str(item.path) in loved]
         known = {str(item.path) for item in folders}
+        # Un dossier en favori plus bas dans l'arborescence : l'index le
+        # connait ; a defaut, ses videos sont deja dans celles de son dossier
+        # de tete. Rien n'est lu sur le disque.
+        deeper = sorted((key for key in loved - known
+                         if Path(key).suffix.lower() not in VIDEO_EXTS
+                         and not under_veiled(key)), key=str.lower)
+        if deeper:
+            indexed = INDEX.folders(deeper)
+            for key in deeper:
+                item = indexed.get(key)
+                if item is None:
+                    prefix = key.rstrip("\\/") + os.sep
+                    inside = [video for top_item in collection
+                              if prefix.startswith(str(top_item.path) + os.sep)
+                              for video in top_item.videos
+                              if str(video).startswith(prefix)]
+                    if not inside:
+                        continue
+                    item = Item(path=Path(key), kind=MODE_FOLDERS,
+                                videos=inside, video_count=len(inside),
+                                file_count=len(inside))
+                folders.append(item)
+                known.add(key)
         videos = []
         for key in sorted(loved - known, key=str.lower):
             if Path(key).suffix.lower() not in VIDEO_EXTS or under_veiled(key):
@@ -3638,6 +3709,17 @@ class MainWindow(QMainWindow):
             known = cached_items(self.root, MODE_FOLDERS,
                                  self.cfg["expand_parents"])
             videos = [video for item in known for video in item.videos]
+        if not videos and self._scan_top and self.scanning:
+            # La collection est en cours de lecture : l'interrompre pour en
+            # lancer une autre laissait ensuite « Dossiers » vide. On attend
+            # sa fin, qui remplit cet onglet (`on_scan_finished`).
+            self.all_items = []
+            self.items = []
+            self.mode = MODE_FLAT
+            self.board.empty.setText(
+                "Lecture de la collection en cours : les vidéos s'afficheront "
+                "dès qu'elle sera finie.")
+            return
         if not videos:
             self.start_root(self.root, MODE_FLAT, reset_levels=False)
             return
@@ -3724,21 +3806,7 @@ class MainWindow(QMainWindow):
         self.tree.set_action("go" if tab == TAB_VIDEOS else "send")
         self.cfg["tree_action"] = self.tree.action
 
-        # Un onglet est un point de vue sur **toute** la collection, pas sur le
-        # sous-dossier ou l on se trouvait. Rester en place donnait un onglet
-        # « Dossiers » qui montrait trois sous-dossiers au lieu de la racine.
-        # Sortir des mots-cles doit rendre les vrais dossiers : la liste avait
-        # ete remplacee par les dossiers virtuels, et l'onglet « Dossiers »
-        # semblait alors ne rien faire.
-        if was == TAB_TAGS and tab != TAB_TAGS:
-            if not self.restore_folders():
-                self._add_tag_items()
-
         top = self.top_root()
-        if tab == TAB_FAVS:
-            self.show_favorites()
-            self.setFocus()
-            return
         if tab == TAB_SPLIT:
             # Le fil ne porte plus la fiche qu'on vient de quitter.
             self.crumbs.set_path(top, self.root)
@@ -3747,46 +3815,70 @@ class MainWindow(QMainWindow):
             self.show_wall()
             self.setFocus()
             return
-        mode = MODE_FLAT if tab == TAB_VIDEOS else MODE_FOLDERS
         if tab == TAB_VIDEOS:
             # Sans quoi les memes vidéos reviennent toujours en tete.
             self.sort_mode = "random"
             self.cfg["sort_mode"] = "random"
             self.controls.set_sort("random")
+        # Un onglet est un point de vue sur **toute** la collection, pas sur
+        # la liste qu'on quitte : depuis les favoris ou un sous-dossier,
+        # « Vidéos » ne montrait que ceux-la, et « Dossiers » restait sur les
+        # favoris. Chaque onglet repart donc de la collection.
+        if not self._show_tab_list():
+            self.start_root(top, MODE_FOLDERS, reset_levels=True)
+            return
+        if tab == TAB_VIDEOS:
+            self.resume_last()
+
+    def _show_tab_list(self, restore_id: str = "") -> bool:
+        """La liste de l'onglet courant, tiree de la collection, sans relire.
+
+        Seul chemin vers la liste d'un onglet : en changer, le recliquer ou
+        remonter du dernier niveau y menent tous. Faux quand la collection
+        n'est pas encore connue et qu'il faut donc lire la racine.
+        """
+        top = self.top_root()
+        if top is None:
+            return False
+        known = (self._plain_root is not None
+                 and Path(self._plain_root) == Path(top))
+        if not known and self.tab != TAB_VIDEOS:
+            return False
+        if self.scanning and not self._scan_top:
+            # Une relecture de sous-dossier n'a plus rien a dire. Celle de la
+            # racine, elle, continue : elle tient la collection a jour.
             self.stop_scan()
             self.progress.hide()
-            self.levels = []
-            self.root = top
-            self.crumbs.set_path(top, top)
-            self.show_videos_tab()
-            if self.browsing:
-                self.refresh_board()
-            elif self.items:
-                self.show_item(0)
-            self.resume_last()
-            self.setFocus()
-            return
-        if top != self.root or self.mode != mode or tab == TAB_TAGS:
-            self.levels = []
-            # Quitter les videos pour revenir aux dossiers changeait de mode, et
-            # tout changement de mode relisait le disque : plusieurs minutes de
-            # reseau pour retrouver exactement la liste qu'on venait de quitter.
-            # Elle est gardee telle quelle, on la repose.
-            if self.root == top and self.restore_folders():
-                self.crumbs.set_path(top, top)
-                if tab == TAB_TAGS:
+        self.levels = []
+        self.root = top
+        self.browsing = True
+        self.stack.setCurrentIndex(PAGE_SORT)
+        self._hush_players()
+        self._list_leaf = ""
+        self.crumbs.set_path(top, top)
+        # Le message d'une liste vide appartient a l'onglet qui l'a pose.
+        self.board.empty.setText("Rien à afficher ici.")
+        if self.tab == TAB_FAVS:
+            self.mode = MODE_FOLDERS
+            self.show_favorites()
+        else:
+            if self.tab == TAB_VIDEOS:
+                self.show_videos_tab()
+            else:
+                self.restore_folders()
+                if self.tab == TAB_TAGS:
                     self._add_tag_items()
-                self.refresh_board()
-                self.setFocus()
-                return
-            self.start_root(top, mode, reset_levels=True)
-            return
-
-        if self.browsing:
+            self._apply_selectors()
             self.refresh_board()
-        elif self.items:
-            self.show_item(self.index)
+            self._show_counts()
+        if restore_id:
+            for position, item in enumerate(self.items):
+                if item.item_id == restore_id:
+                    self.index = position
+                    self.board.scroll_to(position)
+                    break
         self.setFocus()
+        return True
 
     def _on_top_tags(self, found: list) -> None:
         self.board.empty.setText("Rien à afficher ici.")
@@ -3920,6 +4012,10 @@ class MainWindow(QMainWindow):
         """Vrai quand on est sur la liste d'un onglet, a sa racine."""
         if not self.browsing or self.levels:
             return False
+        if (self.tab == TAB_FOLDERS and self._plain_root is not None
+                and self.all_items is not self._plain_items):
+            # Une liste de passage (doublons…) : recliquer rend les dossiers.
+            return False
         top = self.top_root()
         return self.root is None or top is None or Path(self.root) == Path(top)
 
@@ -3931,38 +4027,13 @@ class MainWindow(QMainWindow):
         un mot-cle et plus rien ne repondait — il fallait deviner qu'une
         fleche, ailleurs, faisait remonter.
         """
-        if self.at_home():
+        if self.at_home() or self.tab == TAB_SPLIT:
+            # Le mur n'a pas de « chez soi » : le recliquer le laisse tel quel.
             return
         mark("go_home")
         self.close_aside()
-        self.levels = []
-        if self.root is not None:
-            top = self.top_root()
-            self.crumbs.set_path(top, top)
-            if top != self.root:
-                self.root = top
-        self.browsing = True
-        if self.tab == TAB_TAGS:
-            # Les mots-cles se recalculent depuis la liste des vrais dossiers,
-            # qu'on a gardee de cote en descendant. Il faut d'abord la
-            # reposer : descendre dans un mot a change le mode, et le calcul
-            # des mots-cles ne se fait qu'en mode dossiers.
-            self.mode = MODE_FOLDERS
-            self.restore_folders()
-            self._add_tag_items()
-        elif self.tab == TAB_VIDEOS:
-            self.show_videos_tab()
-        elif self.tab == TAB_FAVS:
-            self.show_favorites()
-            return
-        elif not self.restore_folders():
-            self.start_root(self.top_root(), self.mode_for_content(),
-                            reset_levels=True)
-            return
-        self._apply_selectors()
-        self.refresh_board()
-        self._show_counts()
-        self.setFocus()
+        if self.root is not None and not self._show_tab_list():
+            self.start_root(self.top_root(), MODE_FOLDERS, reset_levels=True)
 
     def set_tag_family(self, family: str) -> None:
         """Mes propres mots-clés, ou ceux que les noms de fichiers répètent."""
@@ -4134,6 +4205,13 @@ class MainWindow(QMainWindow):
         if (not self.browsing and item is not None and item.kind == MODE_FOLDERS
                 and not item.is_tag and Path(item.path) == target):
             return self.enter_current()
+        top = self.top_root()
+        if (top is not None and target == Path(top) and self.levels
+                and self.tab != TAB_SPLIT):
+            # La racine du fil, depuis un dossier ou un mot-cle ouvert : la
+            # liste de l'onglet (favoris, mots-cles…), et non les dossiers
+            # relus du disque.
+            return self.go_home()
         if self.root is not None and target == self.root:
             # Depuis une fiche, cliquer le dossier ou l'on est rend sa liste.
             if not self.browsing:
@@ -4696,11 +4774,7 @@ class MainWindow(QMainWindow):
         # Toute la collection, meme quand on est entre dans un dossier : la
         # liste affichee n'etait plus, apres un premier tirage, que le dossier
         # ou il avait mene — le hasard « general » tournait en rond dedans.
-        source = self.all_items
-        if (self._plain_items and self._plain_root is not None
-                and self.top_root() is not None
-                and Path(self._plain_root) == Path(self.top_root())):
-            source = list(self._plain_items) + list(self.all_items)
+        source = list(self._collection()) + list(self.all_items)
         pool = []
         seen = set()
         for item in source:

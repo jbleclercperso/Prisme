@@ -3408,6 +3408,30 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(str(folder.path) in shown and (video is None or str(video.path) in shown),
           f"l'onglet Favoris réunit dossiers et vidéos en favori ({len(shown)})")
     check(window.at_home() and window.browsing, "et s'ouvre sur sa planche")
+    tab_click(TAB_FOLDERS)
+    every_folder = {str(i.path) for i in window.all_items}
+    tab_click(TAB_VIDEOS)
+    every_video = len(window.all_items)
+    tab_click(TAB_FAVS)
+    tab_click(TAB_VIDEOS)
+    check(len(window.all_items) == every_video and window.items,
+          f"Favoris → Vidéos : toutes les vidéos ({len(window.all_items)} "
+          f"sur {every_video}), pas seulement les favorites")
+    tab_click(TAB_FAVS)
+    tab_click(TAB_FOLDERS)
+    check({str(i.path) for i in window.all_items} == every_folder,
+          "Favoris → Dossiers : tous les dossiers, sans repasser ailleurs")
+    tab_click(TAB_FAVS)
+    spot = next(i for i, item in enumerate(window.items)
+                if str(item.path) == str(folder.path))
+    window.on_board_open(spot)
+    window.enter_current()
+    wait_for(app, lambda: not window.scanning, 60)
+    window.show_board_at(0)
+    window.go_parent()
+    pump(app, 0.2)
+    check(not window.levels and {str(i.path) for i in window.items} == shown,
+          "remonter d'un dossier favori rend la liste des favoris")
     window.ratings.set(folder.path, 0)
     if video is not None:
         window.ratings.set(video.path, 0)
