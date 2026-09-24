@@ -4726,12 +4726,18 @@ class MainWindow(QMainWindow):
                 # La note choisie au menu : exactement celle-la.
                 if stars_pick >= 0 and stars != stars_pick:
                     return False
-            if item.kind == MODE_FOLDERS and not is_tag:
-                if folder_min and item.video_count < folder_min:
-                    return False
-                if folder_max and item.video_count > folder_max:
-                    return False
-            elif orient is not None:
+            if item.kind == MODE_FOLDERS:
+                # Un dossier ou un mot-cle n'a ni format ni duree : ces filtres
+                # portent sur ses videos, une fois dedans. Les appliquer a la
+                # carte faisait disparaitre tous les mots-cles des qu'on
+                # choisissait « Horizontales ».
+                if not is_tag:
+                    if folder_min and item.video_count < folder_min:
+                        return False
+                    if folder_max and item.video_count > folder_max:
+                        return False
+                return True
+            if orient is not None:
                 # Strict : ce dont on ignore l'orientation est ecarte aussi.
                 # Le laisser passer donnait « Verticales » plein
                 # d'horizontales — tout ce qui n'avait pas encore ete sonde.

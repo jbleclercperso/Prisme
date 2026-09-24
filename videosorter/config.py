@@ -13,6 +13,14 @@ APP_NAME = "Prisme"
 _OLD_NAME = "VideoSorter"
 _LOCAL = Path(os.environ.get("LOCALAPPDATA") or Path.home())
 APP_DIR = _LOCAL / APP_NAME
+# Les tests et les outils de mesure travaillent dans un dossier a eux, pose
+# AVANT tout import : l'index s'ouvre des le chargement du module, et c'est
+# ainsi qu'un test lance pendant que Prisme tournait a pu effacer l'index
+# reel. Avec PRISME_SANDBOX, reglages, index, vignettes et journaux vivent
+# la, et nulle part ailleurs.
+SANDBOX = os.environ.get("PRISME_SANDBOX", "").strip()
+if SANDBOX:
+    APP_DIR = Path(SANDBOX)
 
 
 def _has_thumbs(folder: Path) -> bool:
@@ -96,7 +104,8 @@ def adopt_old_cache() -> str:
     return str(old) if moved else ""
 
 
-ADOPTED = adopt_old_cache()
+# Au lancement seulement, jamais dans le bac a sable des tests.
+ADOPTED = "" if SANDBOX else adopt_old_cache()
 CONFIG_PATH = APP_DIR / "config.json"
 def _chosen_cache() -> tuple:
     """Le cache designe ailleurs, s'il l'a ete.
@@ -143,7 +152,7 @@ def _chosen_cache() -> tuple:
         return None, False
 
 
-SHARED_DIR, PORTABLE = _chosen_cache()
+SHARED_DIR, PORTABLE = (None, False) if SANDBOX else _chosen_cache()
 if SHARED_DIR is not None:
     APP_DIR = SHARED_DIR
 

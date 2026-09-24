@@ -5,6 +5,14 @@ L'interface tourne en mode « offscreen », aucune fenêtre ne s'affiche.
 """
 from __future__ import annotations
 
+import os as _os
+import tempfile as _tempfile
+# Avant tout import de Prisme : l'index, les reglages et les journaux du test
+# vivent a l'ecart. Sans cela, l'index reel s'ouvrait au chargement — et a
+# ete efface une fois, pendant que Prisme tournait.
+_os.environ.setdefault("PRISME_SANDBOX",
+                       _os.path.join(_tempfile.gettempdir(), "prisme-tests"))
+
 import faulthandler
 import os
 import json as _json_web
@@ -3241,6 +3249,43 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
               f"« Mur » : trois vidéos choisies, sur une seule ligne "
               f"({window.wall._shape})")
     tab_click(TAB_FOLDERS)
+
+    print("\n[81] L'index de l'utilisateur ne disparaît jamais")
+    import sqlite3 as _sq
+    import tempfile as _tf
+    from videosorter import config as _cfgmod
+    from videosorter.index import Index as _Index
+    check(bool(_cfgmod.SANDBOX) and Path(_cfgmod.APP_DIR) != Path(
+        _os.environ.get("LOCALAPPDATA", "")) / "Prisme",
+          "les tests travaillent dans leur bac à sable, jamais dans les données réelles")
+    spot = Path(_tf.mkdtemp()) / "index.db"
+    first = _Index(spot)
+    first.put_listing(Path("X:/essai"), "k", ["a", "b"])
+    first.commit(force=True)
+    first.close()
+    size = spot.stat().st_size
+    holder = _sq.connect(spot, timeout=1)
+    holder.execute("BEGIN EXCLUSIVE")
+    _Index.OPEN_TIMEOUT = 0.3
+    try:
+        busy = _Index(spot)
+    finally:
+        _Index.OPEN_TIMEOUT = 30.0
+    holder.rollback()
+    holder.close()
+    check(spot.exists() and spot.stat().st_size >= size
+          and not list(spot.parent.glob("index.db.abime-*")),
+          "occupé par un autre Prisme : on ne l'efface pas, on attend son tour")
+    again = _Index(spot)
+    check(again.listing(Path("X:/essai"), "k") == ["a", "b"],
+          "et il est intact à l'ouverture suivante")
+    again.close()
+    broken = Path(_tf.mkdtemp()) / "index.db"
+    broken.write_bytes(b"ceci n'est pas une base" * 100)
+    rebuilt = _Index(broken)
+    check(rebuilt.rebuilt and list(broken.parent.glob("index.db.abime-*")),
+          "vraiment abîmé : refait, mais l'ancien est mis de côté, pas effacé")
+    rebuilt.close()
 
 
 def main() -> int:

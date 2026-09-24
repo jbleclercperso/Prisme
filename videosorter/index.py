@@ -92,6 +92,12 @@ CREATE TABLE IF NOT EXISTS probes(
 """
 
 
+
+def _busy(exc: Exception) -> bool:
+    """Vrai quand SQLite dit « occupe » et non « abime »."""
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
 class Index:
     """Table {element: statistiques}, ecrite au fil de l'eau.
 
@@ -103,6 +109,8 @@ class Index:
     # Les ecritures sont validees par paquets : une transaction par dossier
     # ferait un fsync par dossier, plus cher que l'analyse elle-meme.
     COMMIT_EVERY = 200
+    # Le temps d'attendre un autre Prisme qui ecrit, avant de renoncer.
+    OPEN_TIMEOUT = 30.0
     COMMIT_AFTER = 2.0     # secondes
 
     def __init__(self, path: Path | None = None):
@@ -125,16 +133,21 @@ class Index:
         try:
             APP_DIR.mkdir(parents=True, exist_ok=True)
             self.db = sqlite3.connect(self.path, check_same_thread=False,
-                                      timeout=10.0)
+                                      timeout=self.OPEN_TIMEOUT)
             # WAL : un lecteur ne bloque pas l'ecrivain, l'interface n'attend
             # donc jamais la reconciliation qui tourne derriere.
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=NORMAL")
             self.db.executescript(SCHEMA)
             self.db.commit()
-        except sqlite3.Error:
-            # Meme un fichier qu'on n'arrive pas a ouvrir se refait : c'est un
-            # cache, rien d'irremplacable n'y dort.
+        except sqlite3.Error as exc:
+            if _busy(exc):
+                # Occupe par un autre Prisme, pas abime : on travaille sans
+                # index plutot que d'effacer celui de l'autre. C'est ce qui a
+                # fait perdre l'index une fois — « verrouille » etait pris
+                # pour « casse ».
+                self._drop_connection()
+                return
             self._rebuild()
             if self.db is None:
                 return
@@ -154,7 +167,11 @@ class Index:
         self._migrate_json()
 
     def _sound(self) -> bool:
-        """Verifie que le fichier est lisible, et pas seulement ouvrable."""
+        """Verifie que le fichier est lisible, et pas seulement ouvrable.
+
+        Seul un vrai defaut du fichier compte : « occupe » ou « verrouille »
+        disent qu'un autre programme ecrit, pas que la base est abimee.
+        """
         if self.db is None:
             return False
         try:
@@ -164,23 +181,57 @@ class Index:
             # `quick_check` ne relit pas forcement chaque table : on en touche
             # une, c'est la ou l'abime s'etait loge.
             self.db.execute("SELECT COUNT(*) FROM folders").fetchone()
+            self._backup()
             return True
-        except sqlite3.Error:
-            return False
+        except sqlite3.Error as exc:
+            return _busy(exc)
 
-    def _rebuild(self) -> None:
-        """Repart d'un index vide, apres avoir efface celui qui est abime."""
+    def _drop_connection(self) -> None:
         try:
             if self.db is not None:
                 self.db.close()
         except sqlite3.Error:
             pass
         self.db = None
+
+    def _backup(self) -> None:
+        """Une copie par jour, a cote : si l'index devait encore se perdre,
+        on repartirait d'hier et non de zero."""
+        import datetime
+        import shutil
+        copy = Path(str(self.path) + ".sauvegarde")
+        try:
+            if copy.exists() and datetime.date.fromtimestamp(
+                    copy.stat().st_mtime) == datetime.date.today():
+                return
+            if self.count_folders() == 0:
+                return          # un index vide ne remplace pas une vraie copie
+            self.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            shutil.copy2(self.path, str(copy) + ".tmp")
+            Path(str(copy) + ".tmp").replace(copy)
+        except (OSError, sqlite3.Error):
+            pass
+
+    def _rebuild(self) -> None:
+        """Repart d'un index vide. L'ancien n'est jamais efface : il est mis
+        de cote sous un autre nom, au cas ou il vaudrait encore quelque chose."""
+        import time as _time
+        try:
+            if self.db is not None:
+                self.db.close()
+        except sqlite3.Error:
+            pass
+        self.db = None
+        stamp = _time.strftime("%Y%m%d-%H%M%S")
         for suffix in ("", "-wal", "-shm"):
+            source = Path(str(self.path) + suffix)
             try:
-                Path(str(self.path) + suffix).unlink()
+                if source.exists():
+                    source.replace(Path(f"{self.path}.abime-{stamp}{suffix}"))
             except OSError:
-                pass
+                # Impossible a deplacer : un autre programme le tient. Il
+                # n'est donc pas abime, il est occupe — on n'y touche pas.
+                return
         try:
             self.db = sqlite3.connect(self.path, check_same_thread=False,
                                       timeout=10.0)
