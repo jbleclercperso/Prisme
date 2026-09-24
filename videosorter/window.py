@@ -11,6 +11,7 @@ from pathlib import Path
 from PySide6.QtGui import QCursor
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, QTimer, QUrl, Qt
 from PySide6.QtWidgets import (
+    QSplitter,
     QApplication, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QListWidget,
     QMainWindow, QMessageBox, QProgressBar, QProgressDialog, QPushButton,
     QLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
@@ -630,6 +631,8 @@ class MainWindow(QMainWindow):
         self._mark_grid_count()
         self.item_card = header
         row_two.addWidget(header, 1)
+        self._row_one, self._row_two = row_one, row_two
+        self._one_line = False
 
         # Les deux rangees du haut dans un seul widget : le plein ecran du
         # mur et le cinema doivent pouvoir tout effacer d'un geste.
@@ -653,9 +656,15 @@ class MainWindow(QMainWindow):
         self.banner.hide()
 
         # Le panneau d'arborescence occupe la gauche, le lecteur le reste.
-        middle = QHBoxLayout()
-        middle.setContentsMargins(0, 0, 0, 0)
-        middle.setSpacing(10)
+        # Planche, lecteur de droite : un separateur qu'on tire a la souris,
+        # pour donner plus de place a l'un ou a l'autre.
+        middle = QSplitter(Qt.Horizontal, sort_page)
+        middle.setChildrenCollapsible(False)
+        middle.setHandleWidth(8)
+        middle.setStyleSheet(
+            "QSplitter::handle { background: transparent; }"
+            "QSplitter::handle:hover { background: #2b323d; border-radius: 3px; }")
+        self.middle = middle
 
         self.tree = TreePanel(sort_page)
         self.tree.folderChosen.connect(self.on_tree_folder)
@@ -700,6 +709,8 @@ class MainWindow(QMainWindow):
             self.viewer, self.cfg["wall_orientation"] or "vertical")
         self.wall.opened.connect(self.open_video_path)
         self.wall.set_muted(bool(self.cfg["muted"]))
+        self.wall.set_stay(bool(self.cfg["stay_in_folder"]))
+        self.wall.stayChanged.connect(self.set_stay_in_folder)
         self.wall.countChanged.connect(self.set_wall_count)
         self.wall.orientationChanged.connect(self.set_wall_orientation)
         self.wall.fullscreenRequested.connect(self.toggle_wall_fullscreen)
@@ -726,7 +737,7 @@ class MainWindow(QMainWindow):
         self.tunnel_trouble = ""
         self.viewer.addWidget(self.board)
         self.viewer.addWidget(self.wall)
-        middle.addWidget(self.viewer, 1)
+        middle.addWidget(self.viewer)
 
         # Le bandeau de la fiche : au survol de l'image, le nom, le temps
         # restant et les gestes ; le reste du temps, un trait tres fin. La
@@ -741,6 +752,9 @@ class MainWindow(QMainWindow):
         ):
             self.single_bar.add_gesture(text, tip, slot)
         self.single.progressed.connect(self.single_bar.set_progress)
+        self.single_bar.add_stay(
+            "Rester dans ce dossier : ◂ ▸ ne sortent plus du dossier de la vidéo",
+            bool(self.cfg["stay_in_folder"]), self.set_stay_in_folder)
 
         # Le lecteur de cote : on y envoie une video d'un clic droit, et la
         # planche continue de vivre a gauche — on peut changer de page, cocher,
@@ -773,6 +787,9 @@ class MainWindow(QMainWindow):
         ):
             self.aside_bar.add_gesture(text, tip, slot)
         self.aside_player.progressed.connect(self.aside_bar.set_progress)
+        self.aside_bar.add_stay(
+            "Rester dans ce dossier : ◂ ▸ ne sortent plus du dossier de la vidéo",
+            bool(self.cfg["stay_in_folder"]), self.set_stay_in_folder)
 
         # Un battement suffit a savoir si la souris est sur l'image : le
         # widget video natif ne rend pas les evenements de survol.
@@ -784,8 +801,13 @@ class MainWindow(QMainWindow):
         self.aside_index = -1
         self.aside_playlist: list = []
         self.aside_playlist_at = 0
-        middle.addWidget(self.aside, 1)
-        layout.addLayout(middle, 1)
+        self.aside_current = ""
+        middle.addWidget(self.aside)
+        middle.setStretchFactor(0, 0)
+        middle.setStretchFactor(1, 1)
+        middle.setStretchFactor(2, 1)
+        middle.splitterMoved.connect(self._remember_split)
+        layout.addWidget(middle, 1)
 
         # Une seule ligne sous l'image, et seulement sur une fiche : reculer,
         # les touches qui decident, la note, avancer.
@@ -2067,7 +2089,16 @@ class MainWindow(QMainWindow):
             parts = []
             if info.get("height"):
                 parts.append(human_resolution(info["height"]))
-            parts.append(human_size(item.size))
+            size, mtime = item.size, item.mtime
+            if not size:
+                from .stamps import known
+                found = known(item.path)
+                if found:
+                    size, mtime = found
+                    item.size, item.mtime = size, mtime
+            if size:
+                # « 0 o » ne disait rien : la taille est tue quand on l'ignore.
+                parts.append(human_size(size))
         if item.mtime:
             parts.append(datetime.fromtimestamp(item.mtime).strftime("%d/%m/%Y"))
         self.item_subtitle.setText("   ·   ".join(parts))
@@ -3342,7 +3373,7 @@ class MainWindow(QMainWindow):
         self.cfg["wall_panes"] = count
         self.cfg.save_soon()
         self.wall.set_pane_count(count)
-        self.wall.shuffle_all()
+        self.wall.fill_empty()
 
     def set_wall_orientation(self, orientation: str) -> None:
         self._wall_pinned = []
@@ -3432,20 +3463,7 @@ class MainWindow(QMainWindow):
     def wall_sibling(self, index: int, path: str) -> None:
         """La suivante du meme dossier, dans ce panneau. Une lecture du dossier,
         puis plus aucune : la liste est gardee pour la session."""
-        from .config import VIDEO_EXTS
-        folder = Path(path).parent
-        listing = self._siblings_cache.get(str(folder))
-        if listing is None:
-            mark(f"wall.sibling listing {folder}")
-            try:
-                listing = sorted(
-                    (entry.path for entry in os.scandir(folder)
-                     if entry.is_file()
-                     and entry.name[entry.name.rfind("."):].lower() in VIDEO_EXTS),
-                    key=str.lower)
-            except OSError:
-                listing = []
-            self._siblings_cache[str(folder)] = listing
+        listing = self._folder_videos(path)
         if len(listing) < 2:
             self.show_banner("C'est la seule vidéo de son dossier.", "quiet")
             return
@@ -3925,6 +3943,11 @@ class MainWindow(QMainWindow):
         # fiche. Jamais les deux — c'etait trois lignes avant l'image.
         self.controls.setVisible(not sheet and not (
             self.board.picked_ids and self.browsing and not wall))
+        # La fiche d'une video tient sur une seule ligne : onglets, chemin et
+        # nom, puis ce qu'on en sait et ses deux gestes. Toute la hauteur
+        # restante va a l'image.
+        self._title_line(sheet and self.current is not None
+                         and self.current.kind != MODE_FOLDERS)
         self.item_card.setVisible(sheet)
         self.picked_bar.setVisible(not sheet and bool(self.board.picked_ids)
                                    and not wall)
@@ -3960,6 +3983,32 @@ class MainWindow(QMainWindow):
         self.up_button.setEnabled(
             sheet or bool(self.levels)
             or (root is not None and Path(root).parent != Path(root)))
+
+    def _title_line(self, first: bool) -> None:
+        """Pose la ligne d'informations sur la premiere ligne, ou la rend a
+        la seconde. On ne deplace rien si elle est deja a sa place."""
+        if first == self._one_line:
+            return
+        self._one_line = first
+        one, two, card = self._row_one, self._row_two, self.item_card
+        if first:
+            two.removeWidget(card)
+            at = one.indexOf(self.crumbs)
+            one.setStretchFactor(self.crumbs, 0)
+            self.crumbs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            one.insertWidget(at + 1, card, 0)
+            one.insertStretch(at + 2, 1)
+            self.item_subtitle.setSizePolicy(QSizePolicy.Preferred,
+                                             QSizePolicy.Preferred)
+        else:
+            at = one.indexOf(card)
+            one.removeWidget(card)
+            one.takeAt(at)                   # le ressort pose a sa suite
+            self.crumbs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            one.setStretchFactor(self.crumbs, 1)
+            self.item_subtitle.setSizePolicy(QSizePolicy.Ignored,
+                                             QSizePolicy.Preferred)
+            two.addWidget(card, 1)
 
     def _origin_for(self, current):
         """Le plus haut dossier dont `current` descend : la racine du fil."""
@@ -4086,6 +4135,8 @@ class MainWindow(QMainWindow):
     def _aside_play(self, video: str, title: str, tip: str = "") -> None:
         """Le lecteur de droite, sur cette video."""
         mark("open_aside")
+        self.aside_current = video
+        self._restore_split()
         self.aside_title.setText(title)
         self.aside_title.setToolTip(tip or video)
         self.aside.show()
@@ -4095,6 +4146,20 @@ class MainWindow(QMainWindow):
         # Aucun apercu n'est demande : le lecteur de cote n'a pas de pellicule,
         # et fabriquer cinq images pour rien retardait celles de la planche.
 
+    def _remember_split(self, *_args) -> None:
+        if not self.aside.isHidden():
+            self.cfg["aside_split"] = list(self.middle.sizes())
+            self.cfg.save_soon()
+
+    def _restore_split(self) -> None:
+        """Le lecteur de droite reprend la largeur qu'on lui avait donnee."""
+        wanted = self.cfg["aside_split"]
+        if (self.aside.isHidden() and isinstance(wanted, list)
+                and len(wanted) == 3 and sum(wanted) > 0):
+            QTimer.singleShot(0, lambda: self.middle.setSizes(
+                [self.tree.width() if self.tree.isVisible() else 0]
+                + list(wanted[1:])))
+
     def _place_aside_bar(self) -> None:
         """Repose le bandeau sur l'image — il suit le lecteur, il ne le pousse pas."""
         self.aside_bar.place_on(self.aside_player.video_area)
@@ -4102,8 +4167,7 @@ class MainWindow(QMainWindow):
     def _watch_aside(self) -> None:
         """Montre le bandeau tant que la souris est sur l'image, l'efface sinon."""
         area = self.aside_player.video_area
-        if (self.aside.isHidden()
-                or (self.aside_index < 0 and not self.aside_playlist)
+        if (self.aside.isHidden() or not self.aside_current
                 or not area.isVisible() or not self.isActiveWindow()):
             self.aside_player.marks.hide()
             return self.aside_bar.hide()
@@ -4111,8 +4175,7 @@ class MainWindow(QMainWindow):
             self.aside_player.marks.hide()
             self._show_pause(self.aside_bar, self.aside_player)
             self._place_aside_bar()
-            self.aside_bar.show()
-            self.aside_bar.raise_()
+            self.aside_bar.reveal()
         else:
             self.aside_bar.hide()
             self.aside_player.marks.place_on(area)
@@ -4154,8 +4217,7 @@ class MainWindow(QMainWindow):
             self._show_pause(self.single_bar, self.single)
             self.single_bar.set_name(item.name)
             self.single_bar.place_on(area)
-            self.single_bar.show()
-            self.single_bar.raise_()
+            self.single_bar.reveal()
         else:
             self.single_bar.hide()
             self.single.marks.place_on(area)
@@ -4186,6 +4248,11 @@ class MainWindow(QMainWindow):
 
     def aside_step(self, step: int) -> None:
         """Passe a la vignette voisine, dans l'ordre de la planche."""
+        if self.cfg["stay_in_folder"] and self.aside_current and not self.aside_playlist:
+            target = self._folder_neighbour(self.aside_current, step)
+            if target:
+                self._aside_play(target, Path(target).name)
+            return
         if self.aside_playlist:
             # En playlist, on tourne : apres la derniere, la premiere.
             count = len(self.aside_playlist)
@@ -4201,6 +4268,7 @@ class MainWindow(QMainWindow):
 
     def close_aside(self) -> None:
         self.aside_playlist = []
+        self.aside_current = ""
         self.aside_player.stop()
         self.aside_bar.hide()
         self.aside.hide()
@@ -5127,9 +5195,68 @@ class MainWindow(QMainWindow):
         )
 
     def step(self, delta: int) -> None:
-        """Element precedent ou suivant, comme les fleches du clavier."""
+        """Element precedent ou suivant, comme les fleches du clavier.
+
+        Case « rester dans ce dossier » cochee : la voisine dans le dossier
+        de la video, et non dans la liste — qui, dans l'onglet Videos, melange
+        toute la collection.
+        """
+        item = self.current
+        if (self.cfg["stay_in_folder"] and item is not None
+                and item.kind != MODE_FOLDERS and not self.browsing):
+            target = self._folder_neighbour(str(item.path), delta)
+            if target:
+                for position, other in enumerate(self.items):
+                    if str(other.path) == target:
+                        return self.show_item(position)
+                return self.play_in_app(target)
         if self.items:
             self.show_item(self.index + delta)
+
+    def set_stay_in_folder(self, on: bool) -> None:
+        """Une seule coche pour toute l'application : fiche, lecteur, mur."""
+        on = bool(on)
+        if bool(self.cfg["stay_in_folder"]) == on:
+            return
+        self.cfg["stay_in_folder"] = on
+        self.cfg.save_soon()
+        for bar in (self.single_bar, self.aside_bar):
+            bar.stay.blockSignals(True)
+            bar.stay.setChecked(on)
+            bar.stay.blockSignals(False)
+        if self.wall.stay != on:
+            self.wall.stay = on
+            for pane in self.wall.panes:
+                pane.set_stay(on)
+
+    def _folder_videos(self, path: str) -> list:
+        """Les videos du dossier de ce fichier, lues une fois par session."""
+        from .config import VIDEO_EXTS
+        folder = Path(path).parent
+        listing = self._siblings_cache.get(str(folder))
+        if listing is None:
+            mark(f"listing {folder}")
+            try:
+                listing = sorted(
+                    (entry.path for entry in os.scandir(folder)
+                     if entry.is_file()
+                     and entry.name[entry.name.rfind("."):].lower() in VIDEO_EXTS),
+                    key=str.lower)
+            except OSError:
+                listing = []
+            self._siblings_cache[str(folder)] = listing
+        return listing
+
+    def _folder_neighbour(self, path: str, delta: int) -> str:
+        listing = self._folder_videos(path)
+        if len(listing) < 2:
+            self.show_banner("C'est la seule vidéo de son dossier.", "quiet")
+            return ""
+        try:
+            at = listing.index(path)
+        except ValueError:
+            at = -1 if delta > 0 else 0
+        return listing[(at + delta) % len(listing)]
 
     def advance(self) -> None:
         if self.index + 1 >= len(self.items):

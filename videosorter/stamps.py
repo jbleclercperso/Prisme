@@ -51,6 +51,19 @@ def stamp_of(path: Path) -> str:
     return stamp
 
 
+def known(path) -> tuple | None:
+    """(taille, date) si l'analyse les a deja releves ; rien sinon, et aucune
+    lecture : la fiche ne doit jamais attendre le reseau pour un chiffre."""
+    stamp = _STAMPS.get(str(path))
+    if not stamp:
+        return None
+    try:
+        mtime, size = stamp.split("|")
+        return int(size), float(mtime)
+    except ValueError:
+        return None
+
+
 def count() -> int:
     """Nombre d'empreintes retenues, pour pouvoir le vérifier."""
     return len(_STAMPS)

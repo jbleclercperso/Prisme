@@ -2573,8 +2573,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "le mur joue plusieurs vidéos")
     from PySide6.QtWidgets import QPushButton as _QPB
     gestes = window.wall.panes[1].bar.findChildren(_QPB)
-    check(len(gestes) == 6,
-          f"le bandeau d'un panneau pilote tout : ◂ ⏯ ▸ ⚄ ⤢ ⛶ ({len(gestes)})")
+    check(len(gestes) == 5 and window.wall.panes[1].bar.stay is not None,
+          f"le bandeau d'un panneau pilote tout : ◂ ⏯ ▸ ⤢ ⛶ et la coche "
+          f"« rester dans ce dossier » ({len(gestes)})")
     pane = window.wall.panes[1]
     first_video = pane.video_path
     window.wall.refill_one(1)
@@ -2978,11 +2979,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "le bandeau du lecteur de côté flotte au-dessus de l'image")
     check(window.aside_bar.parent() is window or window.aside_bar.isWindow(),
           "c'est une fenêtre à part — la seule chose qui passe devant la vidéo")
-    check(window.aside_bar.buttons.count() == 5,
+    check(window.aside_bar.buttons.count() == 6,
           f"il porte ses cinq gestes, précédente et pause compris "
           f"({window.aside_bar.buttons.count()})")
-    check(window.single_bar.buttons.count() == 5,
-          "le bandeau de la fiche aussi : ◂ ⏯ ▸ ⌸ ⛶")
+    check(window.single_bar.buttons.count() == 6,
+          "le bandeau de la fiche aussi : la coche, ◂ ⏯ ▸ ⌸ ⛶")
     gestes = window.aside_bar.skin.findChildren(QPushButton)
     check(gestes and all(b.width() >= 28 and b.height() >= 22 for b in gestes),
           "dont les signes ont la place de se voir")
@@ -3286,6 +3287,53 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(rebuilt.rebuilt and list(broken.parent.glob("index.db.abime-*")),
           "vraiment abîmé : refait, mais l'ancien est mis de côté, pas effacé")
     rebuilt.close()
+
+    print("\n[82] Rester dans ce dossier, une ligne pour la fiche, un mur qui garde ses vidéos")
+    from PySide6.QtWidgets import QSplitter as _QSplitter
+    check(isinstance(window.middle, _QSplitter),
+          "la planche et le lecteur de droite se partagent la place à la souris")
+    tab_click(TAB_VIDEOS)
+    window.toggle_board(False)
+    window.show_item(0)
+    pump(app, 0.3)
+    check(window._one_line and window._row_one.indexOf(window.item_card) >= 0,
+          "la fiche d'une vidéo tient sur une seule ligne")
+    check("0 o" not in window.item_subtitle.text(),
+          f"jamais « 0 o » ({window.item_subtitle.text()!r})")
+    current = window.current
+    siblings = window._folder_videos(str(current.path))
+    window.set_stay_in_folder(True)
+    check(window.single_bar.stay.isChecked() and window.aside_bar.stay.isChecked()
+          and window.wall.stay, "une seule coche, partout à la fois")
+    window.step(1)
+    wait_for(app, lambda: not window.scanning, 30)
+    pump(app, 0.3)
+    if len(siblings) > 1:
+        check(window.current is not None
+              and Path(window.current.path).parent == Path(current.path).parent,
+              "cochée, « suivante » reste dans le dossier de la vidéo")
+    window.set_stay_in_folder(False)
+    tab_click(TAB_FOLDERS)
+    tab_click(TAB_VIDEOS)
+    window._wall_pinned = []
+    window.cfg["wall_orientation"] = "any"
+    window.set_tab(TAB_SPLIT)
+    window.set_wall_orientation("any")
+    window.set_wall_count(3)
+    wait_for(app, lambda: sum(1 for p in window.wall.panes if p.video_path) >= 3, 20)
+    before = [p.video_path for p in window.wall.panes]
+    window.set_wall_count(4)
+    pump(app, 1.5)
+    after = [p.video_path for p in window.wall.panes]
+    check(after[:3] == before and len(after) == 4,
+          "ajouter un panneau garde les trois vidéos qu'on regardait")
+    window.wall.set_muted(False)
+    window.wall.panes[0].watch(True, False)
+    window.wall.panes[1].watch(False, False)
+    check(not window.wall.panes[0].audio.isMuted() and window.wall.panes[1].audio.isMuted(),
+          "sur le mur, seule la vidéo survolée a le son")
+    window.wall.set_muted(True)
+    tab_click(TAB_FOLDERS)
 
 
 def main() -> int:

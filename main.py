@@ -71,15 +71,31 @@ def run() -> int:
         os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
         os.environ["QT_SCALE_FACTOR"] = "1"
 
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QLockFile
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
-    from videosorter.config import ADOPTED, APP_NAME, Config
+    from videosorter.config import ADOPTED, APP_DIR, APP_NAME, Config
+
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+
+    # Un seul Prisme a la fois sur les memes donnees, et on le verifie AVANT
+    # d'ouvrir l'index : deux fenetres qui ecrivent dans la meme base se
+    # genent, et c'est dans cette bousculade qu'un index a ete perdu.
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(APP_DIR / "prisme.lock"))
+    if not lock.tryLock(200):
+        QMessageBox.information(
+            None, APP_NAME,
+            "Prisme est déjà ouvert.\n\nFermez l'autre fenêtre (ou attendez "
+            "qu'elle ait fini de se fermer), puis relancez.")
+        return 0
+    app._prisme_lock = lock          # garde le verrou tant que l'application vit
+
     from videosorter.media import Tools
     from videosorter.widgets import app_icon
     from videosorter.window import MainWindow, check_tools
 
-    app = QApplication(sys.argv)
-    app.setApplicationName(APP_NAME)
     app.setWindowIcon(app_icon())
 
     cfg = Config()

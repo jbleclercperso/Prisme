@@ -111,6 +111,7 @@ class SplitPane(QFrame):
     sortRequested = Signal(int, str)  # clic droit : les destinations, pour ranger
     peekChosen = Signal(int, int)     # une case cliquee : (panneau, case)
     soloRequested = Signal(int)       # cette video seule, sur tout le mur
+    stayToggled = Signal(bool)        # la coche « rester dans ce dossier »
 
     def __init__(self, index: int, scroll_seconds: int = 5, parent=None):
         super().__init__(parent)
@@ -152,17 +153,21 @@ class SplitPane(QFrame):
         # suivante du meme dossier, une autre au hasard, sa fiche, et elle
         # seule en grand.
         self.history: list = []
+        self.stay = False
         for text, tip, slot in (
             ("◂", "La précédente, dans ce panneau", self._previous),
             ("⏯", "Pause, ou reprendre", self.toggle_pause),
-            ("▸", "La suivante, dans le même dossier", self._sibling),
-            ("⚄", "Une autre, au hasard, n'importe où", self._next),
+            ("▸", "Une autre : au hasard, ou dans ce dossier si la case est cochée",
+             self._forward),
             ("⤢", "Ouvrir cette vidéo dans sa fiche", self._open),
             ("⛶", "Cette vidéo seule, en grand — Échap pour revenir",
              self._solo),
         ):
             self.bar.add_gesture(text, tip, slot)
         self.pause_button = self.bar.buttons.itemAt(1).widget()
+        self.bar.add_stay("Rester dans ce dossier : ▸ prend la suivante du "
+                          "même dossier au lieu d'une vidéo au hasard",
+                          False, self.stayToggled)
         self.hovered = False
 
         # Le son ne vient que de la video survolee : six videos qui parlent
@@ -205,8 +210,7 @@ class SplitPane(QFrame):
         if hovered:
             self.marks.with_rail = False
             self.bar.place_on(self.stage)
-            self.bar.show()
-            self.bar.raise_()
+            self.bar.reveal()
         else:
             self.marks.with_rail = True
             self.bar.hide()
@@ -232,6 +236,19 @@ class SplitPane(QFrame):
 
     def _next(self) -> None:
         self.wants_next.emit(self.index)
+
+    def _forward(self) -> None:
+        """▸ : une autre au hasard, ou la suivante du meme dossier."""
+        if self.stay:
+            self._sibling()
+        else:
+            self._next()
+
+    def set_stay(self, on: bool) -> None:
+        self.stay = bool(on)
+        self.bar.stay.blockSignals(True)
+        self.bar.stay.setChecked(self.stay)
+        self.bar.stay.blockSignals(False)
 
     def _previous(self) -> None:
         """Revient a la video d'avant, dans ce panneau."""
@@ -370,6 +387,8 @@ class SplitWall(QWidget):
         # videos choisies a la main, horizontales, n'ont rien a faire dans
         # des cases debout.
         self.shape = None
+        # « Rester dans ce dossier », pour tous les panneaux a la fois.
+        self.stay = False
         # Une poignee de videos choisies a la main : une seule rangee.
         self.single_row = False
 
@@ -514,6 +533,26 @@ class SplitWall(QWidget):
         self.orientation = orientation
         self._lay_out()
 
+    stayChanged = Signal(bool)
+
+    def set_stay(self, on: bool) -> None:
+        self.stay = bool(on)
+        for pane in self.panes:
+            pane.set_stay(self.stay)
+        self.stayChanged.emit(self.stay)
+
+    def fill_empty(self) -> None:
+        """Remplit les seuls panneaux vides : ajouter un panneau ne doit pas
+        remplacer les videos qu'on etait en train de regarder."""
+        if not self.pool:
+            return self.shuffle_all()
+        busy = {pane.video_path for pane in self.panes if pane.video_path}
+        free = [video for video in self.pool if video not in busy]
+        random.shuffle(free)
+        self._queue = [(at, free.pop()) for at, pane in enumerate(self.panes)
+                       if not pane.video_path and free]
+        self._start_one()
+
     def set_shape(self, shape) -> None:
         self.shape = shape
         self._lay_out()
@@ -535,6 +574,8 @@ class SplitWall(QWidget):
             pane.peekRequested.connect(self.peekRequested)
             pane.sortRequested.connect(self.sortRequested)
             pane.soloRequested.connect(self.toggle_solo)
+            pane.stayToggled.connect(self.set_stay)
+            pane.set_stay(self.stay)
             pane.peekChosen.connect(self.peekChosen)
             pane.opened.connect(self.opened)
             pane.set_bare(self.panes[0].bare if self.panes else False)

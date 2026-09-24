@@ -198,6 +198,8 @@ DEFAULTS = {
     "filter_include": "",       # termes a chercher dans le nom
     "filter_exclude": "",       # termes qui ecartent un element
     "preview_seconds": 10,
+    "stay_in_folder": False,     # ◂ ▸ restent dans le dossier de la video
+    "aside_split": None,         # largeurs planche / lecteur de droite
     # Ou prendre l'image d'une carte : le reglage le plus cher de tous.
     # 0 = le plus rapide, 6 = des images plus parlantes et deux fois plus lentes.
     "preview_start": 2.0,

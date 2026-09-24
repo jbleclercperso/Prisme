@@ -15,7 +15,7 @@ from PySide6.QtGui import (
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog,
+    QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout,
     QListView, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy,
     QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -949,6 +949,10 @@ QFrame#overDone { background: #e9eef4; border-radius: 2px; }
 QPushButton#overGesture { background: transparent; border: 0; padding: 0;
                           color: #dbe2ea; font-size: 20px; }
 QPushButton#overGesture:hover { color: #ffffff; }
+QCheckBox#overStay { background: transparent; spacing: 0; padding: 0 6px; }
+QCheckBox#overStay::indicator { width: 18px; height: 18px; border-radius: 4px;
+                                border: 2px solid #dbe2ea; background: transparent; }
+QCheckBox#overStay::indicator:checked { background: #2f6fed; border-color: #2f6fed; }
 """
 
 
@@ -1019,8 +1023,10 @@ class PlayMarks(QWidget):
             self.setGeometry(wanted)
             self._lay_out()
         if self.isHidden():
+            # Remonter la fenetre a chaque battement, dix fois par seconde et
+            # par panneau, occupait le gestionnaire de fenetres pour rien.
             self.show()
-        self.raise_()
+            self.raise_()
 
     def _lay_out(self) -> None:
         width, height = self.width(), self.height()
@@ -1131,9 +1137,30 @@ class OverBar(QWidget):
         corner = target.mapToGlobal(QPoint(0, 0))
         width = max(180, target.width() - 16)
         height = self.sizeHint().height()
-        self.setGeometry(corner.x() + 8,
-                         corner.y() + target.height() - height - 8,
-                         width, height)
+        wanted = QRect(corner.x() + 8, corner.y() + target.height() - height - 8,
+                       width, height)
+        if self.geometry() != wanted:
+            self.setGeometry(wanted)
+
+    def reveal(self) -> None:
+        """Se montre, et ne remonte au premier plan qu'a ce moment-la."""
+        if self.isHidden():
+            self.show()
+            self.raise_()
+
+    def add_stay(self, tip: str, on: bool, slot) -> QCheckBox:
+        """La coche « rester dans ce dossier » : ◂ ▸ ne sortent plus du
+        dossier de la video. Sans texte — elle se reconnait a sa place."""
+        box = QCheckBox(self.skin)
+        box.setObjectName("overStay")
+        box.setToolTip(tip)
+        box.setFocusPolicy(Qt.NoFocus)
+        box.setCursor(Qt.PointingHandCursor)
+        box.setChecked(on)
+        box.toggled.connect(slot)
+        self.buttons.insertWidget(0, box)
+        self.stay = box
+        return box
 
 
 class PeekCell(QFrame):
