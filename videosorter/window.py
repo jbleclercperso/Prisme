@@ -1050,6 +1050,12 @@ class MainWindow(QMainWindow):
             self.show_item(target)
         self._show_counts()
         self.update_counter()
+        if self.tab == TAB_TAGS and self.mode == MODE_FOLDERS:
+            # Les mots-cles n'attendent plus la fin de la relecture : ils se
+            # tirent de ce que l'index connait deja, et se referont a la fin.
+            self._plain_items = [i for i in known if not i.is_tag]
+            self._plain_root = self.root
+            self._add_tag_items()
 
     def stop_scan(self) -> None:
         """Abandonne la relecture en cours, et la fait taire immediatement.
@@ -1725,6 +1731,19 @@ class MainWindow(QMainWindow):
         relancement sur une collection stable n'appelle simplement jamais cette
         méthode — c'est le cas courant, et c'est ce qui rend l'ouverture immédiate.
         """
+        if (self.tab == TAB_TAGS and self.mode == MODE_FOLDERS and not self.levels
+                and not any(not i.is_tag for i in self.all_items)):
+            # Les mots-cles sont a l'ecran : la relecture corrige les dossiers
+            # dont ils sont tires, sans melanger des dossiers a la liste des
+            # mots. Ils seront recalcules a la fin, sur la liste complete.
+            plain = {i.item_id: i for i in self._plain_items}
+            for key in removed:
+                plain.pop(key, None)
+            for item in list(replaced) + list(added):
+                plain[item.item_id] = item
+            self._plain_items = list(plain.values())
+            self._plain_root = self.root
+            return
         if removed:
             self._drop_items(removed)
         if replaced:
@@ -1861,6 +1880,7 @@ class MainWindow(QMainWindow):
                     self.show_banner("Mots fréquents : calcul en cours…", "info")
                 self.all_items = []
                 self.items = []
+                self.board.empty.setText("Calcul des mots fréquents…")
                 if self.browsing:
                     self.refresh_board()
                 self.item_title.setText("Calcul des mots fréquents…")
@@ -1931,7 +1951,11 @@ class MainWindow(QMainWindow):
         elapsed = time.monotonic() - (getattr(self, "_scan_started", 0.0) or
                                       time.monotonic())
         if mode == MODE_FOLDERS:
-            self._plain_items = [i for i in self.all_items if not i.is_tag]
+            plain = [i for i in self.all_items if not i.is_tag]
+            # Sur l'onglet des mots-cles, la liste affichee est celle des mots :
+            # les dossiers sont deja tenus a jour a cote.
+            if plain or not self._plain_items:
+                self._plain_items = plain
             self._plain_root = self.root
             self._top_tags = None
             if self.origin is not None and Path(self.root) == Path(self.origin):
@@ -3665,9 +3689,10 @@ class MainWindow(QMainWindow):
         self.setFocus()
 
     def _on_top_tags(self, found: list) -> None:
+        self.board.empty.setText("Rien à afficher ici.")
         self._top_tags = (self._tags_key, found)
         self._tags_thread = None
-        if self.tab == TAB_TAGS and self.tag_family != "mine" and not self.scanning:
+        if self.tab == TAB_TAGS and self.tag_family != "mine":
             self._add_tag_items()
 
     def scan_signatures(self) -> None:
@@ -3845,8 +3870,7 @@ class MainWindow(QMainWindow):
         self.tag_chips.set_value(family)
         self.levels = []
         self.browsing = True
-        if not self.scanning:
-            self._add_tag_items()
+        self._add_tag_items()
         self._apply_selectors()
 
     def _first_to_sort(self) -> int:
