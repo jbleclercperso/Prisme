@@ -664,9 +664,10 @@ class PreviewGrid(QWidget):
             return
         self.marks.set_progress(self.player.position(), self.player.duration())
         # Le trait suit l'extrait, le temps restant la video entiere.
-        self.marks.fraction = fraction
+        if int(fraction * 1000) != int(self.marks.fraction * 1000):
+            self.marks.fraction = fraction
+            self.marks.update()
         self.marks.place_on(self, self.video.geometry())
-        self.marks._lay_out()
 
     def _on_error(self, *_args) -> None:
         if 0 <= self.hovered_slot < len(self.tiles):
@@ -940,7 +941,7 @@ class RadialMenu(QWidget):
 
 
 OVER_STYLE = """
-QWidget#overBar { background: rgba(8, 10, 13, 216); border-radius: 8px; }
+QWidget#overBar { background: rgba(8, 10, 13, 216); border-radius: 0; }
 QLabel#overName { color: #e9eef4; font-size: 12px; }
 QLabel#overLeft { color: rgba(255,255,255,0.78); font-size: 12px;
                   font-weight: 500; }
@@ -956,59 +957,70 @@ QCheckBox#overStay::indicator:checked { background: #2f6fed; border-color: #2f6f
 """
 
 
-MARKS_STYLE = """
-QLabel#marksLeft { color: #ffffff; background: rgba(8, 10, 13, 200);
-                   border-radius: 5px; padding: 1px 7px; font-size: 12px;
-                   font-weight: 600; }
-QFrame#marksRail { background: rgba(255, 255, 255, 60); }
-QFrame#marksDone { background: #e9eef4; }
-"""
-
-
 class PlayMarks(QWidget):
     """Ou en est la lecture, pose **sur** l'image : un trait tres fin tout en
     bas, et, si on le demande, le temps restant en haut a droite.
 
-    La meme regle partout — fiche, apercus d'un dossier, planche, mur : un
-    trait discret toujours present, le detail au survol. Le widget video de
-    Windows se dessine par-dessus ses voisins ; seule une fenetre-outil passe
-    devant. Elle ne recoit aucun clic : ils vont a l'image, dessous.
+    Deux toutes petites fenetres opaques — le trait, la pastille — et non plus
+    une grande fenetre transparente posee sur toute l'image : celle-ci, selon
+    la carte graphique, pouvait masquer la video, et chaque avancement
+    redessinait une surface de la taille de l'image, par panneau.
     """
 
     RAIL = 3
+    TRACK = QColor("#2a2f38")
+    DONE = QColor("#e9eef4")
 
     def __init__(self, parent=None, rail: bool = True, left: bool = True):
-        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint
-                         | Qt.WindowDoesNotAcceptFocus
-                         | Qt.WindowTransparentForInput)
+        flags = (Qt.Tool | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus
+                 | Qt.WindowTransparentForInput)
+        super().__init__(parent, flags)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setStyleSheet(MARKS_STYLE)
         self.with_rail = rail
         self.with_left = left
         self.fraction = 0.0
-        self.rail = QFrame(self)
-        self.rail.setObjectName("marksRail")
-        self.done = QFrame(self.rail)
-        self.done.setObjectName("marksDone")
-        self.left = QLabel("", self)
-        self.left.setObjectName("marksLeft")
+        self._target = None
+        self.left = QLabel("", parent, flags)
+        self.left.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.left.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.left.setStyleSheet(
+            "QLabel { background: #0b0d10; color: #ffffff; padding: 1px 7px;"
+            " font-size: 12px; font-weight: 600; }")
         self.left.hide()
         self.hide()
 
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self.TRACK)
+        done = int(self.width() * self.fraction)
+        if done > 0:
+            painter.fillRect(0, 0, done, self.height(), self.DONE)
+        painter.end()
+
+    def setVisible(self, visible: bool) -> None:
+        super().setVisible(visible)
+        if not visible:
+            self.left.hide()
+
     def set_progress(self, position: int, duration: int) -> None:
         """Position et duree en millisecondes."""
-        self.fraction = (max(0.0, min(1.0, position / duration))
-                         if duration > 0 else 0.0)
-        self.left.setText(
-            f"−{human_duration(max(0, duration - position) / 1000.0)}"
-            if duration > 0 else "")
-        self._lay_out()
+        fraction = (max(0.0, min(1.0, position / duration))
+                    if duration > 0 else 0.0)
+        text = (f"−{human_duration(max(0, duration - position) / 1000.0)}"
+                if duration > 0 else "")
+        changed_text = text != self.left.text()
+        self.left.setText(text)
+        if int(fraction * 1000) != int(self.fraction * 1000):
+            self.fraction = fraction
+            self.update()
+        if changed_text:
+            self._lay_out()
 
     def clear(self) -> None:
         self.fraction = 0.0
         self.left.setText("")
+        self._target = None
         self.hide()
 
     def place_on(self, widget, rect=None) -> None:
@@ -1018,36 +1030,36 @@ class PlayMarks(QWidget):
             return self.hide()
         rect = widget.rect() if rect is None else rect
         corner = widget.mapToGlobal(rect.topLeft())
-        wanted = QRect(corner.x(), corner.y(), rect.width(), rect.height())
-        if self.geometry() != wanted:
-            self.setGeometry(wanted)
-            self._lay_out()
-        if self.isHidden():
-            # Remonter la fenetre a chaque battement, dix fois par seconde et
-            # par panneau, occupait le gestionnaire de fenetres pour rien.
-            self.show()
-            self.raise_()
+        self._target = QRect(corner.x(), corner.y(), rect.width(), rect.height())
+        self._lay_out()
 
     def _lay_out(self) -> None:
-        width, height = self.width(), self.height()
-        region = QRegion()
-        self.rail.setVisible(self.with_rail)
+        target = self._target
+        if target is None:
+            return
         if self.with_rail:
-            self.rail.setGeometry(0, height - self.RAIL, width, self.RAIL)
-            self.done.setGeometry(0, 0, int(width * self.fraction), self.RAIL)
-            region = region.united(QRegion(self.rail.geometry()))
-        shown = self.with_left and bool(self.left.text())
-        self.left.setVisible(shown)
-        if shown:
-            self.left.adjustSize()
-            self.left.move(width - self.left.width() - 8, 8)
-            region = region.united(QRegion(self.left.geometry()))
-        # Une region vide ote le masque : on garde alors au moins un point.
-        self.setMask(region if not region.isEmpty() else QRegion(0, 0, 1, 1))
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._lay_out()
+            wanted = QRect(target.x(), target.bottom() - self.RAIL + 1,
+                           target.width(), self.RAIL)
+            if self.geometry() != wanted:
+                self.setGeometry(wanted)
+            if self.isHidden():
+                # Remonter une fenetre a chaque battement occupait le
+                # gestionnaire de fenetres pour rien : seulement en apparaissant.
+                self.show()
+                self.raise_()
+        else:
+            super().setVisible(False)
+        chip = self.left
+        if self.with_left and chip.text():
+            chip.adjustSize()
+            spot = QPoint(target.right() - chip.width() - 7, target.y() + 7)
+            if chip.pos() != spot:
+                chip.move(spot)
+            if chip.isHidden():
+                chip.show()
+                chip.raise_()
+        else:
+            chip.hide()
 
 
 class OverBar(QWidget):
@@ -1135,9 +1147,11 @@ class OverBar(QWidget):
         if target is None or not target.isVisible():
             return self.hide()
         corner = target.mapToGlobal(QPoint(0, 0))
-        width = max(180, target.width() - 16)
+        width = max(180, target.width())
         height = self.sizeHint().height()
-        wanted = QRect(corner.x() + 8, corner.y() + target.height() - height - 8,
+        # Colle au bas de l'image, bord a bord : pose un peu au-dessus, il
+        # semblait flotter au milieu de nulle part.
+        wanted = QRect(corner.x(), corner.y() + target.height() - height,
                        width, height)
         if self.geometry() != wanted:
             self.setGeometry(wanted)

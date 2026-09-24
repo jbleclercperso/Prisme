@@ -538,6 +538,14 @@ class BoardView(QWidget):
         previous = self.items
         same_head = bool(previous) and bool(items) and previous[:1] == items[:1]
         self.items = list(items)
+        if self.picked_ids:
+            # Une coche posee dans une autre liste ne doit pas annoncer « un
+            # element coche » ici, ou rien ne l'est.
+            present = {item.item_id for item in self.items}
+            kept = self.picked_ids & present
+            if kept != self.picked_ids:
+                self.picked_ids = kept
+                self.pickedChanged.emit(len(kept))
         if not same_head:
             self.page = 0
         self.empty.setVisible(not self.items)

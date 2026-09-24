@@ -3335,6 +3335,52 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.wall.set_muted(True)
     tab_click(TAB_FOLDERS)
 
+    print("\n[83] La fiche d'une vidéo est la même page, d'où qu'on vienne")
+
+    def sheet_state():
+        return (window.tab != TAB_SPLIT, not window.browsing, window._one_line,
+                not window.bottom_bar.isHidden(), not window.stars.isHidden(),
+                window.controls.isHidden(),
+                window.viewer.currentWidget() is window.single)
+
+    expected = (True, True, True, True, True, True, True)
+    seen = {}
+    tab_click(TAB_VIDEOS)
+    if window.items:
+        window.on_board_open(0)
+        pump(app, 0.3)
+        seen["onglet Vidéos"] = sheet_state()
+    tab_click(TAB_SPLIT)
+    window.set_wall_count(2)
+    wait_for(app, lambda: any(p.video_path for p in window.wall.panes), 20)
+    window.pick_random()
+    wait_for(app, lambda: not window.scanning, 30)
+    pump(app, 0.4)
+    seen["« Aléatoire » depuis le mur"] = sheet_state()
+    tab_click(TAB_SPLIT)
+    wait_for(app, lambda: any(p.video_path for p in window.wall.panes), 20)
+    path = next((p.video_path for p in window.wall.panes if p.video_path), "")
+    if path:
+        window.wall.panes[0].opened.emit(path)
+        wait_for(app, lambda: not window.scanning, 30)
+        pump(app, 0.4)
+        seen["« sa fiche » depuis le mur"] = sheet_state()
+    wrong = {k: v for k, v in seen.items() if v != expected}
+    check(seen and not wrong,
+          f"même fiche, même entête, même ligne du bas, mêmes étoiles {wrong}")
+    tab_click(TAB_SPLIT)
+    pump(app, 0.3)
+    check(not window.wall.controls.isHidden(),
+          "de retour sur le mur, ses réglages sont là")
+    tab_click(TAB_VIDEOS)
+    window.board.picked_ids.add("n'existe-pas-ici")
+    window.refresh_board()
+    pump(app, 0.2)
+    check("n'existe-pas-ici" not in window.board.picked_ids
+          and window.picked_bar.isHidden(),
+          "une coche d'une autre liste n'annonce pas « un élément coché » ici")
+    tab_click(TAB_FOLDERS)
+
 
 def main() -> int:
     base = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(

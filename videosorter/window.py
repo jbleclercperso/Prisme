@@ -3524,6 +3524,8 @@ class MainWindow(QMainWindow):
         self.item_title.setText(self.wall.caption.text()
                                 or f"{len(self.wall.pool)} vidéo(s) pour le mur")
         self.item_subtitle.setText("")
+        # L'entete se regle sur ce qu'on voit : le mur est maintenant a l'ecran.
+        self._apply_selectors()
         self.probe_for_wall()
 
     def open_video_path(self, path: str) -> None:
@@ -3924,7 +3926,10 @@ class MainWindow(QMainWindow):
         """Aligne l'entête sur l'état réel, pour qu'il dise où l'on se trouve."""
         self.tabs.set_value(self.tab)
         self.tag_chips.set_value(self.tag_family)
-        wall = self.tab == TAB_SPLIT
+        # Le mur, c'est ce qu'on voit, pas seulement l'onglet : si une fiche
+        # est a l'ecran, l'entete est celui d'une fiche.
+        wall = (self.tab == TAB_SPLIT
+                and self.viewer.currentWidget() is self.wall)
         # Une fiche est ce qu'on regarde quand on ne parcourt pas — hors du
         # mur, qui n'en a pas.
         sheet = not self.browsing and not wall
@@ -4530,6 +4535,8 @@ class MainWindow(QMainWindow):
         """
         if not (0 <= position < len(self.items)):
             return
+        if self.tab == TAB_SPLIT:
+            return self.open_video_path(str(self.items[position].path))
         self.index = position
         item = self.items[position]
         self.browsing = False
@@ -5315,6 +5322,13 @@ class MainWindow(QMainWindow):
         if not path or not video.exists():
             self.show_banner("Vidéo introuvable", "error")
             return
+        if self.tab == TAB_SPLIT:
+            # La fiche d'une video est la meme page, d'ou qu'on vienne : le
+            # hasard lance depuis le mur l'ouvrait dans l'onglet du mur, avec
+            # ses reglages en haut et sans les touches ni les etoiles en bas.
+            if self.wall_full:
+                self.toggle_wall_fullscreen(False)
+            self.set_tab(TAB_FOLDERS)
         self.grid.stop()
         self.board.stop()
 
