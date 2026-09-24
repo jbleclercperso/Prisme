@@ -518,7 +518,11 @@ main { padding: 12px; }
 .crumb { color: #8b94a1; font-size: 13px; padding: 0 2px 10px; }
 #player { position: fixed; inset: 0; background: #000; display: none;
   flex-direction: column; z-index: 10; }
-#player video { flex: 1; min-height: 0; width: 100%; background: #000; }
+#player video { flex: 1; min-height: 0; width: 100%; background: #000;
+  cursor: pointer; }
+#rail { height: 4px; background: #2a2f38; cursor: pointer; }
+#done { height: 4px; width: 0; background: #e9eef4; }
+#left { color: #cdd5df; font-size: 13px; font-variant-numeric: tabular-nums; }
 #bar { display: flex; gap: 10px; align-items: center; padding: 10px 12px;
   background: #0e1116; border-top: 1px solid #1c222b; }
 #bar .label { flex: 1; padding: 0; }
@@ -568,8 +572,10 @@ APP_PAGE = f"""<!doctype html><html lang="fr"><meta charset="utf-8">
   <div class="empty" id="empty" style="display:none"></div>
 </main>
 <div id="player">
-  <video id="video" controls playsinline preload="metadata"></video>
+  <video id="video" playsinline preload="metadata"></video>
+  <div id="rail"><div id="done"></div></div>
   <div id="bar"><div class="label" id="playing"></div>
+    <span id="left"></span>
     <button id="close">Fermer</button></div>
 </div>
 <script>
@@ -633,6 +639,26 @@ function beat(force) {{
     keepalive: true,
   }}).catch(() => {{}});
 }}
+
+const rail = document.getElementById('rail'), done = document.getElementById('done');
+const left = document.getElementById('left');
+function clock(s) {{
+  s = Math.max(0, Math.round(s));
+  const m = Math.floor(s / 60), r = s % 60;
+  return m + ':' + (r < 10 ? '0' : '') + r;
+}}
+video.addEventListener('click', () => {{
+  if (video.paused) video.play().catch(() => {{}}); else video.pause();
+}});
+video.addEventListener('timeupdate', () => {{
+  const d = video.duration || 0;
+  done.style.width = d ? (100 * video.currentTime / d) + '%' : '0';
+  left.textContent = d ? '−' + clock(d - video.currentTime) : '';
+}});
+rail.addEventListener('click', (e) => {{
+  const d = video.duration || 0;
+  if (d) video.currentTime = d * e.offsetX / rail.clientWidth;
+}});
 
 function play(v) {{
   playing.textContent = v.name;

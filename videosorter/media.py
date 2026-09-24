@@ -148,7 +148,45 @@ def _stamp_of(path: Path) -> str:
     return stamp_of(path)
 
 
+# Les fichiers en cours de lecture par un fil de fond. Deplacer ou supprimer
+# une video n'a besoin d'attendre que ceux-la — et non plus toute la
+# fabrication de vignettes, ce qui gelait l'interface a chaque decision.
+_READING: dict = {}
+_READING_LOCK = threading.Lock()
+
+
+class _Reading:
+    def __init__(self, path):
+        self.key = str(path).lower()
+
+    def __enter__(self):
+        with _READING_LOCK:
+            _READING[self.key] = _READING.get(self.key, 0) + 1
+
+    def __exit__(self, *_exc):
+        with _READING_LOCK:
+            left = _READING.get(self.key, 1) - 1
+            if left:
+                _READING[self.key] = left
+            else:
+                _READING.pop(self.key, None)
+
+
+def reading_under(target) -> bool:
+    """Vrai si un fil de fond lit ce fichier, ou un fichier de ce dossier."""
+    prefix = str(target).lower()
+    with _READING_LOCK:
+        return any(key == prefix or key.startswith(prefix.rstrip("\\/") + "\\")
+                   or key.startswith(prefix.rstrip("\\/") + "/")
+                   for key in _READING)
+
+
 def probe(path: Path) -> dict:
+    with _Reading(path):
+        return _probe(path)
+
+
+def _probe(path: Path) -> dict:
     """Retourne {duration, width, height, codec, ok} pour une vidéo."""
     stamp = _stamp_of(path)
     cached = INDEX.probe(path, stamp)
@@ -214,6 +252,11 @@ def thumb_path(video: Path, ts: float, width: int) -> Path:
 
 
 def extract_thumb(video: Path, ts: float, width: int) -> Path | None:
+    with _Reading(video):
+        return _extract_thumb(video, ts, width)
+
+
+def _extract_thumb(video: Path, ts: float, width: int) -> Path | None:
     """Extrait une image à l'instant ts. Retourne le fichier de cache, ou None."""
     out = thumb_path(video, ts, width)
     try:
@@ -702,6 +745,19 @@ class PreviewManager(QObject):
         self.cancel_all()
         self.pool.waitForDone(timeout_ms)
 
+    def release(self, target, timeout_ms: int = 1500) -> None:
+        """Libere ce fichier (ou ce dossier) avant qu'on le deplace.
+
+        On annule ce qui n'a pas commence, et l'on n'attend que les lectures
+        qui le touchent — le plus souvent aucune. Attendre toute la
+        fabrication, comme avant, coutait jusqu'a une seconde par decision
+        sur le partage reseau.
+        """
+        self.cancel_all()
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while reading_under(target) and time.monotonic() < deadline:
+            time.sleep(0.02)
+
     def tune_for(self, root) -> None:
         """Adapte le nombre d'extractions simultanées au support de stockage."""
         # Huit, et pas davantage. Une extraction attend le reseau plus qu'elle
@@ -722,12 +778,29 @@ class PreviewManager(QObject):
         return self.harvester
 
     def stop_harvest(self) -> None:
+        """Arrete la recolte sans l'attendre.
+
+        On attendait qu'elle ait fini l'image en cours : sur le partage, une
+        seconde — a chaque onglet, a chaque dossier ouvert. Elle s'arrete
+        d'elle-meme a la fin de cette image ; on la garde en vie jusque-la.
+        """
         if self.harvester is not None:
-            self.harvester.stop()
-            self.harvester.wait(3000)
+            old = self.harvester
+            old.stop()
+            for signal in (old.progress, old.finished_harvest):
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+            self._retired = [h for h in getattr(self, "_retired", [])
+                             if h.isRunning()]
+            if old.isRunning():
+                self._retired.append(old)
             self.harvester = None
 
     def shutdown(self) -> None:
         self.stop_harvest()
+        for old in getattr(self, "_retired", []):
+            old.wait(2000)
         self.quiesce(2000)
         INDEX.commit(force=True)

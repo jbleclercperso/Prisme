@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from .actions import ActionError
-from .icons import GLYPHS, dress, icon
+from .icons import GLYPHS, dress, filled, icon
 from .config import KEY_ORDER, RESERVED_KEYS
 from .scan import human_duration, human_resolution
 
@@ -184,6 +184,31 @@ def seek_step(event, seconds: int) -> int:
         notches = event.angleDelta().x() / 120.0
     factor = 6 if event.modifiers() & Qt.ControlModifier else 1
     return int(notches * seconds * 1000 * factor)
+
+
+class VideoWake:
+    """Fait reapparaitre un lecteur video qu'on vient de deplacer.
+
+    Sous Windows, le widget video deplace d'une case a l'autre continue de
+    lire, mais l'ecran n'est recompose a sa nouvelle place que si un widget
+    voisin passe au-dessus de lui. L'ancienne etiquette de temps restant le
+    faisait sans le savoir ; quand elle est partie, seul le premier apercu
+    s'affichait, les autres jouaient dans le vide. Ce point invisible, releve
+    au-dessus du lecteur a chaque placement, tient ce role — expres, cette
+    fois.
+    """
+
+    def __init__(self, canvas):
+        self.dot = QLabel("", canvas)
+        self.dot.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.dot.setStyleSheet("background: transparent;")
+        self.dot.setFixedSize(1, 1)
+        self.dot.hide()
+
+    def over(self, geometry) -> None:
+        self.dot.move(geometry.topLeft())
+        self.dot.raise_()
+        self.dot.show()
 
 
 class Expiring(dict):
@@ -454,6 +479,7 @@ class PreviewGrid(QWidget):
         self.video = QVideoWidget(self)
         self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.video.hide()
+        self.wake = VideoWake(self)
         # Aucune sortie audio : un aperçu survolé se regarde, il ne s'écoute
         # pas. Sans sortie, Qt ne décode pas la piste son du tout — c'est
         # autant de travail et de bande passante réseau en moins par vignette.
@@ -610,6 +636,7 @@ class PreviewGrid(QWidget):
             return
         self._awaiting_frame = False
         self.video.show()
+        self.wake.over(self.video.geometry())
 
     def _play_slot(self, slot: int) -> None:
         tile = self.tiles[slot]
@@ -668,6 +695,7 @@ class PreviewGrid(QWidget):
             self.marks.fraction = fraction
             self.marks.update()
         self.marks.place_on(self, self.video.geometry())
+        self.wake.over(self.video.geometry())
 
     def _on_error(self, *_args) -> None:
         if 0 <= self.hovered_slot < len(self.tiles):
@@ -1918,6 +1946,39 @@ class TrashDialog(QDialog):
 
     def restore_all(self) -> None:
         self._restore(list(self.trash.entries))
+
+
+GOLD = "#f5c542"
+
+
+class FavoriteStar(QPushButton):
+    """Une etoile : vide, ou doree quand l'element est en favori.
+
+    Elle remplace les cinq etoiles de la note : on ne classait pas de 1 a 5,
+    on voulait seulement retrouver ce qu'on aime. Meme interface que
+    l'ancienne bande (`rated`, `value`, `set_value`) : 1 pour favori, 0 sinon.
+    """
+
+    rated = Signal(int)
+
+    def __init__(self, size: int = 22, parent=None):
+        super().__init__("", parent)
+        self.value = 0
+        self.setObjectName("favoriteStar")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setFixedSize(size + 16, size + 10)
+        self.setIconSize(QSize(size, size))
+        self.setStyleSheet("QPushButton#favoriteStar { background: transparent;"
+                           " border: 0; }")
+        self.clicked.connect(lambda: self.rated.emit(0 if self.value else 1))
+        self.set_value(0)
+
+    def set_value(self, value: int) -> None:
+        self.value = 1 if int(value or 0) > 0 else 0
+        self.setIcon(filled("star", GOLD) if self.value else icon("star", "#8b94a1"))
+        self.setToolTip("Retirer des favoris   (touche 0)" if self.value
+                        else "Mettre en favori   (touche 1)")
 
 
 class StarStrip(QWidget):

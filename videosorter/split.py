@@ -172,10 +172,10 @@ class SplitPane(QFrame):
 
         # Le son ne vient que de la video survolee : six videos qui parlent
         # en meme temps ne s'ecoutent pas.
+        # Pas de sortie audio a soi : le mur n'en a qu'une, branchee sur la
+        # video survolee. Dix sorties ouvertes a la fois pesaient sur le
+        # systeme pour n'en faire entendre qu'une.
         self.player = QMediaPlayer(self)
-        self.audio = QAudioOutput(self)
-        self.audio.setMuted(True)
-        self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.video)
         self.player.playbackStateChanged.connect(self._show_pause)
         self._show_pause()
@@ -199,9 +199,8 @@ class SplitPane(QFrame):
         self.bare = bare
 
     def watch(self, hovered: bool, muted: bool) -> None:
-        """Appele par le mur a chaque battement : bandeau, trait, et son."""
+        """Appele par le mur a chaque battement : bandeau et trait."""
         self.hovered = hovered
-        self.audio.setMuted(muted or not hovered)
         if (not self.isVisible() or not self.video_path or self.peeking
                 or not self.stage.isVisible()):
             self.bar.hide()
@@ -220,7 +219,6 @@ class SplitPane(QFrame):
     def hide_overlays(self) -> None:
         self.bar.hide()
         self.marks.hide()
-        self.audio.setMuted(True)
 
     def clear(self) -> None:
         self.peek_end()
@@ -450,7 +448,8 @@ class SplitWall(QWidget):
         controls.addWidget(self.unseen)
         controls.addSpacing(10)
         full = QPushButton("", self.controls)
-        dress(full, "maximize", 17, "Plein écran")
+        dress(full, "maximize", 18)
+        full.setFixedSize(34, 28)
         full.setObjectName("splitButton")
         full.setFocusPolicy(Qt.NoFocus)
         full.setToolTip("Le mur seul, sur tout l'écran — Échap pour revenir")
@@ -485,18 +484,37 @@ class SplitWall(QWidget):
 
         # Le widget video natif ne signale pas le survol : on le sonde.
         self.muted = False
+        self.audio = QAudioOutput(self)
+        self.audio.setMuted(True)
+        self._heard = None
         self.watch_timer = QTimer(self)
         self.watch_timer.setInterval(120)
         self.watch_timer.timeout.connect(self._watch)
 
     def set_muted(self, muted: bool) -> None:
         self.muted = bool(muted)
+        self.audio.setMuted(self.muted)
         self._watch()
+
+    def _hear(self, pane) -> None:
+        """Branche l'unique sortie audio sur ce panneau, et sur lui seul."""
+        if pane is self._heard:
+            return
+        if self._heard is not None:
+            try:
+                self._heard.player.setAudioOutput(None)
+            except RuntimeError:
+                pass
+        self._heard = pane
+        if pane is not None:
+            pane.player.setAudioOutput(self.audio)
+            self.audio.setMuted(self.muted)
 
     def _watch(self) -> None:
         window = self.window()
         active = window is not None and window.isActiveWindow()
         cursor = QCursor.pos()
+        heard = None
         for pane in self.panes:
             stage = pane.stage
             corner = stage.mapToGlobal(QPoint(0, 0))
@@ -504,6 +522,9 @@ class SplitWall(QWidget):
                 corner.x(), corner.y(), stage.width(),
                 stage.height()).contains(cursor))
             pane.watch(over, self.muted)
+            if over:
+                heard = pane
+        self._hear(heard)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -512,6 +533,7 @@ class SplitWall(QWidget):
     def hideEvent(self, event):
         super().hideEvent(event)
         self.watch_timer.stop()
+        self._hear(None)
         self.stop()
 
     def set_unseen(self, on: bool) -> None:
@@ -563,6 +585,8 @@ class SplitWall(QWidget):
         self.solo = -1
         while len(self.panes) > count:
             pane = self.panes.pop()
+            if pane is self._heard:
+                self._hear(None)
             pane.clear()
             pane.hide_overlays()
             self.grid.removeWidget(pane)

@@ -130,6 +130,15 @@ def delete(path: Path, mode: str = "recycle") -> tuple[Path | None, bool]:
     if not path.exists():
         raise ActionError(f"Introuvable : {path}")
 
+    if mode == "recycle":
+        from .media import is_network_path
+        if is_network_path(path):
+            # Un partage reseau n'a pas de corbeille Windows : l'envoi y
+            # echouait, et les fichiers « supprimes » s'entassaient, caches,
+            # sur le NAS. On supprime donc pour de bon — c'est ce qu'on
+            # demande en supprimant.
+            mode = "permanent"
+
     if mode == "permanent":
         try:
             if path.is_dir():

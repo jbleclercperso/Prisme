@@ -28,8 +28,11 @@ GLYPHS = {
 }
 
 
-def _pixmap(name: str, color: str, px: int, stroke: float) -> QPixmap:
+def _pixmap(name: str, color: str, px: int, stroke: float,
+            fill: str = "") -> QPixmap:
     svg = SVG[name].replace("currentColor", color)
+    if fill:
+        svg = svg.replace('fill="none"', f'fill="{fill}"', 1)
     if stroke != 2.0:
         svg = svg.replace('stroke-width="2"', f'stroke-width="{stroke:g}"')
     renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
@@ -51,6 +54,15 @@ def icon(name: str, color: str = INK, stroke: float = 2.0) -> QIcon:
         result.addPixmap(_pixmap(name, color, px, stroke), QIcon.Normal)
         result.addPixmap(_pixmap(name, DIM, px, stroke), QIcon.Disabled)
         result.addPixmap(_pixmap(name, ACCENT, px, stroke), QIcon.Active)
+    return result
+
+
+@lru_cache(maxsize=16)
+def filled(name: str, color: str) -> QIcon:
+    """L'icone remplie de sa couleur : l'etoile doree d'un favori."""
+    result = QIcon()
+    for px in (24, 48, 64):
+        result.addPixmap(_pixmap(name, color, px, 2.0, color), QIcon.Normal)
     return result
 
 

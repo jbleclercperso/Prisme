@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from .perf import mark
 from .scan import MODE_FOLDERS, human_duration, human_resolution, human_size
-from .widgets import Expiring, PlayMarks, elide
+from .widgets import Expiring, PlayMarks, VideoWake, elide
 
 RATING_STYLE = ("QLabel { color: #f5c542; background: rgba(8, 10, 13, 190);"
                 " border-radius: 4px; padding: 0 5px; font-size: 14px;"
@@ -207,7 +207,7 @@ class BoardCard(QFrame):
     def set_stars(self, stars: int) -> None:
         """La note en un chiffre d'or ; rien du tout sans note."""
         self.stars_value = int(stars or 0)
-        self.rating.setText(str(self.stars_value) if self.stars_value else "")
+        self.rating.setText("★" if self.stars_value else "")
         self.rating.setVisible(self.stars_value > 0)
         if self.stars_value:
             self._place_handles()
@@ -354,7 +354,7 @@ class HoverHandles(QWidget):
             self.pick.blockSignals(True)
             self.pick.setChecked(card.pick.isChecked())
             self.pick.blockSignals(False)
-            self.rating.setText(str(card.stars_value) if card.stars_value else "")
+            self.rating.setText("★" if card.stars_value else "")
             self.rating.setVisible(card.stars_value > 0)
             self.setGeometry(QRect())
         if self.geometry() != rect:
@@ -423,6 +423,7 @@ class BoardView(QWidget):
         self.video = QVideoWidget(self.canvas)
         self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.video.hide()
+        self.wake = VideoWake(self.canvas)
 
         # Trait d'avancement et temps restant, poses sur l'image survolee.
         # Sur un dossier, le temps restant se tait : la pastille dit deja
@@ -868,11 +869,13 @@ class BoardView(QWidget):
         self._awaiting_frame = False
         if not self._blackout:
             self.video.show()
+            self.wake.over(self.video.geometry())
 
     def _end_blackout(self) -> None:
         self._blackout = False
         if not self._awaiting_frame and self.hovered != -1 and self._loaded:
             self.video.show()
+            self.wake.over(self.video.geometry())
 
     def _play(self, position: int) -> None:
         card = self.cards[position]
@@ -926,6 +929,7 @@ class BoardView(QWidget):
             self.marks.with_left = not folder
             self.marks.set_progress(position, duration)
             self.marks.place_on(card.image)
+            self.wake.over(self.video.geometry())
 
     def _on_error(self, *_args) -> None:
         if 0 <= self.hovered < len(self.cards) and self.cards[self.hovered].video:

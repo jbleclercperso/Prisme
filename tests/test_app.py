@@ -325,7 +325,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(tile.duration > 0, f"durée remontée jusqu'à la vignette ({tile.duration:.1f} s)")
     check(tile.height_px == 240, f"hauteur remontée ({tile.height_px})")
     check(not tile.duration_chip.isHidden(), "pastille de durée affichée")
-    check(tile.duration_chip.text() == "0:06", f"durée totale, pas l'instant de l'aperçu "
+    from videosorter.scan import human_duration as _hd
+    check(tile.duration_chip.text() == _hd(tile.duration), f"durée totale, pas l'instant de l'aperçu "
           f"(obtenu {tile.duration_chip.text()!r})")
     check(tile.duration_chip.x() > tile.width() / 2, "pastille placée en haut à droite")
     check(tile.caption.text().startswith("240p"),
@@ -337,7 +338,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(" / " in tile.duration_chip.text(),
           f"molette : position et durée (obtenu {tile.duration_chip.text()!r})")
     tile.show_duration()
-    check(tile.duration_chip.text() == "0:06", "la durée revient une fois le survol fini")
+    check(tile.duration_chip.text() == _hd(tile.duration), "la durée revient une fois le survol fini")
 
     print("\n[19] Bouton de son")
     # Une icone dessinee, pas un emoji : c'est l'infobulle qui porte l'etat.
@@ -694,18 +695,18 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     window.show_item(first_untouched(window))
     target = window.current
-    check(window.ratings.get(target.path) == 0, "un élément démarre sans note")
+    check(window.ratings.get(target.path) == 0, "un élément démarre hors des favoris")
     window.rate_current(4)
-    check(window.ratings.get(target.path) == 4, "une note s'attribue")
-    check(window.stars.value == 4, "et s'affiche dans la bande d'étoiles")
-    window.rate_current(4)
+    check(window.ratings.get(target.path) > 0, "il passe en favori")
+    check(window.stars.value == 1, "et l'étoile, en bas à droite, se dore")
+    window.stars.click()
     check(window.ratings.get(target.path) == 0,
-          "rappuyer sur la même valeur efface la note")
+          "un clic sur l'étoile dorée le retire des favoris")
     window.rate_current(2)
     QTest.keyClick(window, Qt.Key_0)
-    check(window.ratings.get(target.path) == 0, "la touche 0 efface la note")
-    QTest.keyClick(window, Qt.Key_5)
-    check(window.ratings.get(target.path) == 5, "la touche 5 attribue cinq étoiles")
+    check(window.ratings.get(target.path) == 0, "la touche 0 le retire aussi")
+    QTest.keyClick(window, Qt.Key_1)
+    check(window.ratings.get(target.path) > 0, "la touche 1 le met en favori")
 
     # La note doit suivre l'élément quand il change de place.
     moved_dir = tri / "notes"
@@ -713,14 +714,14 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     name = target.name
     QTest.keyClick(window, Qt.Key_6)
     settle(app, window)
-    check(window.ratings.get(moved_dir / name) == 5,
-          "la note suit l'élément déplacé")
+    check(window.ratings.get(moved_dir / name) > 0,
+          "le favori suit l'élément déplacé")
     check(window.ratings.get(target.path) == 0, "et ne reste pas sur l'ancien chemin")
 
     window.ratings.flush()
     from videosorter.ratings import Ratings
     reloaded = Ratings(path=window.ratings.path)
-    check(reloaded.get(moved_dir / name) == 5, "la note survit à un redémarrage")
+    check(reloaded.get(moved_dir / name) > 0, "le favori survit à un redémarrage")
 
     print("\n[29] Vue planche")
     window.start_root(root, MODE_FOLDERS)
@@ -1037,10 +1038,10 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.show_item(first_untouched(window))
     target = window.current
     window.ratings.set(target.path, 0)
-    window.stars.rated.emit(4)
+    window.stars.rated.emit(1)
     pump(app, 0.2)
-    check(window.ratings.get(target.path) == 4,
-          "les étoiles, à droite, posent la note")
+    check(window.ratings.get(target.path) > 0,
+          "l'étoile, à droite, met en favori")
 
     print("\n[42] Une configuration ancienne migre ses touches")
     import json, tempfile
@@ -2241,8 +2242,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.3)
     check(window.controls.sorts.isHidden() and window.controls.unseen.isHidden()
           and window.controls.wider.isHidden(), "sur le mur, la ligne des filtres se vide")
-    check(window.wall.controls.parent() is window.controls
-          and not window.wall.controls.isHidden(), "les réglages du mur sont sur la ligne de recherche")
+    check(window.wall.controls.parent() is window.top_bar
+          and not window.wall.controls.isHidden() and window.controls.isHidden(),
+          "les réglages du mur sont sur la première ligne, sans recherche par nom")
     check("vidéo" in window.wall.orient_button.toolTip(), "dont l'infobulle dit la taille du vivier")
     window.wall.unseenToggled.emit(True)
     pump(app, 0.3)
@@ -3074,7 +3076,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "une ligne en bas, et les étoiles : un dossier se note aussi")
     window.ratings.set(folder.path, 0)
     window.rate_current(4)
-    check(window.ratings.get(folder.path) == 4, "la note d'un dossier est retenue")
+    check(window.ratings.get(folder.path) > 0, "un dossier se met en favori aussi")
     window.ratings.set(folder.path, 0)
     check(window.random_here_button.text() == "Au hasard ici"
           and window.reveal_button.text() == "Ouvrir le dossier",
@@ -3121,7 +3123,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.ratings.set(window.items[0].path, 0)
     window.on_board_rate(0, 5) if hasattr(window, "on_board_rate") else None
     pump(app, 0.2)
-    check(first_card.rating.text() == "5" and not first_card.rating.isHidden(),
+    check(first_card.rating.text() == "★" and not first_card.rating.isHidden(),
           f"une carte notée montre sa note ({first_card.rating.text()!r})")
     window.ratings.set(window.items[0].path, 0)
 
@@ -3330,7 +3332,10 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.wall.set_muted(False)
     window.wall.panes[0].watch(True, False)
     window.wall.panes[1].watch(False, False)
-    check(not window.wall.panes[0].audio.isMuted() and window.wall.panes[1].audio.isMuted(),
+    window.wall._hear(window.wall.panes[0])
+    check(window.wall.panes[0].player.audioOutput() is window.wall.audio
+          and window.wall.panes[1].player.audioOutput() is None
+          and not window.wall.audio.isMuted(),
           "sur le mur, seule la vidéo survolée a le son")
     window.wall.set_muted(True)
     tab_click(TAB_FOLDERS)
@@ -3381,6 +3386,53 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "une coche d'une autre liste n'annonce pas « un élément coché » ici")
     tab_click(TAB_FOLDERS)
 
+    print("\n[84] Favoris, lancement propre, aperçus qui se montrent")
+    from videosorter.header import TAB_FAVS
+    from videosorter.window import MainWindow as _MW
+    tab_click(TAB_FOLDERS)
+    folder = next(i for i in window.items if i.kind == MODE_FOLDERS)
+    window.ratings.set(folder.path, 0)
+    window.on_board_open(window.items.index(folder))
+    pump(app, 0.3)
+    window.stars.click()
+    video = None
+    tab_click(TAB_VIDEOS)
+    if window.items:
+        video = window.items[0]
+        window.ratings.set(video.path, 0)
+        window.on_board_open(0)
+        pump(app, 0.2)
+        QTest.keyClick(window, Qt.Key_1)
+    tab_click(TAB_FAVS)
+    shown = {str(i.path) for i in window.items}
+    check(str(folder.path) in shown and (video is None or str(video.path) in shown),
+          f"l'onglet Favoris réunit dossiers et vidéos en favori ({len(shown)})")
+    check(window.at_home() and window.browsing, "et s'ouvre sur sa planche")
+    window.ratings.set(folder.path, 0)
+    if video is not None:
+        window.ratings.set(video.path, 0)
+    tab_click(TAB_FOLDERS)
+
+    window.cfg["tab"] = TAB_TAGS
+    window.cfg["only_unseen"] = True
+    window.cfg["folder_max"] = 5
+    window.cfg["orientations"] = ["horizontal"]
+    fresh = _MW(window.cfg)
+    check(fresh.tab == TAB_FOLDERS and not fresh.cfg["only_unseen"]
+          and not fresh.cfg["folder_max"] and not fresh.cfg["orientations"],
+          "au lancement : l'onglet Dossiers, sans filtre oublié d'une autre fois")
+    fresh.close()
+    fresh.deleteLater()
+
+    from videosorter.board import BoardView as _BV
+    from videosorter.widgets import VideoWake as _VW
+    check(isinstance(window.board.wake, _VW) and isinstance(window.grid.wake, _VW),
+          "le lecteur d'aperçu déplacé de case en case est remis au premier plan")
+    from videosorter import media as _media
+    with _media._Reading(Path("X:/lot/a.mp4")):
+        check(_media.reading_under(Path("X:/lot")) and not _media.reading_under(Path("X:/autre")),
+              "on sait quel fichier les fils de fond lisent : on n'attend que lui")
+
 
 def main() -> int:
     base = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
@@ -3418,6 +3470,8 @@ def main() -> int:
         {"key": "6", "label": "2019", "path": str(tri / "2019")},
         {"key": "7", "label": "2020", "path": str(tri / "2020")},
     ])
+    from PySide6.QtWidgets import QMessageBox as _QMB
+    _QMB.question = staticmethod(lambda *a, **k: _QMB.Yes)
     window = MainWindow(cfg)
     window.resize(1400, 900)
     window.show()

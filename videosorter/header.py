@@ -32,7 +32,9 @@ TAB_TAGS = "tags"
 TAB_SPLIT = "split"
 # L'edition n'est plus un onglet mais l'etage du dessous : on y entre
 # en cliquant une carte, on en sort par Echap.
-TABS = (TAB_FOLDERS, TAB_VIDEOS, TAB_TAGS, TAB_SPLIT)
+# Ce qu'on a mis de cote : dossiers et videos, ensemble.
+TAB_FAVS = "favs"
+TABS = (TAB_FOLDERS, TAB_VIDEOS, TAB_TAGS, TAB_SPLIT, TAB_FAVS)
 
 # Conserves pour les appels existants : un onglet dit a la fois quoi et comment.
 CONTENT_FOLDERS = TAB_FOLDERS
@@ -689,7 +691,8 @@ class ControlBar(QWidget):
         wall = mode == "wall"
         folders = mode == "folders"
         self.sorts.setVisible(not wall)
-        self.rating_pick.setVisible(not wall)
+        # Plus de notes de 1 a 5 : l'onglet Favoris remplace ce filtre.
+        self.rating_pick.setVisible(False)
         self.unseen.setVisible(not wall and not folders)
         self.format_button.setVisible(not wall and not folders)
         self.folder_min.setVisible(folders)

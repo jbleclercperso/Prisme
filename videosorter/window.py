@@ -25,10 +25,10 @@ from .dupes import (
 from .help import HelpDialog
 from .board import COLUMN_CHOICES, BoardView
 from .actions import HistoryEntry
-from .config import APP_DIR, APP_NAME, Config
+from .config import APP_DIR, APP_NAME, VIDEO_EXTS, Config
 from .header import (
     CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, TAB_FOLDERS,
-    TAB_SPLIT, TAB_TAGS, TAB_VIDEOS, TABS, VIEW_BROWSE, VIEW_EDIT, Breadcrumb, Chips,
+    TAB_FAVS, TAB_SPLIT, TAB_TAGS, TAB_VIDEOS, TABS, VIEW_BROWSE, VIEW_EDIT, Breadcrumb, Chips,
     ControlBar, Segmented,
     build_overflow,
 )
@@ -68,7 +68,7 @@ from .icons import dress, icon
 from .widgets import (
     Stepper, OverBar, PeekOverlay, RadialMenu, app_icon, draw_icon,
     STYLESHEET, CommandBar, DestinationsDialog, PreviewGrid, SinglePlayer,
-    StarStrip, TagsDialog, TrashDialog,
+    FavoriteStar, TagsDialog, TrashDialog,
 )
 
 PAGE_WELCOME, PAGE_SORT, PAGE_DONE, PAGE_QUIET = 0, 1, 2, 3
@@ -168,8 +168,19 @@ class MainWindow(QMainWindow):
         self.all_items: list = []      # tout ce que l'analyse a trouve
         self.items: list = []          # ce que le filtre laisse passer
         self.index = 0                 # index dans self.items
-        # Un seul onglet dit ou l'on est : dossiers, videos, ou edition.
-        self.tab = cfg["tab"] if cfg["tab"] in TABS else TAB_FOLDERS
+        # Au lancement : l'onglet Dossiers, a la racine, sans filtre. Des
+        # filtres oublies d'une session a l'autre (« non vus », « horizontales
+        # seules », « 5 videos au plus ») donnaient des ecrans vides qu'on ne
+        # savait pas expliquer. Les recherches a garder s'enregistrent.
+        self.tab = TAB_FOLDERS
+        cfg["tab"] = TAB_FOLDERS
+        cfg["content"] = CONTENT_FOLDERS
+        cfg["view"] = VIEW_BROWSE
+        for key, value in (("filter_include", ""), ("filter_exclude", ""),
+                           ("only_unseen", False), ("orientations", []),
+                           ("stars_pick", -1), ("folder_min", 0),
+                           ("folder_max", 0)):
+            cfg[key] = value
         # On arrive toujours sur les vignettes : l'edition se choisit.
         self._editing = False
         # L'onglet d'edition ne dit pas ce qu'on regarde : on garde a part la
@@ -227,7 +238,9 @@ class MainWindow(QMainWindow):
         self.titles_scan = None
         self.scene_scan = None
         self.sig_scan = None
-        self._resume_id = cfg["last_item"] or ""
+        # Plus de reprise dans un sous-dossier au lancement : on arrive a la
+        # racine, comme demande.
+        self._resume_id = ""
         # Vrai le temps d'un repli sur l'a-peu-pres, quand l'exact n'a rien rendu.
         self._loose = False
         # Le compteur de session : combien de decisions, depuis quand.
@@ -311,6 +324,7 @@ class MainWindow(QMainWindow):
             (TAB_VIDEOS, "Vidéos", "Toutes les vidéos en vrac, au hasard"),
             (TAB_TAGS, "Mots-clés", "Les vidéos réunies par les mots de leurs noms"),
             (TAB_SPLIT, "Mur", "Plusieurs vidéos à la fois"),
+            (TAB_FAVS, "★ Favoris", "Les dossiers et les vidéos mis en favori"),
         ], sort_page)
         self.tabs.chosen.connect(self.set_tab)
         row_one.addWidget(self.tabs, 0)
@@ -388,7 +402,10 @@ class MainWindow(QMainWindow):
         row_one.addWidget(self.state_button, 0)
 
         self.random_button = QPushButton("", sort_page)
-        dress(self.random_button, "dices", 18, "Aléatoire")
+        # Le de seul : son infobulle dit ce qu'il fait, et la premiere ligne
+        # a besoin de sa place pour le chemin et le nom.
+        dress(self.random_button, "dices", 20)
+        self.random_button.setFixedWidth(42)
         self.random_button.setObjectName("random")
         self.random_button.setToolTip("Une vidéo au hasard, dans toute la "
                                       "collection   (Ctrl+H)")
@@ -453,6 +470,7 @@ class MainWindow(QMainWindow):
                 ("Ignorer la mise à l'échelle de Windows", self.toggle_dpi),
             ]),
             ("Collection", [
+                ("État de la collection…", self.show_collection_state),
                 ("Compter les vidéos", self.count_videos),
                 ("État des vignettes", self.audit_thumbs),
                 ("Préparer toutes les vignettes", self.toggle_backfill),
@@ -634,6 +652,7 @@ class MainWindow(QMainWindow):
         self._row_one, self._row_two = row_one, row_two
         self._one_line = False
 
+
         # Les deux rangees du haut dans un seul widget : le plein ecran du
         # mur et le cinema doivent pouvoir tout effacer d'un geste.
         self.top_bar = QWidget(sort_page)
@@ -719,8 +738,11 @@ class MainWindow(QMainWindow):
         self.wall.unseenToggled.connect(self._wall_unseen)
         # Les reglages du mur — nombre, orientation, non vus, plein ecran — en
         # bout de la ligne de recherche, pas sur une ligne a eux.
-        self.wall.controls.setParent(self.controls)
-        self.controls.layout().itemAt(0).layout().addWidget(self.wall.controls)
+        # Sur la premiere ligne, a la suite du chemin : le mur n'a qu'une
+        # ligne, et pas de recherche par nom — il pioche au hasard.
+        self.wall.controls.setParent(self.top_bar)
+        self._row_one.insertWidget(self._row_one.indexOf(self.crumbs) + 1,
+                                   self.wall.controls, 0)
         self.wall.controls.hide()
         self.wall.peekRequested.connect(self.wall_peek)
         self.wall.peekChosen.connect(self.wall_peek_chosen)
@@ -824,7 +846,7 @@ class MainWindow(QMainWindow):
         self.next_button.setFocusPolicy(Qt.NoFocus)
         self.next_button.clicked.connect(lambda: self.step(1))
 
-        self.stars = StarStrip(22, sort_page)
+        self.stars = FavoriteStar(22, sort_page)
         self.stars.rated.connect(self.rate_current)
 
         self.commands = CommandBar(sort_page)
@@ -1099,7 +1121,7 @@ class MainWindow(QMainWindow):
             except (RuntimeError, TypeError):
                 pass
         thread.stop()
-        if not thread.wait(400):
+        if thread.isRunning():
             # Il se terminera de lui-meme ; on le garde en vie le temps qu'il le
             # fasse, sans quoi Qt detruirait un QThread encore en marche.
             self._dying = [t for t in getattr(self, "_dying", []) if t.isRunning()]
@@ -1220,6 +1242,19 @@ class MainWindow(QMainWindow):
             f"{' sur ' + self._thousands(audited) + ' (' + state['audited_at'] + ')' if audited and state.get('audited_at') else ''}\n"
             f"• dernière analyse des dossiers : {state.get('scanned_at') or 'jamais'}\n\n"
             "Cliquer : recompter les vidéos, puis vérifier les vignettes.")
+
+    def show_collection_state(self) -> None:
+        """Ce que Prisme sait de la collection, en clair, et de quoi le verifier."""
+        self._refresh_state()
+        box = QMessageBox(self)
+        box.setWindowTitle("État de la collection")
+        box.setText(self.state_button.toolTip().replace(
+            "\n\nCliquer : recompter les vidéos, puis vérifier les vignettes.", ""))
+        check = box.addButton("Recompter et vérifier", QMessageBox.AcceptRole)
+        box.addButton("Fermer", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is check:
+            self.verify_collection()
 
     def verify_collection(self) -> None:
         """Un clic : compter, puis verifier les vignettes. Les deux chiffres qui tranchent."""
@@ -1600,14 +1635,9 @@ class MainWindow(QMainWindow):
         if origin is not None and here == origin:
             self.show_banner("Déjà au sommet.", "quiet")
             return
+        # Le vrai dossier parent, un cran au-dessus — et non la racine
+        # entiere, qu'on atteignait en sautant les dossiers « + ».
         parent = here.parent
-        # Un dossier de tete (« + ») se traverse, il ne se visite pas : on
-        # passe au-dessus. Et l'on ne sort jamais de la racine choisie —
-        # c'est ce qui « balançait vers autre chose ».
-        while parent != origin and PARENT_PREFIX and parent.name.startswith(PARENT_PREFIX):
-            if parent.parent == parent:
-                break
-            parent = parent.parent
         if origin is not None:
             try:
                 parent.relative_to(origin)
@@ -2999,6 +3029,12 @@ class MainWindow(QMainWindow):
     def apply_sort(self) -> None:
         """Reclasse la liste visible selon le mode choisi."""
         import random
+        if (self.tab == TAB_TAGS and self.sort_mode in ("random", "name", "", None)
+                and self.items and all(i.is_tag for i in self.items)):
+            # Les mots-cles se lisent du plus frequent au moins frequent — et
+            # dans le meme ordre d'une fois a l'autre.
+            self.items.sort(key=lambda i: (-i.video_count, i.sort_name))
+            return
 
         def duration_of(item):
             total = 0.0
@@ -3128,7 +3164,7 @@ class MainWindow(QMainWindow):
         self.grid.video.hide()
         self.board.video.hide()
 
-    def _release_media(self) -> None:
+    def _release_media(self, target=None) -> None:
         """Relâche tous les handles sur les fichiers avant une opération disque.
 
         Deux sources de verrous sous Windows : le lecteur Qt, et les ffmpeg de
@@ -3146,8 +3182,10 @@ class MainWindow(QMainWindow):
             pane.stop()
         self.grid.video.hide()
         self.board.video.hide()
-        self.preview.quiesce(1200)
-        QApplication.processEvents()
+        if target is None:
+            self.preview.cancel_all()
+        else:
+            self.preview.release(target)
 
     # ------------------------------------------------------------------
     # Vue planche et notation
@@ -3548,6 +3586,44 @@ class MainWindow(QMainWindow):
                 return
         self.open_external(path)
 
+    def show_favorites(self) -> None:
+        """Les dossiers et les videos en favori, sans rien relire du disque.
+
+        Un dossier vient de la liste deja analysee ; une video, de son seul
+        chemin. On y ouvre un dossier ou une video comme partout ailleurs.
+        """
+        loved = {key for key, value in self.ratings.data.items() if value}
+        folders = [item for item in (self._plain_items or [])
+                   if not item.is_tag and str(item.path) in loved]
+        known = {str(item.path) for item in folders}
+        videos = []
+        for key in sorted(loved - known, key=str.lower):
+            if Path(key).suffix.lower() not in VIDEO_EXTS or under_veiled(key):
+                continue
+            item = self._flat_cache.get(key) or Item(
+                path=Path(key), kind=MODE_FILES, videos=[Path(key)],
+                video_count=1, file_count=1)
+            videos.append(item)
+        self.levels = []
+        self.browsing = True
+        self.all_items = folders + videos
+        self.items = self._filtered()
+        self.index = 0
+        top = self.top_root()
+        if top is not None:
+            self.crumbs.set_path(top, top)
+            self.crumbs.append_leaf("★ Favoris")
+        self._apply_selectors()
+        self.board.empty.setText(
+            "Aucun favori pour l'instant : l'étoile, en bas à droite d'une "
+            "fiche, ou la touche 1, en ajoute un.")
+        self.refresh_board()
+        if top is not None:
+            self.crumbs.set_path(top, top)
+            self.crumbs.append_leaf("★ Favoris")
+        self._show_counts()
+        QTimer.singleShot(150, self.start_harvest)
+
     def show_videos_tab(self) -> None:
         """Toutes les vidéos de la racine, sans relire le disque.
 
@@ -3659,6 +3735,10 @@ class MainWindow(QMainWindow):
                 self._add_tag_items()
 
         top = self.top_root()
+        if tab == TAB_FAVS:
+            self.show_favorites()
+            self.setFocus()
+            return
         if tab == TAB_SPLIT:
             # Le fil ne porte plus la fiche qu'on vient de quitter.
             self.crumbs.set_path(top, self.root)
@@ -3837,8 +3917,11 @@ class MainWindow(QMainWindow):
             self._add_tag_items()
 
     def at_home(self) -> bool:
-        """Vrai quand on est sur la liste d'un onglet, et non dans un element."""
-        return self.browsing and not self.levels
+        """Vrai quand on est sur la liste d'un onglet, a sa racine."""
+        if not self.browsing or self.levels:
+            return False
+        top = self.top_root()
+        return self.root is None or top is None or Path(self.root) == Path(top)
 
     def go_home(self) -> None:
         """Remonte a la liste de l'onglet courant, d'ou qu'on vienne.
@@ -3869,6 +3952,9 @@ class MainWindow(QMainWindow):
             self._add_tag_items()
         elif self.tab == TAB_VIDEOS:
             self.show_videos_tab()
+        elif self.tab == TAB_FAVS:
+            self.show_favorites()
+            return
         elif not self.restore_folders():
             self.start_root(self.top_root(), self.mode_for_content(),
                             reset_levels=True)
@@ -3935,19 +4021,16 @@ class MainWindow(QMainWindow):
         sheet = not self.browsing and not wall
         self.tag_chips.setVisible(self.tab == TAB_TAGS and not sheet)
         self.tags_button.setVisible(self.tab == TAB_TAGS and not sheet)
-        # Sur la premiere ligne, les familles de mots-cles prennent la place
-        # de l'etat de la collection, qui ne dit rien de plus ici.
-        if self.tab == TAB_TAGS and not sheet:
-            self.state_button.hide()
-        elif self.progress.isHidden():
-            self.state_button.show()
+        # L'etat de la collection vit dans le menu ⋯ : sur la premiere ligne,
+        # il se faisait rogner jusqu'a chevaucher les boutons voisins.
+        self.state_button.hide()
         self.controls.set_browsing(self.browsing)
         self.controls.set_mode({TAB_SPLIT: "wall", TAB_FOLDERS: "folders",
                                 TAB_TAGS: "tags"}.get(self.tab, "videos"))
         # La seconde ligne : les filtres sur une planche, le titre sur une
         # fiche. Jamais les deux — c'etait trois lignes avant l'image.
-        self.controls.setVisible(not sheet and not (
-            self.board.picked_ids and self.browsing and not wall))
+        self.controls.setVisible(not sheet and not wall and not (
+            self.board.picked_ids and self.browsing))
         # La fiche d'une video tient sur une seule ligne : onglets, chemin et
         # nom, puis ce qu'on en sait et ses deux gestes. Toute la hauteur
         # restante va a l'image.
@@ -3970,9 +4053,10 @@ class MainWindow(QMainWindow):
         # video, il la relancait, ce qui n'a aucun sens.
         self.random_here_button.setVisible(sheet and folder
                                            and bool(item.videos))
-        self.reveal_button.setText(
-            "Ouvrir le dossier" if folder or (item is not None and item.is_tag)
-            else "Emplacement")
+        if not self._one_line:
+            self.reveal_button.setText(
+                "Ouvrir le dossier" if folder or (item is not None and item.is_tag)
+                else "Emplacement")
         # Le hasard « dans ce qu'on regarde » n'a de sens que si l'on regarde
         # une partie : des resultats filtres, ou un dossier ou l'on est entre.
         self._refresh_random_here()
@@ -3996,6 +4080,11 @@ class MainWindow(QMainWindow):
             return
         self._one_line = first
         one, two, card = self._row_one, self._row_two, self.item_card
+        # Sur la ligne unique, les gestes de la fiche ne gardent que leur
+        # icone : le nom de la video passe avant leur libelle.
+        for button, label in ((self.reveal_button, "Emplacement"),
+                              (self.cinema_button, "Cinéma")):
+            button.setText("" if first else label)
         if first:
             two.removeWidget(card)
             at = one.indexOf(self.crumbs)
@@ -4312,7 +4401,7 @@ class MainWindow(QMainWindow):
         if (watched is getattr(self, "progress", None)
                 and event.type() in (QEvent.Show, QEvent.Hide)
                 and hasattr(self, "state_button")):
-            self.state_button.setVisible(event.type() == QEvent.Hide)
+            self.state_button.hide()
         if (watched is getattr(self, "item_title", None)
                 and event.type() == QEvent.MouseButtonRelease
                 and event.button() == Qt.LeftButton):
@@ -4548,7 +4637,7 @@ class MainWindow(QMainWindow):
     def show_board_at(self, position: int) -> None:
         """Retour aux vignettes, sur celle qu'on venait d'ouvrir."""
         self.browsing = True
-        self._release_media()
+        self._hush_players()
         self.refresh_board()
         if 0 <= position < len(self.items):
             self.board.scroll_to(position)
@@ -4562,15 +4651,20 @@ class MainWindow(QMainWindow):
             self.ratings.flush()
 
     def rate_current(self, stars: int) -> None:
+        """Favori, ou non : 1 a 5 mettent en favori, 0 retire."""
         item = self.current
         if item is None:
             return
-        value = self.ratings.set(item.path, stars)
+        wanted = 1 if int(stars or 0) > 0 else 0
+        if (self.ratings.get(item.path) > 0) == bool(wanted):
+            self.stars.set_value(wanted)
+            return
+        value = self.ratings.set(item.path, wanted)
         self.stars.set_value(value)
         self.ratings.flush()
         self.show_banner(
-            f"« {item.name} » : {value} étoile(s)" if value
-            else f"« {item.name} » : note effacée", "quiet",
+            f"★ « {item.name} » en favori" if value
+            else f"« {item.name} » retiré des favoris", "quiet",
         )
 
     def pick_random_here(self) -> None:
@@ -5016,7 +5110,21 @@ class MainWindow(QMainWindow):
         if not Path(item.path).exists():
             self.show_banner(f"Introuvable : {item.name}", "error")
             return self.advance()
-        self._release_media()
+        others = (item.file_count - item.video_count
+                  if item.kind == MODE_FOLDERS else 0)
+        if others > 0:
+            # Un dossier qui contient autre chose que des videos — documents,
+            # images, programmes — ne part pas sur une seule touche : c'est
+            # ainsi qu'un dossier entier de papiers a ete ecarte une fois.
+            answer = QMessageBox.question(
+                self, "Supprimer ce dossier ?",
+                f"« {item.name} » contient {item.video_count} vidéo(s), mais "
+                f"aussi {others} autre(s) fichier(s) : documents, images, "
+                "programmes…\n\nTout le dossier sera supprimé. Continuer ?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return
+        self._release_media(item.path)
         item.status = "pending_delete"
         item.status_detail = "Corbeille"
         self._enqueue(
@@ -5037,7 +5145,7 @@ class MainWindow(QMainWindow):
         if problem:
             self.show_banner(problem, "error")
             return
-        self._release_media()
+        self._release_media(item.path)
         item.status = "pending_move"
         item.status_detail = label
         self._enqueue(
