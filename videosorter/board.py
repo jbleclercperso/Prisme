@@ -7,24 +7,46 @@ l'intention, puisqu'un clic ouvre au lieu d'envoyer.
 """
 from __future__ import annotations
 
+import math
 import random
+from collections import OrderedDict
 
-from PySide6.QtCore import QPoint, QRect, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QCursor, QPixmap, QRegion
+from PySide6.QtCore import (
+    QEvent, QObject, QPoint, QRect, QRunnable, QThreadPool, QTimer, QUrl, Qt,
+    Signal,
+)
+from PySide6.QtGui import QCursor, QImage, QImageReader, QPixmap, QRegion
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QCheckBox, QHBoxLayout, QPushButton,
+    QCheckBox, QHBoxLayout, QPushButton, QSizePolicy,
     QFrame, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from .perf import mark
 from .scan import MODE_FOLDERS, human_duration, human_resolution, human_size
-from .widgets import Expiring, PlayMarks, VideoWake, elide
+from .widgets import Expiring, PlayMarks, VideoWake
 
-RATING_STYLE = ("QLabel { color: #f5c542; background: rgba(8, 10, 13, 190);"
-                " border-radius: 4px; padding: 0 5px; font-size: 14px;"
-                " font-weight: 700; }")
+# Une seule feuille pour toutes les cartes, posee sur leur toile. Une feuille
+# par carte obligeait Qt a analyser et appliquer quarante fois la meme regle a
+# chaque page batie : c'etait le plus gros du quart de seconde de la premiere
+# planche.
+BOARD_STYLE = """
+QLabel#cardRating { color: #f5c542; background: rgba(8, 10, 13, 190);
+                    border-radius: 4px; padding: 0 5px; font-size: 14px;
+                    font-weight: 700; }
+"""
+
+# L'etoile de la carte survolee : la meme pastille que la note, mais vide et
+# discrete tant que l'element n'est pas en favori, doree quand il l'est.
+HANDLES_STYLE = """
+QPushButton#cardStar { background: rgba(8, 10, 13, 190); border: 0;
+                       border-radius: 4px; padding: 0; font-size: 14px;
+                       font-weight: 700; color: rgba(233, 238, 244, 0.55); }
+QPushButton#cardStar:hover { color: #ffffff; }
+QPushButton#cardStar[favorite="true"] { color: #f5c542; }
+QPushButton#cardStar[favorite="true"]:hover { color: #ffd966; }
+"""
 
 # Densites proposees : moins de colonnes, donc des cartes plus grandes.
 COLUMN_CHOICES = (2, 3, 4, 5, 6, 7, 8, 9, 10)
@@ -34,6 +56,164 @@ MIN_CARD_WIDTH = 150
 # Une carte coute cher a construire : six cents d'un coup prenaient plusieurs
 # secondes. On n'en batit qu'une page, et l'on tourne les pages.
 PAGE_SIZE = 40
+# Le survol se sonde souvent : a quatre-vingts millisecondes, l'apercu partait
+# jusqu'a un douzieme de seconde apres l'arrivee de la souris.
+HOVER_POLL_MS = 30
+# Changer la source d'un lecteur fige l'interface le temps que Qt defasse
+# l'ancien media (de quelques dizaines de millisecondes a plus d'une demi-
+# seconde, decodage materiel compris). Balayer la planche a la souris le
+# payait a chaque carte traversee, et ouvrait chaque fichier sur le partage.
+# On attend donc que la souris se pose ; une carte seulement traversee ne
+# charge rien.
+HOVER_SETTLE_MS = 120
+# Les images deja reduites des dernieres pages restent en memoire : revenir a
+# la page d'avant ne redecode rien. Un plafond en octets plutot qu'en nombre,
+# les cartes de deux colonnes pesant dix fois celles de dix.
+THUMB_CACHE_BYTES = 32 * 1024 * 1024
+
+
+class ElidedLabel(QLabel):
+    """Une ligne coupée au milieu, à la largeur qu'elle a vraiment.
+
+    Couper a un nombre de caracteres tranchait net les noms des cartes
+    etroites, sans points de suspension, et raccourcissait sans raison ceux
+    des cartes larges. Couper au milieu garde l'extension et les numeros
+    d'episode, qui sont a la fin.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self._full = ""
+        # La largeur vient de la carte, jamais du texte : un long nom ne doit
+        # pas elargir ce qui le contient.
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setWordWrap(False)
+
+    def set_full_text(self, text: str) -> None:
+        self._full = text
+        self._fit()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def _fit(self) -> None:
+        room = self.contentsRect().width()
+        shown = (self.fontMetrics().elidedText(self._full, Qt.ElideMiddle, room)
+                 if room > 0 else self._full)
+        if shown != self.text():
+            self.setText(shown)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        # La police de la feuille de style n'arrive qu'au premier affichage :
+        # la coupe faite avec l'ancienne serait fausse.
+        if event.type() == QEvent.Type.FontChange:
+            self._fit()
+
+
+class _Decode(QRunnable):
+    """Lit et réduit une vignette hors du fil d'interface."""
+
+    def __init__(self, loader: "ThumbLoader", key: tuple):
+        super().__init__()
+        self.loader = loader
+        self.key = key
+
+    def run(self) -> None:
+        path, width, height = self.key
+        image = QImage()
+        try:
+            image = QImageReader(path).read()
+            if not image.isNull():
+                image = image.scaled(width, height, Qt.KeepAspectRatio,
+                                     Qt.SmoothTransformation)
+        except Exception:        # un fichier a moitie ecrit, illisible
+            image = QImage()
+        try:
+            self.loader.decoded.emit(self.key, image)
+        except RuntimeError:     # la planche a disparu entre-temps
+            pass
+
+
+class ThumbLoader(QObject):
+    """Les vignettes de la planche : décodées à côté, posées d'un coup.
+
+    Decoder un JPEG puis le lisser a la taille de la carte se faisait sur le
+    fil d'interface : pres de trois millisecondes par carte, un a-coup de
+    plus d'un dixieme de seconde a chaque page, et une lecture sur le partage
+    quand le cache s'y trouve. Deux fils a part s'en chargent ; l'interface
+    ne fait plus que poser l'image prete.
+    """
+
+    decoded = Signal(object, object)      # (chemin, largeur, hauteur), QImage
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Un reservoir a soi : celui de Qt est occupe par les extractions
+        # ffmpeg, longues, et les images attendraient derriere elles.
+        self.pool = QThreadPool(self)
+        self.pool.setMaxThreadCount(2)
+        self.cache: OrderedDict = OrderedDict()
+        self.cache_bytes = 0
+        self.pending: dict = {}
+        self.decoded.connect(self._on_decoded)
+
+    def request(self, card) -> None:
+        """L'image de cette carte, a la taille de sa case."""
+        path = card.thumb_path
+        # Une case jamais affichee n'a pas encore sa taille : elle se
+        # redemandera en paraissant (BoardCard.showEvent).
+        if not path or not card.isVisible():
+            return
+        width, height = card.image.width(), card.image.height()
+        if width <= 0 or height <= 0:
+            return
+        key = (path, width, height)
+        if card.thumb_key == key:
+            return
+        pixmap = self.cache.get(key)
+        if pixmap is not None:
+            self.cache.move_to_end(key)
+            card.show_thumb(pixmap, key)
+            return
+        if card.thumb_key is not None and card.thumb_key[0] == path \
+                and card._pixmap is not None:
+            # La case a change de taille : l'image d'avant, etiree sans
+            # lissage, le temps que la nette arrive. Mieux qu'une case vide.
+            card.image.setPixmap(card._pixmap.scaled(
+                width, height, Qt.KeepAspectRatio, Qt.FastTransformation))
+        waiting = self.pending.get(key)
+        if waiting is None:
+            self.pending[key] = [card]
+            self.pool.start(_Decode(self, key))
+        elif card not in waiting:
+            waiting.append(card)
+
+    def _on_decoded(self, key: tuple, image) -> None:
+        cards = self.pending.pop(key, [])
+        if image is None or image.isNull():
+            return
+        pixmap = QPixmap.fromImage(image)
+        self._keep(key, pixmap)
+        for card in cards:
+            # Les cartes servent d'une page a l'autre : celle-ci montre peut-
+            # etre deja autre chose, ou a une autre taille.
+            if (card.thumb_path == key[0]
+                    and (card.image.width(), card.image.height()) == key[1:]):
+                card.show_thumb(pixmap, key)
+
+    def _keep(self, key: tuple, pixmap: QPixmap) -> None:
+        if key in self.cache:
+            return
+        self.cache[key] = pixmap
+        self.cache_bytes += pixmap.width() * pixmap.height() * 4
+        while self.cache_bytes > THUMB_CACHE_BYTES and len(self.cache) > 1:
+            _old, dropped = self.cache.popitem(last=False)
+            self.cache_bytes -= dropped.width() * dropped.height() * 4
 
 
 class BoardCard(QFrame):
@@ -41,8 +221,6 @@ class BoardCard(QFrame):
 
     opened = Signal(int)
     asided = Signal(int)
-    discarded = Signal(int)
-    rated = Signal(int, int)
     played = Signal(int)
     picked = Signal(int, bool)
 
@@ -50,13 +228,18 @@ class BoardCard(QFrame):
         super().__init__(parent)
         self.setObjectName("boardCard")
         self.setProperty("hovered", "false")
+        self.setProperty("state", "")
         self.index = index
         self.video: str = ""
         self.ts: float = 0.0
         self.item = None
         self._resolution = ""
+        # La vignette posee, sa source, et la cle (chemin, taille) de l'image
+        # a l'ecran. Le decodage se fait ailleurs : voir ThumbLoader.
+        self.thumbs: ThumbLoader | None = None
+        self.thumb_path = ""
+        self.thumb_key = None
         self._pixmap: QPixmap | None = None
-        self._scaled_for = None
         self.setCursor(Qt.PointingHandCursor)
 
         layout = QVBoxLayout(self)
@@ -76,9 +259,20 @@ class BoardCard(QFrame):
         # qualifie l'element, puis son nom. Les deux lignes d'avant — nom,
         # puis chiffres et etoiles — doublaient la hauteur du texte pour dire
         # ce qu'on lit deja sur l'image, et chaque planche en portait vingt.
-        self.meta = QLabel("", self)
+        # La resolution a sa case, de largeur fixe et reservee meme vide : le
+        # nom sautait de quarante-cinq points vers la droite a l'arrivee de
+        # « 240p ». Un seul point la separe du nom.
+        line = QHBoxLayout()
+        line.setContentsMargins(0, 0, 0, 0)
+        line.setSpacing(5)
+        self.head = QLabel("", self)
+        self.head.setObjectName("boardMeta")
+        self.head.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.head.hide()
+        self.meta = ElidedLabel(self)
         self.meta.setObjectName("boardMeta")
-        self.meta.setWordWrap(False)
+        line.addWidget(self.head, 0)
+        line.addWidget(self.meta, 1)
 
         self.duration_chip = QLabel("", self)
         self.duration_chip.setObjectName("tileDuration")
@@ -90,7 +284,6 @@ class BoardCard(QFrame):
         self.stars_value = 0
         self.rating = QLabel("", self)
         self.rating.setObjectName("cardRating")
-        self.rating.setStyleSheet(RATING_STYLE)
         self.rating.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.rating.hide()
 
@@ -110,47 +303,34 @@ class BoardCard(QFrame):
         self.pick.setFixedSize(20, 20)
         self.pick.toggled.connect(
             lambda on: self.picked.emit(self.index, bool(on)))
-
-        # Rejeter d'un clic, au coin oppose de la case a cocher. Garder, c'est
-        # passer au suivant ; rejeter demandait jusqu'ici le clavier, ce qui
-        # obligeait a lacher la souris a chaque decision.
-        # Conservee pour les branchements, mais plus jamais montree : la croix
-        # sur chaque vignette a ete retiree a la demande.
-        self.discard = QPushButton("✕", self)
-        self.discard.setObjectName("cardDiscard")
-        self.discard.setToolTip("Écarter — récupérable dans la corbeille de session")
-        self.discard.setCursor(Qt.PointingHandCursor)
-        self.discard.setFocusPolicy(Qt.NoFocus)
-        self.discard.setFixedSize(22, 22)
-        self.discard.clicked.connect(
-            lambda _c=False: self.discarded.emit(self.index))
         # Rien que le nom sous l'image : la ligne doit etre la plus courte
-        # possible, chaque pixel rendu va a la video. Coche et croix se posent
-        # sur l'image, en haut, et n'apparaissent qu'au survol ou cochees.
-        layout.addWidget(self.meta)
+        # possible, chaque pixel rendu va a la video. La coche se pose sur
+        # l'image, en haut, et n'apparait qu'au survol ou cochee.
+        layout.addLayout(line)
         self.pick.hide()
-        self.discard.hide()
 
         # Sans cela, un clic tombant sur l'image ou le texte n'atteindrait pas
         # la carte : seules ses marges auraient repondu.
-        for child in (self.image, self.meta, self.duration_chip):
+        for child in (self.image, self.head, self.meta, self.duration_chip):
             child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-    def _line(self, lead: str = "") -> str:
-        """« 1080p · nom » pour une video ; pour un dossier, son seul nom.
+    def _show_head(self) -> None:
+        """« 1080p · » devant le nom d'une video ; rien pour un dossier.
 
-        Le compte de ses videos est passe dans la pastille, ou se trouvait une
-        duree qui ne voulait rien dire : celle de l'unique video dont l'image
-        sert de vignette, et non du dossier.
+        Le compte des videos d'un dossier est passe dans la pastille, ou se
+        trouvait une duree qui ne voulait rien dire : celle de l'unique video
+        dont l'image sert de vignette, et non du dossier.
         """
         item = self.item
-        if item is None:
-            return ""
-        head = "" if item.kind == MODE_FOLDERS else (lead or self._resolution)
-        name = elide(item.name, 38)
-        line = f"{head}   ·   {name}" if head else name
-        # Une seule ligne sous l'image : le dossier est dans l'infobulle.
-        return line
+        if item is None or item.kind == MODE_FOLDERS:
+            self.head.hide()
+            return
+        if self.head.isHidden():
+            self.head.ensurePolished()
+            self.head.setFixedWidth(
+                self.head.fontMetrics().horizontalAdvance("2160p ·") + 2)
+            self.head.show()
+        self.head.setText(f"{self._resolution} ·" if self._resolution else "")
 
     def _show_chip(self, text: str) -> None:
         self.duration_chip.setText(text)
@@ -184,14 +364,16 @@ class BoardCard(QFrame):
     def set_item(self, item, stars: int) -> None:
         self.item = item
         self.video = ""
+        self.thumb_path = ""
+        self.thumb_key = None
         self._pixmap = None
-        self._scaled_for = None
         self._resolution = ""
         self.image.setPixmap(QPixmap())
         self.image.setText("…")
         self.set_picked(False)
         self.set_stars(stars)
-        self.meta.setText(self._line())
+        self._show_head()
+        self.meta.set_full_text(item.name)
         count = (f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}\n"
                  if item.kind == MODE_FOLDERS else "")
         self.meta.setToolTip(f"{item.path}\n{count}{human_size(item.size)}")
@@ -214,7 +396,12 @@ class BoardCard(QFrame):
 
     def set_state(self, status: str) -> None:
         marks = {"moved": "rangé", "deleted": "écarté", "skipped": "passé"}
-        self.setProperty("state", marks.get(status, ""))
+        value = marks.get(status, "")
+        # Re-styler une carte coute : on ne le fait que si l'etat change. Une
+        # page redessinee reposait l'etat de ses quarante cartes a l'identique.
+        if self.property("state") == value:
+            return
+        self.setProperty("state", value)
         self.style().unpolish(self)
         self.style().polish(self)
 
@@ -225,7 +412,7 @@ class BoardCard(QFrame):
         resolution = human_resolution(height)
         if resolution and resolution != self._resolution:
             self._resolution = resolution
-            self.meta.setText(self._line(resolution))
+            self._show_head()
         item = self.item
         if item is not None and item.kind == MODE_FOLDERS:
             return          # la pastille compte deja ses videos
@@ -239,38 +426,31 @@ class BoardCard(QFrame):
         self.set_source(self.video, self.ts, duration, height)
 
     def set_thumb(self, path: str) -> None:
-        pixmap = QPixmap(path)
-        if pixmap.isNull():
-            return
+        """Retient l'image de cette carte ; elle arrive des qu'elle est prete."""
+        self.thumb_path = path
+        if self.thumbs is not None:
+            self.thumbs.request(self)
+
+    def show_thumb(self, pixmap: QPixmap, key) -> None:
+        """Pose une image deja a la taille de la case : rien a lisser ici."""
         self._pixmap = pixmap
+        self.thumb_key = key
         self.image.setText("")
-        self._rescale()
+        self.image.setPixmap(pixmap)
 
     def set_card_width(self, width: int) -> None:
         """Fixe la largeur, l'image gardant un cadre 16:9."""
         self.setFixedWidth(width)
         self.image.setFixedHeight(int((width - 8) * 9 / 16))
-        self._rescale()
-
-    def _rescale(self) -> None:
-        if self._pixmap is None:
-            return
-        # Un lissage par carte et par taille, pas un par evenement : la meme
-        # image etait relissee deux fois a chaque re-mise en page, pour
-        # trente cartes, et la planche s'en ressentait a chaque onglet.
-        wanted = (self.image.width(), self.image.height(), id(self._pixmap))
-        if wanted == self._scaled_for:
-            return
-        self._scaled_for = wanted
-        self.image.setPixmap(self._pixmap.scaled(
-            self.image.width(), self.image.height(),
-            Qt.KeepAspectRatio, Qt.SmoothTransformation,
-        ))
 
     def set_hovered(self, hovered: bool) -> None:
-        self.setProperty("hovered", "true" if hovered else "false")
-        self.style().unpolish(self)
-        self.style().polish(self)
+        value = "true" if hovered else "false"
+        # Quitter une carte re-stylait les quarante de la page, a chaque
+        # interstice traverse : on ne touche qu'a celle qui change vraiment.
+        if self.property("hovered") != value:
+            self.setProperty("hovered", value)
+            self.style().unpolish(self)
+            self.style().polish(self)
         self._show_handles(hovered)
 
     def _show_handles(self, hovered: bool) -> None:
@@ -289,10 +469,20 @@ class BoardCard(QFrame):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._rescale()
+        # La case a sa nouvelle taille : l'image se redemande a cette taille,
+        # deja reduite, plutot que d'etre relissee ici.
+        if self.thumb_path and self.thumbs is not None:
+            self.thumbs.request(self)
         if not self.duration_chip.isHidden():
             self._place_chip()
         self._place_handles()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Une image arrivee pendant que la planche etait cachee attendait
+        # que sa case ait une taille : la voici.
+        if self.thumb_path and self.thumbs is not None:
+            self.thumbs.request(self)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -308,20 +498,23 @@ class BoardCard(QFrame):
 
 
 class HoverHandles(QWidget):
-    """Coche et croix flottantes, au-dessus de la carte survolee.
+    """Coche et étoile flottantes, au-dessus de la carte survolée.
 
     Le lecteur d'apercu est une fenetre native : il passe devant tout ce qu'on
     pose dans la carte, et la coche devenait inatteignable des que la video
-    demarrait. Une fenetre-outil sans cadre, elle, reste devant. Seuls ses
-    deux boutons recoivent la souris : le reste de la bande est transparent
-    et laisse passer les clics vers la carte.
+    demarrait. Une fenetre-outil sans cadre, elle, reste devant. Seules la
+    coche et l'etoile recoivent la souris : le reste de la bande est
+    transparent et laisse passer les clics vers la carte.
     """
+
+    starred = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint
                          | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet(HANDLES_STYLE)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 0)
         layout.setSpacing(0)
@@ -334,39 +527,61 @@ class HoverHandles(QWidget):
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(4)
         column.addWidget(self.pick, 0, Qt.AlignLeft)
-        # La note reste lisible pendant que l'apercu joue : la video, native,
-        # couvrirait celle de la carte.
-        self.rating = QLabel("", self)
-        self.rating.setObjectName("cardRating")
-        self.rating.setStyleSheet(RATING_STYLE)
-        self.rating.hide()
-        column.addWidget(self.rating, 0, Qt.AlignLeft)
+        # Le favori d'un clic, sous la coche, la ou la carte montre sa note :
+        # il fallait jusqu'ici ouvrir la fiche, noter, puis revenir. Toujours
+        # la au survol — vide ou doree — pour qu'on sache ou cliquer.
+        self.star = QPushButton("☆", self)
+        self.star.setObjectName("cardStar")
+        self.star.setProperty("favorite", "false")
+        self.star.setCursor(Qt.PointingHandCursor)
+        self.star.setFocusPolicy(Qt.NoFocus)
+        self.star.setFixedSize(24, 21)
+        self.star.setToolTip("Mettre en favori")
+        self.star.clicked.connect(lambda _c=False: self.starred.emit())
+        column.addWidget(self.star, 0, Qt.AlignLeft)
         column.addStretch(1)
         layout.addLayout(column)
         layout.addStretch(1)
         self.card = None
         self.hide()
 
-    def attach(self, card, rect: QRect) -> None:
-        """Se pose sur cette carte, et relaie ses gestes a ses propres poignees."""
-        if self.card is not card:
-            self.card = card
+    def set_star(self, favorite: bool) -> None:
+        value = "true" if favorite else "false"
+        if self.star.property("favorite") == value:
+            return
+        self.star.setProperty("favorite", value)
+        self.star.setText("★" if favorite else "☆")
+        self.star.setToolTip("Retirer des favoris" if favorite else "Mettre en favori")
+        self.star.style().unpolish(self.star)
+        self.star.style().polish(self.star)
+
+    def sync(self, card) -> None:
+        """Reprend l'etat de la carte : coche et favori."""
+        if self.pick.isChecked() != card.pick.isChecked():
             self.pick.blockSignals(True)
             self.pick.setChecked(card.pick.isChecked())
             self.pick.blockSignals(False)
-            self.rating.setText("★" if card.stars_value else "")
-            self.rating.setVisible(card.stars_value > 0)
-            self.setGeometry(QRect())
+        self.set_star(card.stars_value > 0)
+
+    def attach(self, card, rect: QRect) -> None:
+        """Se pose sur cette carte, et relaie ses gestes a ses propres poignees."""
+        changed = self.card is not card
+        if changed:
+            self.card = card
+            self.sync(card)
         if self.geometry() != rect:
             self.setGeometry(rect)
             self.layout().activate()
-            region = QRegion(self.pick.geometry())
-            if not self.rating.isHidden():
-                region = region.united(QRegion(self.rating.geometry()))
-            self.setMask(region)
+            self.setMask(QRegion(self.pick.geometry()).united(
+                QRegion(self.star.geometry())))
         if self.isHidden():
             self.show()
-        self.raise_()
+            self.raise_()
+        elif changed:
+            # Remonter une fenetre a chaque battement occupait le
+            # gestionnaire de fenetres pour rien : seulement quand elle
+            # change de carte.
+            self.raise_()
 
     def detach(self) -> None:
         self.card = None
@@ -378,12 +593,18 @@ class BoardView(QWidget):
 
     openRequested = Signal(int)
     asideRequested = Signal(int)
-    discardRequested = Signal(int)
     pickedChanged = Signal(int)
-    rateRequested = Signal(int, int)
     previewNeeded = Signal(int)
     playRequested = Signal(str, float)
     pageChanged = Signal(int, int, int)   # premier, dernier, total
+    # L'etoile de la carte survolee : bascule le favori de l'element a cette
+    # position. La planche n'enregistre rien elle-meme ; on lui renvoie la
+    # nouvelle valeur par set_stars.
+    favoriteToggled = Signal(int)
+    # Jamais emis : la croix « ecarter » des cartes a ete retiree, et la note
+    # passe par favoriteToggled. Gardes tant que la fenetre s'y branche.
+    discardRequested = Signal(int)
+    rateRequested = Signal(int, int)
 
     def __init__(self, preview_seconds: int = 10, columns: int = DEFAULT_COLUMNS,
                  parent=None):
@@ -395,6 +616,7 @@ class BoardView(QWidget):
         self.page = 0
         self.hovered = -1          # rang de la carte survolee, dans la page
         self._stars_of = lambda _path: 0
+        self.thumbs = ThumbLoader(self)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -407,6 +629,7 @@ class BoardView(QWidget):
         # largeur, barre verticale comprise.
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.canvas = QWidget()
+        self.canvas.setStyleSheet(BOARD_STYLE)
         self.grid = QGridLayout(self.canvas)
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setSpacing(CARD_GAP)
@@ -448,6 +671,7 @@ class BoardView(QWidget):
         self.player.errorOccurred.connect(self._on_error)
         self._pending_seek = 0
         self._segment_start = 0
+        self._source_video = ""       # la video chargee dans le lecteur
         self.unplayable = Expiring()
 
         # Les vignettes ne sont fabriquees que pour les cartes reellement a
@@ -486,6 +710,7 @@ class BoardView(QWidget):
 
         self.floating = HoverHandles(self.window())
         self.floating.pick.toggled.connect(self._float_picked)
+        self.floating.starred.connect(self._float_starred)
         # Le fantome : Qt livre parfois une image qui appartient encore au
         # fichier precedent, juste apres le changement de source. Deux
         # verrous, comme dans la fiche : rien avant que le nouveau media soit
@@ -498,12 +723,20 @@ class BoardView(QWidget):
         self.blackout_timer.setInterval(160)
         self.blackout_timer.timeout.connect(self._end_blackout)
         self.hover_timer = QTimer(self)
-        self.hover_timer.setInterval(80)
+        self.hover_timer.setInterval(HOVER_POLL_MS)
         self.hover_timer.timeout.connect(self._poll_hover)
+        # Ou etaient la souris et la planche au dernier battement : si rien
+        # n'a bouge, il n'y a rien a chercher.
+        self._last_spot = None
+        self.settle_timer = QTimer(self)
+        self.settle_timer.setSingleShot(True)
+        self.settle_timer.setInterval(HOVER_SETTLE_MS)
+        self.settle_timer.timeout.connect(self._play_settled)
 
     # -- contenu ---------------------------------------------------------
     def showEvent(self, event):
         super().showEvent(event)
+        self._last_spot = None
         self.hover_timer.start()
 
     def hideEvent(self, event):
@@ -518,11 +751,10 @@ class BoardView(QWidget):
     def _ensure_cards(self, count: int) -> None:
         while len(self.cards) < count:
             card = BoardCard(len(self.cards), self.canvas)
+            card.thumbs = self.thumbs
             card.opened.connect(self.openRequested)
             card.asided.connect(self.asideRequested)
-            card.discarded.connect(self.discardRequested)
             card.picked.connect(self._on_picked)
-            card.rated.connect(self.rateRequested)
             card.played.connect(self._play_full)
             self.cards.append(card)
 
@@ -561,6 +793,7 @@ class BoardView(QWidget):
     def _fill_page(self, previous=None) -> None:
         first, last = self._page_bounds()
         self._laid_cols = self._cols()
+        self._last_spot = None
         shown = last - first
         self._ensure_cards(shown)
         width = self._card_width()
@@ -622,13 +855,19 @@ class BoardView(QWidget):
         for card in self.cards:
             if 0 <= card.index < len(self.items):
                 card.set_picked(self.items[card.index].item_id in self.picked_ids)
+        self._sync_floating()
         self.pickedChanged.emit(len(self.picked_ids))
 
     def clear_picked(self) -> None:
         self.picked_ids.clear()
         for card in self.cards:
             card.set_picked(False)
+        self._sync_floating()
         self.pickedChanged.emit(0)
+
+    def _sync_floating(self) -> None:
+        if self.floating.card is not None:
+            self.floating.sync(self.floating.card)
 
     def _video_clicked(self, event) -> None:
         """Renvoie le clic tombe sur l'apercu a la carte qui est dessous."""
@@ -664,6 +903,7 @@ class BoardView(QWidget):
             # colonnes, plutot que des cartes coupees au bord.
             return self._relayout()
         width = self._card_width()
+        self._last_spot = None
         for card in self.cards:
             if not card.isHidden() and card.width() != width:
                 card.set_card_width(width)
@@ -717,6 +957,7 @@ class BoardView(QWidget):
         card.set_item(item, stars)
         self.grid.addWidget(card, slot // self._cols(), slot % self._cols())
         card.show()
+        self._last_spot = None
         self.empty.hide()
         self.scroll.show()
         self.pageChanged.emit(first + 1, position + 1, len(self.items))
@@ -735,6 +976,8 @@ class BoardView(QWidget):
         card = self._card_for(position)
         if card is not None:
             card.set_stars(stars)
+            if self.floating.card is card:
+                self.floating.set_star(card.stars_value > 0)
 
     def set_state(self, position: int, status: str) -> None:
         card = self._card_for(position)
@@ -801,28 +1044,47 @@ class BoardView(QWidget):
         first, last = self._page_bounds()
         width = self._card_width()
         self._laid_cols = self._cols()
+        self._last_spot = None
         for slot, card in enumerate(self.cards[:last - first]):
             self.grid.removeWidget(card)
             card.set_card_width(width)
             self.grid.addWidget(card, slot // self._cols(), slot % self._cols())
 
     # -- survol et lecture ----------------------------------------------
+    def _card_under(self, cursor: QPoint) -> int:
+        """Rang de la carte sous le pointeur, ou -1.
+
+        Le pointeur doit etre dans la partie visible de la planche : une carte
+        sortie par le haut en defilant restait « sous » la souris posee sur la
+        barre au-dessus, et s'y mettait a jouer.
+        """
+        viewport = self.scroll.viewport()
+        if not viewport.rect().contains(viewport.mapFromGlobal(cursor)):
+            return -1
+        # Une seule conversion de coordonnees, et non une par carte.
+        point = self.canvas.mapFromGlobal(cursor)
+        first, last = self._page_bounds()
+        for slot, card in enumerate(self.cards[:last - first]):
+            if not card.isHidden() and card.geometry().contains(point):
+                return slot
+        return -1
+
     def _poll_hover(self) -> None:
         if not self.isVisible() or not self.window().isActiveWindow():
             return
         cursor = QCursor.pos()
-        first, last = self._page_bounds()
-        found = -1
-        for position, card in enumerate(self.cards[:last - first]):
-            if card.isVisible() and card.rect().contains(card.mapFromGlobal(cursor)):
-                found = position
-                break
+        corner = self.canvas.mapToGlobal(QPoint(0, 0))
+        spot = (cursor.x(), cursor.y(), corner.x(), corner.y())
+        if spot == self._last_spot:
+            return
+        self._last_spot = spot
+        found = self._card_under(cursor)
         if found == self.hovered:
             if found != -1:
                 # La fenetre principale a pu bouger, la planche defiler.
                 self.floating.attach(self.cards[found], self.cards[found].handle_rect())
             return
-        if self.hovered != -1 and self.hovered < len(self.cards):
+        if 0 <= self.hovered < len(self.cards):
             self.cards[self.hovered].set_hovered(False)
         self._blank()
         self.marks.clear()
@@ -831,10 +1093,25 @@ class BoardView(QWidget):
             self.floating.detach()
             self.stop()
             return
-        self.cards[found].set_hovered(True)
-        self.floating.attach(self.cards[found], self.cards[found].handle_rect())
-        # Sans delai : la video part des que la souris est sur la carte.
-        self._play(found)
+        card = self.cards[found]
+        card.set_hovered(True)
+        self.floating.attach(card, card.handle_rect())
+        if card.video and self.player.source() == QUrl.fromLocalFile(card.video):
+            # Retour sur la carte deja chargee : rien a defaire, elle repart
+            # tout de suite.
+            self.settle_timer.stop()
+            self._play(found)
+            return
+        # Ailleurs, on attend que la souris se pose (voir HOVER_SETTLE_MS).
+        # L'apercu precedent se met en pause, sans rien decharger : il ne
+        # lit plus le partage pour une image cachee.
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        self.settle_timer.start()
+
+    def _play_settled(self) -> None:
+        if 0 <= self.hovered < len(self.cards):
+            self._play(self.hovered)
 
     def _float_picked(self, on: bool) -> None:
         card = self.floating.card
@@ -842,10 +1119,10 @@ class BoardView(QWidget):
             # Par la coche de la carte : c'est elle qui est branchee au reste.
             card.pick.setChecked(on)
 
-    def _float_discard(self) -> None:
+    def _float_starred(self) -> None:
         card = self.floating.card
-        if card is not None:
-            card.discarded.emit(card.index)
+        if card is not None and 0 <= card.index < len(self.items):
+            self.favoriteToggled.emit(card.index)
 
     def _blank(self) -> None:
         """Cache l'apercu et efface ce qu'il restait de l'image precedente."""
@@ -887,18 +1164,28 @@ class BoardView(QWidget):
         self.video.setGeometry(origin.x(), origin.y(), area.width(), area.height())
         self.video.raise_()
 
-        self._segment_start = int(card.ts * 1000)
-        self._pending_seek = self._segment_start
+        # Arrondi au-dessus, jamais tronque : un instant tombe sur une image-
+        # cle et tronque d'une milliseconde la manquait, et le decodage
+        # repartait de la cle precedente, des secondes plus tot.
+        self._segment_start = math.ceil(card.ts * 1000)
         url = QUrl.fromLocalFile(card.video)
         mark("board.play")
         self._awaiting_frame = True
         self._blackout = True
         self.blackout_timer.start()
+        self._source_video = card.video
         if self.player.source() == url:
+            self._pending_seek = 0
             self.player.setPosition(self._segment_start)
         else:
-            self._loaded = False
             self.player.setSource(url)
+            # Arme seulement maintenant : en changeant de source, Qt annonce
+            # aussitot « charge » pour l'ANCIEN media, qu'il arrete. Arme
+            # avant, le saut partait sur lui, et l'apercu d'une carte voisine
+            # commencait a zero ; le verrou « charge » tombait de meme, et
+            # laissait passer une image du fichier precedent.
+            self._loaded = False
+            self._pending_seek = self._segment_start
         self.player.play()
 
     def _on_status(self, status) -> None:
@@ -932,15 +1219,19 @@ class BoardView(QWidget):
             self.wake.over(self.video.geometry())
 
     def _on_error(self, *_args) -> None:
-        if 0 <= self.hovered < len(self.cards) and self.cards[self.hovered].video:
-            self.unplayable.add(self.cards[self.hovered].video)
+        # La video en faute est celle du lecteur, pas forcement celle de la
+        # carte survolee : la souris a pu passer a une autre entre-temps.
+        if self._source_video:
+            self.unplayable.add(self._source_video)
         self._blank()
         self.player.stop()
 
     def stop(self) -> None:
+        self.settle_timer.stop()
         self.player.stop()
         self._blank()
         self.marks.clear()
         for card in self.cards:
             card.set_hovered(False)
         self.hovered = -1
+        self._last_spot = None

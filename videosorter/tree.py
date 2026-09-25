@@ -6,8 +6,8 @@ from pathlib import Path
 from PySide6.QtCore import QDir, QModelIndex, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
-    QFileDialog, QFileIconProvider, QFileSystemModel, QHBoxLayout, QPushButton,
-    QTreeView, QVBoxLayout, QWidget,
+    QFileDialog, QFileIconProvider, QFileSystemModel, QHBoxLayout, QLabel,
+    QPushButton, QTreeView, QVBoxLayout, QWidget,
 )
 
 # Deux gestes opposes partagent le meme clic : envoyer l'element dans un
@@ -69,6 +69,7 @@ QTreeView#tree::item:selected { background: rgba(47, 111, 237, 0.45); color: #ff
 QPushButton#treeRootButton { background: transparent; border: 0; color: #8fb4ff;
                              padding: 2px 4px; text-align: left; font-size: 12px; }
 QPushButton#treeRootButton:hover { color: #cfe0ff; text-decoration: underline; }
+QLabel#treeEmpty { color: #6f7885; font-size: 12px; padding: 6px 2px; }
 """
 
 
@@ -98,9 +99,14 @@ class TreePanel(QWidget):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         self.action = "send"
-        title = QPushButton("Envoyer vers ⇄", self)
+        # Ce qu'un clic fait vraiment depend aussi de la vue : en planche, il
+        # ouvre le dossier, sauf s'il y a des vignettes cochees a y envoyer.
+        # Le titre annoncait « Envoyer vers » et le clic faisait autre chose.
+        self.browsing = False
+        self.picked = 0
+        title = QPushButton("⇄  Envoyer vers", self)
         title.setObjectName("treeAction")
-        title.setToolTip("Basculer entre envoyer l element et s y rendre")
+        title.setToolTip("Basculer entre envoyer l'élément et s'y rendre")
         title.setFocusPolicy(Qt.NoFocus)
         title.clicked.connect(self.toggle_action)
         self.action_button = title
@@ -143,6 +149,21 @@ class TreePanel(QWidget):
         self.view.clicked.connect(self._on_clicked)
         layout.addWidget(self.view, 1)
 
+        # Sans dossier « + » sous la racine, l'arbre paraissait vide sans
+        # raison : on dit ce qu'il attend.
+        self.empty = QLabel(
+            "Aucune destination ici : seuls les dossiers dont le nom commence "
+            "par « + » apparaissent.", self)
+        self.empty.setObjectName("treeEmpty")
+        self.empty.setWordWrap(True)
+        self.empty.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.empty.hide()
+        layout.insertWidget(layout.indexOf(self.view), self.empty)
+        self.model.directoryLoaded.connect(self._on_loaded)
+        self.model.rowsInserted.connect(
+            lambda parent, _first, _last: self._on_loaded(
+                self.model.filePath(parent)))
+
         self.root = ""
         self.set_action(self.action)
 
@@ -155,17 +176,50 @@ class TreePanel(QWidget):
     def set_action(self, action: str) -> None:
         """Change de geste, et le fait voir : un clic ici deplace des fichiers."""
         self.action = action
-        self.action_button.setText(
-            "⇄  Envoyer vers" if action == "send" else "⇄  Aller dans"
-        )
-        color = SEND_COLOR if action == "send" else GO_COLOR
+        self._show_effect()
+
+    def set_context(self, browsing: bool, picked: int = 0) -> None:
+        """La vue du moment : planche ou fiche, et combien de vignettes cochees.
+
+        Le geste retenu (`action`) ne change pas ; seul change ce que le titre
+        annonce, pour qu'il dise ce que le prochain clic fera vraiment.
+        """
+        browsing, picked = bool(browsing), max(0, int(picked or 0))
+        if (browsing, picked) == (self.browsing, self.picked):
+            return
+        self.browsing, self.picked = browsing, picked
+        self._show_effect()
+
+    def effect(self) -> str:
+        """« send » si un clic va deplacer des fichiers, « go » s'il y mene."""
+        if self.browsing:
+            return "send" if (self.picked and self.action == "send") else "go"
+        return self.action
+
+    def _show_effect(self) -> None:
+        effect = self.effect()
+        if effect == "send" and self.browsing:
+            count = self.picked
+            text = f"⇄  Envoyer {count} coché{'s' if count > 1 else ''} vers"
+        else:
+            text = "⇄  Envoyer vers" if effect == "send" else "⇄  Aller dans"
+        self.action_button.setText(text)
+        if self.browsing and not self.picked and self.action == "send":
+            # En planche, sans rien de coche, un clic ouvre toujours le
+            # dossier : le geste retenu ne vaudra que pour les cochees.
+            tip = ("En planche, un clic ouvre le dossier. Cochez des vignettes "
+                   "pour les y envoyer.")
+        else:
+            tip = "Basculer entre envoyer l'élément et s'y rendre"
+        self.action_button.setToolTip(tip)
+        color = SEND_COLOR if effect == "send" else GO_COLOR
         self.icons.set_color(color)
         self.view.setStyleSheet(
             "QTreeView#tree::item:hover { background: %s; color: #0b1220; }"
             % QColor(color).darker(115).name()
         )
         for widget in (self, self.action_button):
-            widget.setProperty("action", action)
+            widget.setProperty("action", effect)
             widget.style().unpolish(widget)
             widget.style().polish(widget)
         # Qt ne redemande les icones que si le modele le dit.
@@ -175,10 +229,18 @@ class TreePanel(QWidget):
         if not root or not Path(root).is_dir():
             return
         self.root = str(root)
+        # Le message d'arbre vide attend que le dossier soit lu : le modele
+        # lit en tache de fond, et un compte fait tout de suite vaudrait zero.
+        self.empty.hide()
         self.model.setRootPath(self.root)
         self.view.setRootIndex(self.model.index(self.root))
         self.root_button.setText(Path(self.root).name or self.root)
         self.root_button.setToolTip(self.root)
+
+    def _on_loaded(self, path: str) -> None:
+        if not self.root or Path(path) != Path(self.root):
+            return
+        self.empty.setVisible(self.model.rowCount(self.view.rootIndex()) == 0)
 
     def choose_root(self) -> None:
         chosen = QFileDialog.getExistingDirectory(

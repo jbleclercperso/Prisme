@@ -14,7 +14,6 @@ from functools import lru_cache
 from pathlib import Path
 
 import re
-from collections import Counter
 
 from PySide6.QtCore import QThread, Signal
 
@@ -124,13 +123,17 @@ def word_index(videos: list, titles: dict | None = None) -> dict:
     return index
 
 
+def _ranked(videos: list, titles: dict | None = None) -> list:
+    """(mot, videos), du mot le plus porte au moins porte."""
+    index = word_index(videos, titles)
+    return sorted(index.items(), key=lambda pair: (-len(pair[1]), pair[0]))
+
+
 def frequent_tag_items(videos: list, titles: dict | None = None,
                        limit: int = 100, minimum: int = 2) -> list:
     """Les `limit` mots les plus portes, chacun avec toutes ses videos."""
-    index = word_index(videos, titles)
-    ranked = sorted(index.items(), key=lambda pair: (-len(pair[1]), pair[0]))
     items = []
-    for word, found in ranked[:limit]:
+    for word, found in _ranked(videos, titles)[:limit]:
         if len(found) < minimum:
             break
         paths = sorted((Path(video) for video in found), key=lambda p: str(p).lower())
@@ -149,35 +152,32 @@ class TagsThread(QThread):
     def __init__(self, videos: list, titles: dict, parent=None):
         super().__init__(parent)
         self.videos = list(videos)
-        self.titles = dict(titles)
+        # Les titres ne sont plus recopies : le calcul ne fait qu'y lire, cle
+        # par cle, et la copie de dizaines de milliers de titres se faisait
+        # sur le fil d'interface, a chaque visite de l'onglet.
+        self.titles = titles
+        # Le fil se detruit une fois fini. Rattache a la fenetre, il vivait
+        # aussi longtemps qu'elle, avec sa liste de cent mille videos : plus
+        # de quatre mega-octets par visite de l'onglet, jamais rendus.
+        self.finished.connect(self.deleteLater)
 
     def run(self) -> None:
-        self.ready.emit(frequent_tag_items(self.videos, self.titles))
+        try:
+            found = frequent_tag_items(self.videos, self.titles)
+        finally:
+            self.videos = self.titles = None
+        self.ready.emit(found)
 
 
 def top_words(videos: list, limit: int = 100, minimum: int = 2) -> list:
     """Les mots qui reviennent le plus dans les noms de fichiers.
 
-    Sert a proposer des categories sans rien saisir : un mot present dans des
-    centaines de noms designe presque toujours quelque chose. Un seul mot a la
-    fois — pour chercher une expression de deux ou trois mots, on la saisit
-    dans ses propres mots-cles, ou la recherche se fait par sous-chaine.
+    Le meme calcul que les mots frequents de l'onglet (word_index) : il en
+    existait un second, plus ancien, que seuls les essais verifiaient — ils
+    validaient un algorithme que l'application n'employait plus.
     """
-    counts = Counter()
-    for video in videos:
-        seen = set()
-        for word in words_of(Path(video).name):
-            folded = fold(word)
-            if not MIN_WORD <= len(folded) <= MAX_WORD:
-                continue
-            if folded in STOP_WORDS or folded.isdigit():
-                continue
-            # Un mot repete dans un meme nom ne vaut pas deux fichiers.
-            if folded in seen:
-                continue
-            seen.add(folded)
-            counts[folded] += 1
-    return [word for word, n in counts.most_common(limit) if n >= minimum]
+    return [word for word, found in _ranked(videos)[:limit]
+            if len(found) >= minimum]
 
 
 @lru_cache(maxsize=300_000)
@@ -186,11 +186,6 @@ def fold(text: str) -> str:
     stripped = unicodedata.normalize("NFKD", text)
     without_marks = "".join(c for c in stripped if not unicodedata.combining(c))
     return without_marks.casefold()
-
-
-def matches(term: str, path) -> bool:
-    """Vrai si le nom du fichier comporte le terme, accents et casse ignorés."""
-    return fold(term) in fold(Path(path).name)
 
 
 def build_tag_items(tags: list, videos: list, minimum: int = 1) -> list:
