@@ -191,6 +191,24 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "au lieu d'ouvrir une deuxième rangée")
     check(all(c.text.isHidden() for c in probe_bar.caps()) is False,
           "et se rouvrent quand la place revient")
+    # Les libelles ne sont plus coupes a dix-huit lettres d'office : entiers
+    # quand la place le permet, rognes a la mesure de ce qui manque sinon.
+    long_bar = CommandBar()
+    long_bar.rebuild([{"key": "6", "label": "Une destination au nom très long",
+                       "path": str(tri / "x")}], "Supprimer définitivement")
+    long_bar.resize(4000, 40)
+    long_bar._fit()
+    shown = [c.text.text() for c in long_bar.caps()]
+    check(shown[0] == "Supprimer définitivement"
+          and shown[2] == "Une destination au nom très long",
+          f"avec de la place, les libellés sont entiers ({shown})")
+    natural = sum(c.sizeHint().width() + 6 for c in long_bar.caps())
+    long_bar.resize(int(natural * 0.75), 40)
+    long_bar._fit()
+    shown = [c.text.text() for c in long_bar.caps()]
+    check(not long_bar.compact and shown[1] == "Passer"
+          and shown[2].endswith("…"),
+          f"un peu serrés, seuls les plus longs se rognent ({shown})")
 
     # Une lettre lointaine doit déclencher le déplacement.
     letter = KEY_ORDER[12]           # au-delà des chiffres
@@ -651,6 +669,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     ])
     rows = dialog._rows()
     check(len(rows) == 3, f"trois lignes reprises (obtenu {len(rows)})")
+    # La consigne elle-meme, et non toute la boite : hors ecran, sans polices,
+    # chaque lettre des boutons compte douze pixels et la rangee du bas
+    # depasse a elle seule les 820 pixels.
+    check(dialog.intro.wordWrap() and dialog.intro.minimumSizeHint().width() <= 820,
+          f"la consigne se replie dans la largeur prévue "
+          f"({dialog.intro.minimumSizeHint().width()} px exigés)")
     check(rows[0].text(DestinationsDialog.COL_GRIP) == "⠿",
           "chaque ligne porte une poignée")
     check(bool(rows[0].flags() & Qt.ItemIsDragEnabled), "et se laisse déplacer")
@@ -683,6 +707,15 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     dialog.tree.clear()
     check(dialog.result_destinations() == [], "la réinitialisation vide bien la liste")
+
+    # Tous les sous-dossiers d'un coup, lus en une seule passe du dossier.
+    expected = sorted((p.name for p in tri.iterdir() if p.is_dir()), key=str.lower)
+    if expected:                     # sinon une boite modale attendrait un clic
+        added = dialog._add_children(str(tri))
+        names = [row.text(DestinationsDialog.COL_LABEL) for row in dialog._rows()]
+        check(added == len(expected) and names == expected,
+              f"chaque sous-dossier devient une destination, dans l'ordre ({names})")
+        dialog.tree.clear()
 
     print("\n[27] Sélection multiple de dossiers")
     from videosorter.widgets import pick_folders
@@ -883,7 +916,10 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.2)
     filters = window.controls
     check(not filters.isHidden(), "la barre de réglages est visible")
-    check(filters.criteria()["stars"] == -1, "et ne masque rien au départ")
+    check(filters.criteria().get("stars_pick", -1) == -1, "et ne masque rien au départ")
+    check(not {"stars", "duration_op", "duration_s", "resolution", "resolution_op"}
+          & set(filters.criteria()),
+          "les critères ne portent plus de filtres fantômes, sans champ derrière")
     check(not hasattr(filters, "duration_op") and not hasattr(filters, "stars"),
           "les filtres chiffrés ont quitté l'écran")
     check(filters.exclude.isHidden(), "l'exclusion par le nom aussi")
@@ -1252,6 +1288,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     dialog = TagsDialog(["plage", "  ", "Plage", "montagne"])
     check(dialog.result_tags() == ["plage", "montagne"],
           f"la saisie ignore les lignes vides et les doublons ({dialog.result_tags()})")
+    check(dialog.windowTitle() == "Mots-clés automatiques"
+          and "réunissant les vidéos" in dialog.intro.text(),
+          "la boîte parle avec ses accents")
+    check(dialog.intro.wordWrap() and dialog.minimumSizeHint().width() <= 560,
+          f"et sa phrase se replie au lieu d'élargir la fenêtre "
+          f"({dialog.minimumSizeHint().width()} px exigés)")
 
     # De bout en bout : les mots-cles apparaissent en tete de la liste.
     tagged = base / "motscles"
@@ -1625,6 +1667,19 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.3)
     check(not window.bottom_bar.isHidden() and not window.top_bar.isHidden(),
           "et les rend")
+    # Le ⛶ du bandeau de survol : PySide passait l'etat du bouton (False) a
+    # toggle_cinema, qui le prenait pour « sortir », et le geste ne faisait rien.
+    from PySide6.QtWidgets import QPushButton as _Gesture
+    screen_button = next((b for b in window.single_bar.skin.findChildren(_Gesture)
+                          if "Cinéma" in b.toolTip()), None)
+    check(screen_button is not None, "le bandeau de la fiche porte le ⛶")
+    if screen_button is not None:
+        screen_button.click()
+        pump(app, 0.2)
+        check(window.cinema is True, "un clic sur ⛶ entre au cinéma")
+        screen_button.click()
+        pump(app, 0.2)
+        check(window.cinema is False, "un second clic en sort")
 
     # La fin d'une video mene a la suivante, elle ne reboucle pas. Il faut une
     # liste qui en comporte plusieurs : le dossier plat a ete vide par les
@@ -1886,6 +1941,15 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(sp.spare.path == nxt, "la vidéo suivante part en réserve")
     check(wait_for(app, lambda: sp.spare.primed, 20),
           "et s'arrête sur sa première image")
+    # Se cacher (Echap, onglet, repli) ne vide plus la reserve : ce vidage
+    # figeait l'interface un a deux dixiemes de seconde.
+    import time as _t
+    started = _t.perf_counter()
+    sp.stop()
+    stop_ms = (_t.perf_counter() - started) * 1000
+    check(sp.spare.path == nxt and sp.spare.primed,
+          f"arrêter la fiche garde la suivante prête ({stop_ms:.0f} ms)")
+    sp.player.play()
     window.show_item(1)
     check(not sp._blackout and not sp.video.isHidden(),
           "flèche : l'image est là, sans noir")
@@ -1893,6 +1957,14 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "le lecteur actif lit bien la suivante")
     pump(app, 0.3)
     check(sp.spare.path == str(window.items[2].path), "et la réserve recharge")
+    # Avant de ranger la video affichee, seule elle doit etre lachee : la
+    # suivante, deja prete, s'affichera par simple echange.
+    ready = sp.spare.path
+    sp.release(window.items[1].path)
+    check(sp.spare.path == ready and not sp.player.source().isValid(),
+          "ranger lâche la vidéo affichée et garde la suivante prête")
+    sp.release(Path(ready).parent)
+    check(sp.spare.path == "", "mais la lâche si c'est son dossier qui part")
     window.show_item(0)
     check(sp._blackout, "en arrière, le chemin classique avec son noir")
 
@@ -2001,6 +2073,23 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.2)
     check(sp.player.playbackState() == _QMP.PlaybackState.PausedState, "un clic met en pause")
     sp.toggle_pause()
+
+    # Double-clic = cinema. Le premier clic bascule aussitot (aucun delai sur
+    # la pause) ; le double-clic la rebascule, et le dernier relachement ne
+    # fait rien : la lecture n'a pas bouge.
+    pump(app, 0.2)
+    wanted_cinema = []
+    sp.cinemaRequested.connect(lambda: wanted_cinema.append(True))
+    sp._scrub_press(_mouse(QEvent.MouseButtonPress, 100))
+    sp._scrub_release(_mouse(QEvent.MouseButtonRelease, 100, Qt.NoButton))
+    check(sp.player.playbackState() == _QMP.PlaybackState.PausedState,
+          "le premier clic d'un double-clic met en pause sans attendre")
+    sp._double_click(_mouse(QEvent.MouseButtonDblClick, 100))
+    sp._scrub_release(_mouse(QEvent.MouseButtonRelease, 100, Qt.NoButton))
+    pump(app, 0.2)
+    check(wanted_cinema == [True], "le double-clic demande le cinéma")
+    check(sp.player.playbackState() == _QMP.PlaybackState.PlayingState,
+          "et ses deux clics se compensent : la vidéo joue toujours")
 
     decisions = window._decisions
     window.act_skip()
@@ -3448,11 +3537,14 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check("x.mp4" in gone, "une vidéo illisible est écartée un moment")
     gone["x.mp4"] -= Expiring.TTL + 1
     check("x.mp4" not in gone, "puis retentée : un réseau qui décroche ne la condamne pas")
-    window.controls.set_stars(3)
-    check(window.controls.rating_pick.text() == "★ 3"
-          and window.controls.rating_choices[3].property("chosen") == "true",
-          "la note choisie se lit sur le bouton et dans la rangée")
+    # Les notes de 1 a 5 ont laisse la place aux favoris : plus de bouton
+    # « ★ Note » cache ni de menu, et l'appel que garde la fenetre ne filtre rien.
+    check(not hasattr(window.controls, "rating_pick")
+          and not hasattr(window.controls, "rating_menu"),
+          "plus de bouton de note caché derrière l'étoile des favoris")
     window.controls.set_stars(-1)
+    check("stars_pick" not in window.controls.criteria(),
+          "et la note ne revient pas par les critères")
 
     # La note, en chiffre d'or, sur la carte.
     window.toggle_board(True)
@@ -3798,6 +3890,87 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     with _media._Reading(Path("X:/lot/a.mp4")):
         check(_media.reading_under(Path("X:/lot")) and not _media.reading_under(Path("X:/autre")),
               "on sait quel fichier les fils de fond lisent : on n'attend que lui")
+
+    print("\n[85] Composants : fil d'Ariane, ligne des filtres, corbeille")
+    from PySide6.QtWidgets import QSizePolicy as _QSP
+    from videosorter.header import Breadcrumb as _Breadcrumb, _Crumb, _Leaf
+    # Le fil d'Ariane s'abrege par le milieu, les intermediaires d'abord ;
+    # ce qu'on regarde, au bout, reste entier tant que c'est possible.
+    trail = _Breadcrumb()
+    trail.setStyleSheet(window.styleSheet())
+    top = Path("C:/Racine")
+    trail.set_path(top, top / "Un dossier intermediaire au nom long"
+                   / "Un autre dossier lui aussi long" / "Vacances")
+    trail.append_leaf("une vidéo au nom vraiment très long.mp4")
+    trail.show()
+    whole = trail.sizeHint().width()
+    trail.resize(whole + 10, 30)
+    pump(app, 0.1)
+    names = [p for p in trail._pieces() if isinstance(p, (_Crumb, _Leaf))]
+    check(all(n.width() == n.natural() for n in names),
+          "avec de la place, chaque segment est entier")
+    trail.resize(whole - 150, 30)
+    pump(app, 0.1)
+    check(names[-1].width() == names[-1].natural()
+          and any(n.width() < n.natural() for n in names[:-1]),
+          "à l'étroit, les dossiers intermédiaires cèdent, pas la vidéo")
+    check(all(p.geometry().right() < trail.width() for p in trail._pieces()),
+          "et rien ne déborde")
+    check(names[-2].text() == "Vacances" and trail.sizeHint().width() == whole,
+          "le texte reste entier, seul le dessin l'abrège")
+    trail.close()
+    trail.deleteLater()
+
+    # Les onglets partent du bord, sans legende vide devant eux.
+    check(window.tabs.layout().count() == 1, "pas de légende vide avant les onglets")
+    check(window.tag_chips.sizePolicy().horizontalPolicy() == _QSP.Maximum,
+          "les pastilles des mots-clés ne disputent plus sa place au fil d'Ariane")
+
+    # La ligne des filtres : ni trous laisses par les reglages caches, ni
+    # « ✕ filtres » qui pousse la densite sous la souris.
+    window.set_tab(TAB_VIDEOS)
+    window.toggle_board(True)
+    pump(app, 0.4)
+    filters = window.controls
+    flow = filters.layout().itemAt(0).layout()
+    order = [flow.itemAt(i).widget() for i in range(flow.count())]
+    check(order.index(filters.clear) > order.index(filters.next),
+          "« ✕ filtres » vient après la pagination")
+    shown = [w for w in order if w is not None and w.isVisible()]
+    if shown:
+        middle = shown[0].geometry().center().y()
+        first_row = [w for w in shown if abs(w.geometry().center().y() - middle) <= 1]
+        gaps = {b.x() - (a.x() + a.width()) for a, b in zip(first_row, first_row[1:])}
+        check(len(first_row) >= 3 and gaps == {flow.spacing()},
+              f"un même écart entre les réglages visibles, centrés sur leur rangée ({gaps})")
+    check(filters.folder_min.minimumWidth() >= 84 and filters.folder_max.minimumWidth() >= 84,
+          "les bornes de dossier ont la place d'écrire « ≥ vidéos »")
+
+    # La corbeille de session restaure dans un fil a part : la fenetre ne se
+    # fige plus, et la boite ne se ferme qu'une fois le travail fini.
+    from videosorter.trash import SessionTrash as _Trash
+    from videosorter.widgets import TrashDialog as _TrashDialog
+    spot = base / "restauration"
+    shutil.rmtree(spot, ignore_errors=True)
+    (spot / "stock").mkdir(parents=True)
+    bin_ = _Trash()
+    for i in range(3):
+        stored = spot / "stock" / f"v{i}.mp4"
+        stored.write_bytes(b"x")
+        bin_.record(spot / "origine" / f"v{i}.mp4", stored)
+    box = _TrashDialog(bin_)
+    box.show()
+    box.restore_all()
+    box.reject()
+    check(box.isVisible() or bin_.count == 0,
+          "fermer pendant la restauration attend qu'elle finisse")
+    wait_for(app, lambda: box.worker is None, 20)
+    check(bin_.count == 0
+          and all((spot / "origine" / f"v{i}.mp4").exists() for i in range(3)),
+          "les trois éléments sont revenus à leur place")
+    check(not box.isVisible(), "puis la boîte se ferme comme demandé")
+    box.deleteLater()
+    shutil.rmtree(spot, ignore_errors=True)
 
     check_board_wall(app, window, base, root)
     check_data_safety(app, window, base, root)
@@ -4732,6 +4905,9 @@ def main() -> int:
     tiles = window.single.tiles
     check(tiles[1].y() > tiles[0].y() and tiles[1].x() == tiles[0].x(),
           "empilées verticalement, donc posées sur le côté")
+    check(all(t.duration_chip.isHidden() for t in tiles)
+          and all(not t.badge.isHidden() for t in tiles if t.video),
+          "chaque image porte son instant, et non la durée totale répétée cinq fois")
 
     print("\n[10] Déplacement d'un fichier seul")
     video_name = window.current.name
