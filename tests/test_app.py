@@ -3355,7 +3355,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning, 60)
     before = window.stack.currentIndex()
-    window.cfg["quiet_explained"] = True     # sans la boîte, qui attendrait
+    window.cfg["quiet_explained"] = True     # sans le bandeau du premier retour
     window.enter_quiet()
     pump(app, 0.3)
     check(window.stack.currentIndex() == PAGE_QUIET, "le repli prend toute la fenêtre")
@@ -3449,7 +3449,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         board.close()
 
     # -- le repli dit comment on en sort -----------------------------------
-    window.cfg["quiet_explained"] = True     # sans la boîte, qui attendrait
+    window.cfg["quiet_explained"] = True     # sans le bandeau du premier retour
     depart = window.stack.currentIndex()
     window.enter_quiet()
     pump(app, 0.2)
@@ -5680,6 +5680,308 @@ def check_navigation(app, window, base) -> None:
     pump(app, 0.2)
 
 
+def check_quiet_and_header(app, window, base, root) -> None:
+    """Le repli sans rien perdre ni rien montrer, et la premiere ligne."""
+    import ctypes as _ct
+    from PySide6.QtCore import QEvent, QPoint, QTimer
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtMultimedia import QMediaPlayer
+    from PySide6.QtWidgets import QMessageBox as _QMB
+    from videosorter.window import (
+        MainWindow as _MW, PAGE_DONE, PAGE_QUIET, PAGE_SORT, PAGE_WELCOME,
+    )
+
+    playing = QMediaPlayer.PlaybackState.PlayingState
+    print("\n[95] Le repli : rien ne joue ni n'avance, tout reprend au retour")
+    window.cfg["quiet_explained"] = True
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS, new_origin=True)
+    wait_for(app, lambda: not window.scanning, 60)
+    video = next((v for i in window.items for v in i.videos
+                  if Path(v).exists() and Path(v).stat().st_size > 20000), None)
+    check(video is not None, "une vraie vidéo pour la fiche")
+    if video is None:
+        return
+    window.play_in_app(str(video))
+    wait_for(app, lambda: not window.scanning, 30)
+    wait_for(app, lambda: window.single.player.playbackState() == playing
+             and window.single.player.position() > 500, 20)
+    before = window.single.player.position()
+    source = window.single.player.source()
+    check(window.seen_timer.isActive(), "sur la fiche, le délai « vu » court")
+    window.enter_quiet()
+    pump(app, 0.3)
+    check(window.single.player.playbackState()
+          == QMediaPlayer.PlaybackState.PausedState,
+          "au repli, la vidéo se met en pause — elle ne s'arrête pas")
+    check(window.single.player.position() >= before - 300,
+          f"et garde son instant ({before} → {window.single.player.position()} ms)")
+    check(not window.seen_timer.isActive() and not window.burst_timer.isActive(),
+          "ni « vu » ni rafale ne courent derrière la page neutre")
+    check(window.windowIcon().cacheKey() != QApplication.windowIcon().cacheKey(),
+          "l'icône de Prisme quitte la barre des tâches")
+    here = window.index
+    window.show_item(here)
+    pump(app, 0.2)
+    check(window._quiet_show and window.single.player.playbackState() != playing,
+          "une fiche demandée pendant le repli ne se charge pas (ni image ni son)")
+    window._quiet_show = False
+    window.leave_quiet()
+    pump(app, 0.4)
+    check(window.single.player.source() == source
+          and window.single.player.playbackState() == playing
+          and window.single.player.position() >= before - 300,
+          "au retour, la même vidéo reprend là où on l'a laissée")
+    check(window.seen_timer.isActive(), "et le délai « vu » repart de zéro")
+
+    # -- la fin d'un tri ne remplace pas la page neutre ----------------------
+    window.enter_quiet()
+    window.finish()
+    pump(app, 0.2)
+    check(window.stack.currentIndex() == PAGE_QUIET,
+          "un tri qui finit derrière la page neutre n'y pose pas son bilan")
+    QTest.keyClick(window, Qt.Key_K, Qt.ControlModifier)
+    pump(app, 0.2)
+    check(window.stack.currentIndex() == PAGE_DONE, "le bilan attend le retour")
+    QTest.keyClick(window, Qt.Key_K, Qt.ControlModifier)
+    pump(app, 0.2)
+    check(window.stack.currentIndex() == PAGE_QUIET, "et Ctrl+K y répond")
+
+    # -- rien ne traverse la page, rien ne se répète -------------------------
+    QTest.keyClick(window.quiet_page, Qt.Key_Left, Qt.AltModifier)
+    pump(app, 0.1)
+    check(window.stack.currentIndex() == PAGE_QUIET,
+          "Alt+← ne fait pas réapparaître Prisme")
+    for _ in range(6):
+        QApplication.sendEvent(window.quiet_page, QKeyEvent(
+            QEvent.KeyPress, Qt.Key_K, Qt.ControlModifier, "", True))
+    check(window.stack.currentIndex() == PAGE_QUIET,
+          "Ctrl+K maintenu ne rebascule pas à chaque répétition")
+    window.leave_quiet()
+    window.leave_done()
+    pump(app, 0.2)
+    kept_root, kept_levels = window.root, list(window.levels)
+    window.enter_quiet()
+    QApplication.sendEvent(window.quiet_page, QKeyEvent(
+        QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+    for _ in range(5):
+        QApplication.sendEvent(window, QKeyEvent(
+            QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier, "", True))
+    pump(app, 0.2)
+    check(window.stack.currentIndex() == PAGE_SORT and window.root == kept_root
+          and window.levels == kept_levels,
+          "Échap maintenu ramène, sans remonter ensuite de dossier en dossier")
+    QApplication.sendEvent(window, QKeyEvent(
+        QEvent.KeyRelease, Qt.Key_Escape, Qt.NoModifier))
+
+    # -- ce qui s'est dit pendant le repli ------------------------------------
+    window.cfg["quiet_explained"] = False
+    window.enter_quiet()
+    pump(app, 0.1)
+    check(QApplication.activeModalWidget() is None,
+          "la première fois, aucune boîte n'annonce par-dessus que c'est un leurre")
+    window.show_banner("Échec sur essai.mp4 : accès refusé", "error")
+    window.show_banner("Son coupé", "quiet")
+    check(window.banner.isHidden(), "rien ne s'affiche pendant le repli")
+    window.leave_quiet()
+    pump(app, 0.1)
+    check("Échec sur essai.mp4" in window.banner.text() and window.banner.isVisible(),
+          f"l'échec se montre au retour ({window.banner.text()[:40]!r})")
+    window.show_banner("Son activé", "quiet")
+    check("Échec" in window.banner.text(),
+          "et un message ordinaire ne l'efface pas aussitôt")
+    window._banner_guard = 0.0
+    window.enter_quiet()
+    window.leave_quiet()
+    pump(app, 0.1)
+    check(window.cfg["quiet_explained"] and "Ctrl+K" in window.banner.text(),
+          "au premier retour sans échec, un bandeau dit comment on en sort")
+
+    # -- par-dessus une boîte, un menu, ou depuis une autre fenêtre ----------
+    seen = []
+
+    def press_in_box():
+        box = QApplication.activeModalWidget()
+        seen.append(box is not None and window._quiet_keys.armed)
+        QTest.keyClick(box.focusWidget() or box if box else window,
+                       Qt.Key_K, Qt.ControlModifier)
+
+    QTimer.singleShot(300, press_in_box)
+    box = _QMB(_QMB.Question, "Supprimer ce dossier ?", "essai",
+               _QMB.Yes | _QMB.No, window)
+    answer = box.exec()
+    pump(app, 0.2)
+    check(seen == [True], "une boîte ouverte arme Ctrl+K pour elle")
+    check(answer != _QMB.Yes and window.stack.currentIndex() == PAGE_QUIET,
+          "Ctrl+K la referme sans rien accepter, et la page neutre la remplace")
+    check(not window._quiet_keys.armed, "le filtre se retire avec la boîte")
+    window.leave_quiet()
+    pump(app, 0.1)
+    window.overflow.popup(window.mapToGlobal(QPoint(80, 80)))
+    pump(app, 0.2)
+    QTest.keyClick(window.overflow, Qt.Key_K, Qt.ControlModifier)
+    pump(app, 0.2)
+    check(QApplication.activePopupWidget() is None
+          and window.stack.currentIndex() == PAGE_QUIET,
+          "un menu ouvert se referme, et le repli se fait")
+    window.leave_quiet()
+    pump(app, 0.1)
+    if window.arm_global_quiet():
+        post = _ct.windll.user32.PostThreadMessageW
+        post(window.global_quiet._thread_id, 0x0312, 1, 0)
+        wait_for(app, lambda: window._quiet, 3)
+        post(window.global_quiet._thread_id, 0x0312, 1, 0)
+        pump(app, 0.3)
+        check(window._quiet, "Ctrl+Alt+K, d'où que l'on soit, cache — sans jamais ramener")
+        window.leave_quiet()
+    else:
+        check(True, "Ctrl+Alt+K déjà pris par un autre programme : rien de cassé")
+    window.global_quiet.stop()
+    check(window.global_quiet._thread is None, "et le raccourci se rend à la fermeture")
+
+    # -- le mur retrouvé tel quel, hors plein écran pendant le repli ---------
+    window.set_tab(TAB_SPLIT)
+    window.set_wall_orientation("any")
+    wait_for(app, lambda: sum(1 for p in window.wall.panes
+                              if p.player.playbackState() == playing) >= 2, 20)
+    # Les demarrages echelonnes finis : un panneau encore vide se remplit
+    # au retour, et c'est voulu.
+    wait_for(app, lambda: not window.wall._queue
+             and not window.wall.stagger.isActive(), 20)
+    pump(app, 0.3)
+    paths = [p.video_path for p in window.wall.panes]
+    window.wall.toggle_solo(0)
+    window.toggle_wall_fullscreen(True)
+    pump(app, 0.3)
+    window.enter_quiet()
+    pump(app, 0.3)
+    check(not window.windowState() & Qt.WindowFullScreen,
+          "la page neutre ne s'affiche pas en plein écran")
+    check(all(p.player.playbackState() != playing for p in window.wall.panes),
+          "le mur se tait")
+    window.leave_quiet()
+    pump(app, 0.4)
+    back = [p.video_path for p in window.wall.panes]
+    check(all(was == now for was, now in zip(paths, back) if was)
+          and window.wall.solo == 0,
+          f"au retour, les mêmes vidéos, et le panneau seul reste seul "
+          f"({sum(1 for was, now in zip(paths, back) if was and was == now)} "
+          f"sur {sum(1 for was in paths if was)}, seul : {window.wall.solo})")
+    check(window.wall_full and window.wall.panes[0].player.playbackState() == playing,
+          "en plein écran, et il rejoue")
+    window.toggle_wall_fullscreen(False)
+    window.wall.unsolo()
+    window.set_wall_orientation("vertical")
+    window.set_tab(TAB_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 30)
+
+    # -- le lecteur de côté reste ouvert --------------------------------------
+    window.toggle_board(True)
+    pump(app, 0.2)
+    at = next((n for n, i in enumerate(window.items) if i.videos), -1)
+    if at >= 0:
+        window.open_aside(at)
+        wait_for(app, lambda: window.aside_player.player.playbackState() == playing, 20)
+        window.enter_quiet()
+        pump(app, 0.2)
+        window.leave_quiet()
+        pump(app, 0.3)
+        check(not window.aside.isHidden()
+              and window.aside_player.player.playbackState() == playing,
+              "le lecteur de côté est toujours là, et rejoue")
+        window.close_aside()
+
+    print("\n[96] La première ligne : ce qui tourne, ce qui est ouvert")
+    window.count_videos()
+    pump(app, 0.05)
+    if window.counter is not None:
+        check("comptage" in window.activity_label.text()
+              and window._menu_by_text["Compter les vidéos"].text().startswith("Arrêter"),
+              f"ce qui tourne se lit à côté du fil, et le menu propose de l'arrêter "
+              f"({window.activity_label.text()!r})")
+    wait_for(app, lambda: window.counter is None, 30)
+    pump(app, 0.5)
+    check(window._menu_by_text["Compter les vidéos"].text() == "Compter les vidéos"
+          and "comptage" not in window.activity_label.text(),
+          "puis tout reprend son nom")
+    check("Comptage…" not in window.banner.text(),
+          "le comptage ne parle plus au bandeau trois fois par seconde")
+    window.toggle_burst()
+    pump(app, 0.5)
+    check("rafale" in window.activity_label.text()
+          and window._menu_by_text["Rafale : passer tout seul après 8 s"].isChecked(),
+          "la rafale en marche se voit, et se coche dans le menu")
+    window.toggle_burst()
+    window.tunnel_address = "https://essai.exemple.net"
+    check(not window.share_badge.isHidden()
+          and "essai.exemple.net" in window.share_badge.toolTip(),
+          "une adresse publique ouverte a son témoin permanent")
+    window.tunnel_address = ""
+    check(window.share_badge.isHidden(), "qui s'efface avec elle")
+    window._progress_text("41 230 / 106 903 · 2 h 10 min")
+    check(window.progress.minimumWidth() > 200,
+          f"la barre s'élargit pour dire total et temps restant "
+          f"({window.progress.minimumWidth()} px)")
+    window._progress_text("%v / %m analysés")
+    row = window.picked_bar.layout()
+    order = [row.itemAt(n).widget().text() for n in range(row.count())
+             if row.itemAt(n).widget() is not None and row.itemAt(n).widget().text()]
+    check(window.picked_delete.objectName() == "danger"
+          and order[-1] == "Supprimer" and order[-2] == "Annuler",
+          f"« Supprimer » en rouge, en dernier, à l'écart d'« Annuler » ({order})")
+    check(window.minimumSize().width() <= 640,
+          f"la fenêtre peut descendre à {window.minimumSize().width()} points")
+    window.set_tab(TAB_SPLIT)
+    pump(app, 0.2)
+    unseen = window.wall.unseen
+    window.wall.set_unseen(False)
+    off = unseen.grab().toImage()
+    window.wall.set_unseen(True)
+    on = unseen.grab().toImage()
+    window.wall.set_unseen(bool(window.cfg["only_unseen"]))
+    check(off != on, "sur la première ligne, « Non vus » actif se distingue")
+    check("▾" not in window.wall.orient_button.text(),
+          "et l'orientation ne promet plus de menu")
+    window.set_tab(TAB_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 30)
+
+    print("\n[97] Au lancement, la dernière racine ; les récentes sont des racines")
+    window.start_root(root, MODE_FOLDERS, new_origin=True)
+    wait_for(app, lambda: not window.scanning, 30)
+    recents = list(window.cfg["recent_roots"])
+    inner = next((i for i in window.items if i.kind == MODE_FOLDERS), None)
+    if inner is not None:
+        window.start_root(inner.path, MODE_FOLDERS, reset_levels=False)
+        wait_for(app, lambda: not window.scanning, 30)
+        check(window.cfg["recent_roots"] == recents
+              and window.cfg["root"] == str(root),
+              "un sous-dossier visité ne devient ni une racine récente, ni la "
+              "racine du prochain lancement")
+    window._fill_recent_menu()
+    check(window.recent_menu.actions()
+          and window.recent_menu.actions()[0].text() == str(root),
+          "les racines récentes restent au menu (⋯ › Collection)")
+    fresh = _MW(window.cfg)
+    fresh.resize(900, 600)
+    fresh.show()
+    check(fresh.stack.currentIndex() == PAGE_WELCOME and fresh.root is None,
+          "la fenêtre se construit sans rien lire")
+    fresh.open_at_launch()
+    wait_for(app, lambda: fresh.root is not None and not fresh.scanning, 30)
+    check(fresh.stack.currentIndex() == PAGE_SORT and fresh.root == root
+          and fresh.tab == TAB_FOLDERS and fresh.browsing,
+          "puis s'ouvre d'elle-même sur la racine, onglet Dossiers, sans accueil")
+    if fresh.global_quiet is not None:
+        fresh.global_quiet.stop()
+    from videosorter import media as _media_fresh
+    fresh.close()
+    # Un seul Prisme par processus, en vrai : la fenetre d'essai fermee ne
+    # doit pas couper les outils de celle qui finit les tests.
+    _media_fresh.CLOSING = False
+    fresh.deleteLater()
+    pump(app, 0.3)
+
+
 def _transfer_for_test(src, dest):
     from videosorter.transfer import Transfer
     Path(dest).mkdir(parents=True, exist_ok=True)
@@ -5901,6 +6203,7 @@ def main() -> int:
     check_keys_and_batches(app, window, base)
     check_fluidity(app, window, base, root)
     check_navigation(app, window, base)
+    check_quiet_and_header(app, window, base, root)
 
     window.close()
     pump(app, 0.3)

@@ -410,6 +410,10 @@ def run() -> int:
     window = MainWindow(cfg)
     window.show()
     splash.finish(window)
+    # La derniere racine s'ouvre d'elle-meme, sur « Dossiers » : l'accueil ne
+    # sert plus qu'a la premiere fois, ou si elle a disparu.
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, window.open_at_launch)
     crash.attach(window)
     app._prisme_server = _serve_wake(app, window, name)
     app._prisme_gardener = _Gardener(app)

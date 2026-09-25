@@ -1402,6 +1402,11 @@ class SinglePlayer(QWidget):
     # compte pas les images.
     STRIP_COUNT = 5
 
+    # Vrai le temps que la fenetre passe au repli : cache, le lecteur se met
+    # en pause au lieu de s'arreter. Arrete, il repartait du debut, sur une
+    # image noire, apres une nouvelle lecture du partage.
+    hold = False
+
     def __init__(self, count: int = 10, scroll_seconds: int = 5, parent=None):
         super().__init__(parent)
         # La pellicule ne suit plus le reglage du nombre d'apercus : elle sert a
@@ -1665,6 +1670,12 @@ class SinglePlayer(QWidget):
         super().hideEvent(event)
         self.hover_timer.stop()
         self.marks.hide()
+        if self.hold:
+            # Pause seulement s'il jouait : sur un lecteur arrete, pause()
+            # rechargerait la video pour en montrer la premiere image.
+            if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self.player.pause()
+            return
         self.stop()
 
     def hide_strip(self) -> None:

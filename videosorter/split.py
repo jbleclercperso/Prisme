@@ -42,8 +42,9 @@ STAGGER_MIN_MS = 150
 HEAR_SETTLE_MS = 250
 # Les nombres qui font un rectangle. Cinq ou sept n'en font pas.
 PANE_CHOICES = (2, 3, 4, 5, 6, 8, 9, 10)
-ORIENTATIONS = (("vertical", "Verticales"), ("horizontal", "Horizontales"),
-                ("any", "Toutes"))
+# Les memes mots que sur la planche (header.ControlBar.FORMAT_TEXT).
+ORIENTATIONS = (("vertical", "▯ Verticales"), ("horizontal", "▭ Horizontales"),
+                ("any", "▯▭ Tous formats"))
 
 
 def grid_for(count: int, orientation: str, width: int = 0,
@@ -663,6 +664,11 @@ class SplitWall(QWidget):
         super().showEvent(event)
         self.watch_timer.start()
 
+    # Vrai le temps que la fenetre passe au repli : le mur se fige tel quel
+    # (memes videos, meme instant, panneau seul garde) au lieu de s'arreter.
+    # Il repartait sinon de zero, sur dix autres videos tirees au hasard.
+    hold = False
+
     def hideEvent(self, event):
         super().hideEvent(event)
         self.watch_timer.stop()
@@ -671,7 +677,27 @@ class SplitWall(QWidget):
         self.hear_timer.stop()
         self._hear_next = None
         self.audio.setMuted(True)
+        if self.hold:
+            # Les demarrages en attente se perdraient derriere une page
+            # cachee (`_start_one` ne lance rien d'invisible) : ils attendent.
+            self.stagger.stop()
+            for pane in self.panes:
+                pane.peek_end()
+                pane.hide_overlays()
+                if (pane.player.playbackState()
+                        == QMediaPlayer.PlaybackState.PlayingState):
+                    pane.player.pause()
+            return
         self.stop()
+
+    def resume(self, playing: list) -> None:
+        """Au retour du repli : reprend les panneaux qui jouaient, et les
+        demarrages restes en attente."""
+        for pane in self.panes:
+            if pane.player in playing and pane.video_path:
+                pane.player.play()
+        if self._queue:
+            self._start_one()
 
     def set_unseen(self, on: bool) -> None:
         self.unseen.setProperty("chosen", "true" if on else "false")
@@ -685,8 +711,9 @@ class SplitWall(QWidget):
 
     def _mark_choices(self) -> None:
         self.count_stepper.set_value(len(self.panes))
-        label = dict(ORIENTATIONS).get(self.orientation, "Toutes")
-        self.orient_button.setText(f"{label} ▾")
+        # Sans « ▾ » : il promettait un menu, et le clic fait tourner.
+        self.orient_button.setText(
+            dict(ORIENTATIONS).get(self.orientation, "▯▭ Tous formats"))
 
     def set_orientation(self, orientation: str) -> None:
         self.orientation = orientation

@@ -13,13 +13,17 @@ from datetime import datetime
 from pathlib import Path
 
 import shiboken6
-from PySide6.QtGui import QCursor
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, QThread, QTimer, QUrl, Qt
+from PySide6.QtGui import QCursor, QIcon, QKeySequence, QShortcut
+from PySide6.QtMultimedia import QMediaPlayer
+from PySide6.QtCore import (
+    QEvent, QObject, QPoint, QRect, QSize, QThread, QTimer, QUrl, Qt, Signal,
+)
 from PySide6.QtWidgets import (
     QSplitter,
-    QApplication, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QListWidget,
-    QMainWindow, QMessageBox, QProgressBar, QProgressDialog, QPushButton,
-    QLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel,
+    QListWidget, QMainWindow, QMenu, QMessageBox, QProgressBar, QProgressDialog,
+    QPushButton, QLayout, QSizePolicy, QStackedWidget, QStyle, QToolTip,
+    QVBoxLayout, QWidget,
 )
 
 from . import actions
@@ -41,7 +45,7 @@ from . import media
 from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
 from .tagging import TagsThread, build_tag_items
-from .split import DEFAULT_PANES, SplitWall
+from .split import DEFAULT_PANES, SPLIT_STYLE, SplitWall
 from .access import JOURNAL
 from .perf import LOG as STALL_LOG, WATCH, mark
 from .quiet import QUIET_TITLE, QuietPage
@@ -212,6 +216,117 @@ def _folder_state(path) -> str:
         return actions.probe(path)
 
 
+class _QuietKeys(QObject):
+    """Ctrl+K par-dessus un dialogue : le repli doit y repondre aussi.
+
+    Un dialogue modal garde le clavier pour lui, et Ctrl+K n'y faisait rien --
+    pas meme sur la corbeille ou la question « Supprimer ce dossier ? », qui
+    affichent des noms de fichiers. Le filtre ne s'arme que le temps d'un
+    dialogue : pose sur toute l'application en permanence, il ferait passer
+    chaque evenement (chaque image des videos) par Python, et par son verrou.
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        self.armed = False
+
+    def follow(self, *_args) -> None:
+        """Arme le filtre tant qu'un dialogue modal tient le clavier.
+
+        Suit le focus en plus de l'activation de la fenetre : une boite
+        ouverte pendant qu'on etait dans une autre application ne changeait
+        rien a l'activation de la fenetre de Prisme, deja inactive.
+        """
+        modal = QApplication.activeModalWidget()
+        self.arm(modal is not None and modal is not self.window
+                 and not self.window._closing)
+
+    def arm(self, on: bool) -> None:
+        if on == self.armed:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        if on:
+            app.installEventFilter(self)
+        else:
+            app.removeEventFilter(self)
+        self.armed = on
+
+    def eventFilter(self, watched, event):
+        if (event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key_K
+                and event.modifiers() & Qt.ControlModifier
+                and not event.modifiers() & Qt.AltModifier):
+            if not event.isAutoRepeat():
+                # Apres coup : les dialogues fermes rendent d'abord la main.
+                QTimer.singleShot(0, self.window.quiet_now)
+            return True
+        return False
+
+
+class _GlobalQuietKey(QObject):
+    """Ctrl+Alt+K depuis n'importe quelle fenetre : Prisme passe au repli.
+
+    Ctrl+K ne vaut que si Prisme a le clavier ; au moment ou quelqu'un
+    arrive, on est souvent ailleurs, et il fallait deux gestes -- le premier
+    clic sur un panneau du mur ouvrant parfois une fiche. Un fil a lui attend
+    le raccourci aupres de Windows : rien ne passe par la fenetre, et rien ne
+    coute tant qu'on ne le presse pas. Il ne fait qu'entrer au repli : presse
+    deux fois, il ne ramene jamais Prisme a l'ecran.
+    """
+
+    pressed = Signal()
+    MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
+    WM_HOTKEY, WM_QUIT = 0x0312, 0x0012
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.ok = False
+        self._thread_id = 0
+        self._thread = None
+
+    def start(self) -> bool:
+        """Vrai si le raccourci est pris ; faux s'il est deja a un autre."""
+        if os.name != "nt" or self._thread is not None:
+            return self.ok
+        import threading
+        ready = threading.Event()
+        self._thread = threading.Thread(target=self._loop, args=(ready,),
+                                        daemon=True, name="prisme-repli")
+        self._thread.start()
+        ready.wait(2.0)
+        return self.ok
+
+    def _loop(self, ready) -> None:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+        self.ok = bool(user32.RegisterHotKey(
+            None, 1, self.MOD_CONTROL | self.MOD_ALT | self.MOD_NOREPEAT, ord("K")))
+        ready.set()
+        if not self.ok:
+            return
+        msg = wintypes.MSG()
+        try:
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == self.WM_HOTKEY:
+                    self.pressed.emit()
+        finally:
+            user32.UnregisterHotKey(None, 1)
+
+    def stop(self) -> None:
+        if not self._thread_id or self._thread is None:
+            return
+        import ctypes
+        ctypes.windll.user32.PostThreadMessageW(self._thread_id, self.WM_QUIT, 0, 0)
+        self._thread.join(1.0)
+        self._thread = None
+        self.ok = False
+
+
 class MainWindow(QMainWindow):
     def __init__(self, cfg: Config):
         super().__init__()
@@ -222,7 +337,10 @@ class MainWindow(QMainWindow):
         if QApplication.windowIcon().isNull():
             self.setWindowIcon(app_icon())
         self._restore_geometry(cfg["window"])
-        self.setStyleSheet(STYLESHEET + HEADER_STYLE)
+        # Les regles du mur aussi : ses reglages vivent sur la premiere ligne,
+        # hors du mur, et les colonnes de la planche portent le meme nom. Hors
+        # de sa cascade, « Non vus » actif ne se distinguait plus d'inactif.
+        self.setStyleSheet(STYLESHEET + HEADER_STYLE + SPLIT_STYLE)
 
         self.all_items: list = []      # tout ce que l'analyse a trouve
         self.items: list = []          # ce que le filtre laisse passer
@@ -238,10 +356,12 @@ class MainWindow(QMainWindow):
         # Le tri aussi : la pastille « Durée ▼ » d'hier s'affichait allumee sur
         # une liste qui, elle, restait dans l'ordre des noms -- et le premier
         # clic l'inversait.
+        # La rafale de meme : retenue d'une seance a l'autre, sans rien qui la
+        # montre, elle faisait defiler les videos toutes seules au lancement.
         for key, value in (("filter_include", ""), ("filter_exclude", ""),
                            ("only_unseen", False), ("orientations", []),
                            ("folder_min", 0), ("folder_max", 0),
-                           ("sort_mode", "random")):
+                           ("sort_mode", "random"), ("burst", False)):
             cfg[key] = value
         # On arrive toujours sur les vignettes : l'edition se choisit.
         self._editing = False
@@ -409,6 +529,29 @@ class MainWindow(QMainWindow):
         self._share_announce = False
         self._closing = False
         self._timers_paused = False
+        # Le repli (Ctrl+K). Tant qu'il dure, rien ne joue ni n'avance en
+        # coulisse ; ce qu'on regardait reprend au retour, la ou on l'a laisse.
+        self._quiet = False
+        self._quiet_from = PAGE_SORT
+        self._quiet_show = False       # une fiche demandee pendant le repli
+        self._quiet_playing: list = []  # les lecteurs qui jouaient
+        self._quiet_timers: tuple = ()  # vu, rafale : lesquels couraient
+        self._quiet_full = False       # le mur etait en plein ecran
+        self._quiet_icon = None        # (icone, posee par la fenetre ?)
+        # Une touche maintenue au moment du retour ne doit pas continuer sur
+        # la page retrouvee (Echap remontait jusqu'en haut).
+        self._eat_repeat = False
+        # Les bandeaux dits pendant le repli ou fenetre reduite : montres au
+        # retour, et non perdus.
+        self._held_banners: list = []
+        self._banner_tone = None
+        # Un echec reste lisible quelques secondes : le message ordinaire qui
+        # suit attend (`show_banner`).
+        self._banner_guard = 0.0
+        self._banner_next = None
+        self._quiet_keys = _QuietKeys(self)
+        self.global_quiet = None
+        self._menu_by_text: dict = {}
         # La recherche qui se precise : on filtre ce qui est deja a l'ecran.
         self._narrow_items = None
         self._narrow_source = None
@@ -433,11 +576,38 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_mute()
         self._refresh_state()
-        WATCH.setParent(self)
-        WATCH.start(str(cfg["root"] or ""))
+        # Le chien de garde est unique : une fenetre d'essai detruite l'a pu
+        # emporter avec elle (il se rattache a la derniere construite).
+        if shiboken6.isValid(WATCH):
+            WATCH.setParent(self)
+            WATCH.start(str(cfg["root"] or ""))
         self._siblings_cache: dict = {}
         self.welcome.set_recent(cfg["recent_roots"])
         self.stack.setCurrentIndex(PAGE_WELCOME)
+        # Un plancher pose, et non calcule : Qt faisait de la somme des
+        # largeurs de la premiere ligne le minimum de la fenetre -- 995 points
+        # au lancement, 1 082 sur le mur --, et une fois elargie par un onglet
+        # elle ne retrecissait plus. Sur un ecran agrandi, ⋯ sortait du cadre.
+        # Ce qui ne tient pas se laisse rogner ; la fenetre, elle, tient.
+        self.setMinimumSize(*self._window_floor())
+        # Ctrl+K d'ou que l'on soit dans Prisme : un menu ouvert (⋯, clic
+        # droit) garde le clavier, et la touche n'arrivait pas a la fenetre.
+        self._quiet_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
+        self._quiet_shortcut.setContext(Qt.ApplicationShortcut)
+        self._quiet_shortcut.setAutoRepeat(False)
+        self._quiet_shortcut.activated.connect(self._quiet_key)
+        QApplication.instance().focusChanged.connect(self._quiet_keys.follow)
+
+    @staticmethod
+    def _window_floor() -> tuple:
+        """La plus petite taille ou la fenetre reste utilisable, ecran compris."""
+        width, height = 640, 400
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            free = screen.availableGeometry()
+            width = min(width, max(320, free.width() - 40))
+            height = min(height, max(240, free.height() - 80))
+        return width, height
 
     # ------------------------------------------------------------------
     # Construction
@@ -450,8 +620,11 @@ class MainWindow(QMainWindow):
         self.welcome.choose.clicked.connect(self.choose_root)
         # Une seule ecriture pour un meme dossier : « \\serveur\partage » et
         # « X: » donnaient deux collections, et l'on relisait tout.
+        # Une racine prise dans cette liste est l'origine du fil, comme une
+        # racine choisie : elle ne s'accrochait pas sous la precedente.
         self.welcome.recent.itemActivated.connect(
-            lambda item: self.start_root(canon_root(item.text()))
+            lambda item: self.start_root(canon_root(item.text()),
+                                         new_origin=True)
         )
         self.stack.addWidget(self.welcome)
 
@@ -508,11 +681,17 @@ class MainWindow(QMainWindow):
         self.crumbs.setMinimumWidth(40)
         row_one.addWidget(self.crumbs, 1)
 
-        # Ce qui se fabrique, dit en trois mots a cote du fil d'Ariane.
+        # Ce qui tourne en fond, dit en trois mots a cote du fil d'Ariane :
+        # analyse, aperçus, préparation, empreintes, rafale. Ces avancements
+        # s'ecrivaient dans des boutons toujours caches : on ne distinguait
+        # pas une application lente d'une analyse en cours, et rien ne
+        # permettait d'arreter celle-ci. Un clic propose de l'arreter.
         self.activity_label = QLabel("", sort_page)
         self.activity_label.setObjectName("hint")
         # Un message long se coupe ; il n'elargit jamais la fenetre.
         self.activity_label.setMinimumWidth(10)
+        self.activity_label.installEventFilter(self)
+        self._activity_said = None
         row_one.addWidget(self.activity_label, 0)
 
         self.pending_label = QLabel("", sort_page)
@@ -528,19 +707,14 @@ class MainWindow(QMainWindow):
         self.progress.setTextVisible(True)
         self.progress.setFormat("%v / %m analysés")
         self.progress.setFixedHeight(16)
+        # Sa largeur suit son texte, de 130 a 300 points (`_progress_text`) :
+        # a 130 fixes, « vignettes : 41 230 / 106 903 — 2 h restant » perdait
+        # justement le total et le temps restant.
         self.progress.setFixedWidth(130)
         # Pendant une analyse, la barre tient lieu d'etat de la collection :
         # les deux cote a cote debordaient d'un ecran agrandi.
         self.progress.installEventFilter(self)
         row_one.addWidget(self.progress, 0)
-
-        # « Analyser » vit dans le menu.
-        self.scan_button = QPushButton("⟲  Analyser", sort_page)
-        self.scan_button.setObjectName("scanState")
-        self.scan_button.setProperty("running", "false")
-        self.scan_button.setFocusPolicy(Qt.NoFocus)
-        self.scan_button.clicked.connect(self.toggle_scan)
-        self.scan_button.hide()
 
         # L'etat de la collection, toujours sous les yeux : combien de videos
         # sont repertoriees, combien ont leur vignette, et de quand ca date.
@@ -591,6 +765,25 @@ class MainWindow(QMainWindow):
         self.mute_button.clicked.connect(self.toggle_mute)
         row_one.addWidget(self.mute_button, 0)
 
+        # L'adresse publique ouverte : un temoin tant qu'elle l'est. Elle
+        # s'ouvre d'elle-meme au lancement, et seul un bandeau de quatre
+        # secondes le disait -- la bibliotheque restait joignable d'Internet
+        # sans que rien ne le rappelle. Un clic ouvre le partage ; un clic
+        # droit ferme l'adresse.
+        self.share_badge = QPushButton("", sort_page)
+        dress(self.share_badge, "share-2", 18)
+        self.share_badge.setObjectName("shareBadge")
+        self.share_badge.setFixedWidth(34)
+        self.share_badge.setFocusPolicy(Qt.NoFocus)
+        self.share_badge.setStyleSheet(
+            "QPushButton#shareBadge { background: #1f3326; border-color: #2f5a3c; }"
+            "QPushButton#shareBadge:hover { background: #26402f; }")
+        self.share_badge.clicked.connect(self.open_share)
+        self.share_badge.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.share_badge.customContextMenuRequested.connect(self._share_badge_menu)
+        self.share_badge.hide()
+        row_one.addWidget(self.share_badge, 0)
+
         # Le repli. Un rond gris, sans legende : il ne doit rien annoncer a
         # qui regarde par-dessus l'epaule, et se trouver sans reflechir.
         self.quiet_button = QPushButton("●", sort_page)
@@ -598,7 +791,8 @@ class MainWindow(QMainWindow):
         self.quiet_button.setFixedWidth(30)
         self.quiet_button.setToolTip(
             "Passer à autre chose : Prisme s'efface derrière une page neutre.\n"
-            "Ctrl+K, Échap ou un double-clic pour revenir.   (Ctrl+K)")
+            "Ctrl+K, Échap ou un double-clic pour revenir.   (Ctrl+K)\n"
+            "Depuis une autre fenêtre : Ctrl+Alt+K.")
         self.quiet_button.setFocusPolicy(Qt.NoFocus)
         self.quiet_button.clicked.connect(self.enter_quiet)
         row_one.addWidget(self.quiet_button, 0)
@@ -674,6 +868,25 @@ class MainWindow(QMainWindow):
         self.dupes_result_action = doubles.addAction(
             "Afficher les doublons trouvés", self.show_found_dupes)
         self.dupes_result_action.setVisible(False)
+        # Les racines recentes : l'accueil, qui les listait, ne parait plus
+        # qu'au tout premier lancement -- la derniere racine s'ouvre seule.
+        collection = next(a.menu() for a in self.overflow.actions()
+                          if a.menu() is not None and a.text() == "Collection")
+        self.recent_menu = QMenu("Racines récentes", collection)
+        where = next(a for a in collection.actions()
+                     if a.text() == "Où sont les vignettes…")
+        collection.insertMenu(where, self.recent_menu)
+        self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
+        # Les entrees par leur libelle d'origine : celles des travaux de fond
+        # changent de nom pendant qu'ils tournent (« Arrêter … »), et on ne
+        # les retrouvait plus par leur texte une fois renommees.
+        self._menu_by_text = {action.text(): action
+                              for action in self._menu_actions()}
+        # La rafale dit si elle est en marche : une coche, et non un
+        # libelle qui ne change jamais.
+        burst = self._menu_by_text["Rafale : passer tout seul après 8 s"]
+        burst.setCheckable(True)
+        burst.setChecked(bool(self.cfg["burst"]))
         self.more_button.setMenu(self.overflow)
         self._name_backfill_action()
         self._name_veil_action()
@@ -740,6 +953,8 @@ class MainWindow(QMainWindow):
         self.picked_label = QLabel("", self.picked_bar)
         self.picked_label.setObjectName("pending")
         picked_row.addWidget(self.picked_label)
+        # « Supprimer » en dernier, en rouge et a l'ecart : l'action de masse
+        # la plus lourde avait l'air d'« Annuler », et se tenait contre lui.
         for name, text, tip, slot in (
             ("square-stack", "Mur", "Les vidéos cochées, toutes à la fois, sur le mur",
              self.wall_picked),
@@ -748,16 +963,20 @@ class MainWindow(QMainWindow):
              self.playlist_picked),
             ("folder-input", "Déplacer…", "Cliquez ensuite un dossier de l'arborescence",
              self.move_picked_hint),
+            ("x", "Annuler", "Décoche tout", self.clear_picked),
             ("trash-2", "Supprimer",
              "Écarte les éléments cochés dans la corbeille de session "
              "(Ctrl+B) — sur le NAS, détruits à la fermeture", self.delete_picked),
-            ("x", "Annuler", "Décoche tout", self.clear_picked),
         ):
             button = QPushButton(text, self.picked_bar)
             dress(button, name, 16, text)
             button.setToolTip(tip)
             button.setFocusPolicy(Qt.NoFocus)
             button.clicked.connect(slot)
+            if name == "trash-2":
+                button.setObjectName("danger")
+                picked_row.addSpacing(18)
+                self.picked_delete = button
             picked_row.addWidget(button)
         picked_row.addStretch(1)
         self.picked_bar.hide()
@@ -1108,6 +1327,56 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Racine et analyse
     # ------------------------------------------------------------------
+    def open_at_launch(self) -> None:
+        """Au lancement : la derniere racine, sur « Dossiers », sans accueil.
+
+        Il fallait double-cliquer la meme racine a chaque ouverture, alors que
+        l'index la connaissait deja. Le dossier est interroge hors du fil de
+        l'interface -- un NAS endormi peut mettre des secondes a repondre. Un
+        dossier parti ramene a l'accueil, en le disant ; injoignable, on
+        l'ouvre quand meme : l'index sait ce qu'il y avait.
+        Le raccourci du repli, valable partout, se pose ici aussi.
+        """
+        self.arm_global_quiet()
+        root = self.cfg["root"]
+        if not root or self.root is not None or self._closing:
+            return
+        from .tunnel import Chore
+        path = canon_root(root)
+        Chore(lambda: _folder_state(path), self, fallback="injoignable",
+              then=lambda state: self._launch_into(path, state)).start()
+
+    def _fill_recent_menu(self) -> None:
+        """Les racines choisies ces derniers temps, la courante cochee."""
+        menu = self.recent_menu
+        menu.clear()
+        here = os.path.normcase(str(self.origin)) if self.origin else ""
+        for root in self.cfg["recent_roots"]:
+            action = menu.addAction(root)
+            action.setCheckable(True)
+            action.setChecked(os.path.normcase(root) == here)
+            action.triggered.connect(
+                lambda _c=False, root=root: self.start_root(
+                    canon_root(root), new_origin=True))
+        if menu.isEmpty():
+            menu.addAction("Aucune pour l'instant").setEnabled(False)
+
+    def _launch_into(self, path, state: str) -> None:
+        if not shiboken6.isValid(self) or self._closing or self.root is not None:
+            return                      # on a choisi autre chose entre-temps
+        if state == "absent":
+            self.show_banner(f"La dernière racine, « {path} », n'existe plus : "
+                             "choisissez-en une autre.", "error", seconds=8)
+            return
+        self.start_root(path, MODE_FOLDERS, new_origin=True, state=state)
+
+    def arm_global_quiet(self) -> bool:
+        """Ctrl+Alt+K, depuis n'importe quelle fenetre (`_GlobalQuietKey`)."""
+        if self.global_quiet is None:
+            self.global_quiet = _GlobalQuietKey(self)
+            self.global_quiet.pressed.connect(self.quiet_now)
+        return self.global_quiet.start()
+
     def choose_root(self) -> None:
         start = self.cfg["root"] or str(Path.home())
         chosen = QFileDialog.getExistingDirectory(self, "Choisir le dossier racine", start)
@@ -1240,11 +1509,17 @@ class MainWindow(QMainWindow):
         self.preview.tune_for(self.root)
         self.trash.set_base(self.top_root())
         self._look_for_leftovers(self.top_root())
-        self.cfg.push_recent_root(str(self.root))
-        # Plus tard, et d'un bloc : l'ecriture attend desormais que le disque
-        # l'ait prise (fsync), quelques millisecondes a chaque dossier ouvert.
-        self.cfg.save_soon()
-        self.welcome.set_recent(self.cfg["recent_roots"])
+        # Les « Racines récentes » sont les racines choisies, pas chaque
+        # dossier traverse : huit descentes suffisaient a en chasser X:\, et
+        # la « racine » rouverte au lancement etait le dernier sous-dossier vu.
+        origin = str(self.origin) if self.origin is not None else str(self.root)
+        if self.cfg["root"] != origin or (
+                self.cfg["recent_roots"][:1] != [origin]):
+            self.cfg.push_recent_root(origin)
+            # Plus tard, et d'un bloc : l'ecriture attend que le disque l'ait
+            # prise (fsync).
+            self.cfg.save_soon()
+            self.welcome.set_recent(self.cfg["recent_roots"])
 
         # Le fil part de la racine choisie, et non du premier niveau empile :
         # changer d'onglet vidait la pile, et le fil se reduisait alors au seul
@@ -1264,8 +1539,8 @@ class MainWindow(QMainWindow):
         )
         if self.browsing:
             self.board.set_items([], self.ratings.get)
-        self.stack.setCurrentIndex(PAGE_SORT)
-        self.setFocus()
+        if self._goto_page(PAGE_SORT):
+            self.setFocus()
 
         if known:
             self._show_known(known, restore_id)
@@ -1336,7 +1611,7 @@ class MainWindow(QMainWindow):
         """Nouvel essai de lecture, sur la racine qu'on regarde encore."""
         if self.root is None or self.scanning:
             return
-        if self.stack.currentIndex() == PAGE_WELCOME:
+        if self._page() == PAGE_WELCOME:
             return
         mark(f"nouvel essai {self.root}")
         self._launch_scan()
@@ -1683,7 +1958,12 @@ class MainWindow(QMainWindow):
             if getattr(self, attr, None) is thread:
                 setattr(self, attr, None)
             thread.deleteLater()
+            if shiboken6.isValid(self) and not self._closing:
+                self._show_activity()
         thread.finished.connect(finished)
+        # Ce qui part se dit tout de suite, a cote du fil d'Ariane, et non
+        # au battement suivant.
+        QTimer.singleShot(0, self._show_activity)
 
     def count_videos(self) -> None:
         """Compte les videos sous la racine, et le dit en clair. Recliquer arrete."""
@@ -1698,9 +1978,11 @@ class MainWindow(QMainWindow):
         top = self.top_root()
         self.counter = VideoCount(top, self.cfg["skip_hidden"], self)
         self._own_thread(self.counter, "counter")
+        # L'avancement va a cote du fil d'Ariane, pas au bandeau : trois
+        # fois par seconde pendant des minutes, il ecrasait tout autre
+        # message -- une erreur comprise -- avant qu'on ait pu le lire.
         self.counter.progress.connect(
-            lambda n: (self.show_banner(f"Comptage… {n} vidéo(s)", "info"),
-                       self._refresh_state(f"comptage {n}…")))
+            lambda n: self._task_said("counter", f"comptage {self._thousands(n)}…"))
         self.counter.counted.connect(lambda n: self._told_count(top, n))
         self.counter.start()
         self.show_banner(f"Comptage des vidéos sous {top}…", "info")
@@ -1745,11 +2027,8 @@ class MainWindow(QMainWindow):
                                 self.cfg["skip_hidden"], self)
         self._own_thread(self.audit, "audit")
         self.audit.progress.connect(
-            lambda seen, ready: (
-                self.show_banner(
-                    f"Vérification… {ready} vignette(s) sur {seen} vidéo(s)",
-                    "info"),
-                self._refresh_state(f"vérification {ready} / {seen}")))
+            lambda seen, ready: self._task_said(
+                "audit", f"vérification {ready} / {seen}"))
         self.audit.done.connect(lambda seen, ready: self._told_audit(seen, ready))
         self.audit.start()
         self.show_banner("Vérification des vignettes déjà fabriquées…", "info")
@@ -1811,7 +2090,7 @@ class MainWindow(QMainWindow):
         self.dupes.start()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
-        self.progress.setFormat("recherche de doublons…")
+        self._progress_text("recherche de doublons…")
         self.progress.show()
         self.show_banner(banner, "info")
 
@@ -1851,7 +2130,9 @@ class MainWindow(QMainWindow):
     def on_dupes_progress(self, seen: int) -> None:
         if self.scanning:
             return
-        self.progress.setFormat(f"doublons : {seen} vidéo(s) examinée(s)…")
+        self._progress_text(f"doublons : {self._thousands(seen)}",
+                            f"Recherche de doublons : {self._thousands(seen)} "
+                            "vidéo(s) examinée(s)…")
         self.progress.show()
 
     def on_dupes_found(self, groups: list) -> None:
@@ -1867,7 +2148,7 @@ class MainWindow(QMainWindow):
         self.dupes = None
         if not self.scanning:
             self.progress.hide()
-        self.progress.setFormat("%v / %m analysés")
+        self._progress_text("%v / %m analysés")
         if getattr(self, "_dupes_stopped", False):
             self._dupes_stopped = False
             following, self._dupes_next = self._dupes_next, None
@@ -2039,38 +2320,169 @@ class MainWindow(QMainWindow):
         self._name_backfill_action()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
-        self.progress.setFormat("recensement des vidéos…")
+        self._progress_text("recensement des vidéos…")
         self.progress.show()
         self.show_banner(
             f"Préparation des vignettes de {top} — recensement des vidéos…",
             "info",
         )
 
+    # Les travaux de fond : l'attribut qui les tient, ce qu'on en dit tant
+    # qu'ils n'ont rien compte, l'entree du menu qui les lance et ce qu'elle
+    # devient pendant qu'ils tournent. Recliquer l'entree les arrete : elle
+    # le dit desormais, au lieu d'arreter des heures de travail sans prevenir.
+    TASKS = (
+        ("backfill", "préparation…", "Préparer toutes les vignettes",
+         "Arrêter la préparation des vignettes"),
+        ("counter", "comptage…", "Compter les vidéos", "Arrêter le comptage"),
+        ("audit", "vérification…", "État des vignettes",
+         "Arrêter la vérification des vignettes"),
+        ("sig_scan", "empreintes…", "Empreintes : sonder ce qui manque",
+         "Arrêter les empreintes"),
+        ("scene_scan", "plans…", "Repérage des plans (vignettes plus parlantes)",
+         "Arrêter le repérage des plans"),
+        ("titles_scan", "titres…", "Analyser les titres des métadonnées",
+         "Arrêter l'analyse des titres"),
+    )
+
+    def _task_said(self, key: str, text: str) -> None:
+        """L'avancement d'un travail de fond : a cote du fil d'Ariane."""
+        self.__dict__.setdefault("_task_text", {})[key] = text
+        self._refresh_state(text)
+        self._show_activity()
+
+    def _activities(self) -> list:
+        """Ce qui tourne : [(texte court, entree « Arrêter … », geste)]."""
+        said = self.__dict__.get("_task_text", {})
+        found = []
+        if self.scanning:
+            done, total = self._scan_done, self._scan_total
+            found.append((
+                f"⟳ analyse {self._thousands(done)} / {self._thousands(total)}"
+                if total else "⟳ analyse…",
+                "Arrêter l'analyse — ce qui est lu est gardé", self.toggle_scan))
+        else:
+            done, total = getattr(self, "_harvest", (0, 0))
+            if total:
+                found.append((f"◷ aperçus {self._thousands(done)} / "
+                              f"{self._thousands(total)}",
+                              "Arrêter la préparation des aperçus", self.toggle_scan))
+        for key, idle, entry, stop in self.TASKS:
+            action = self._menu_by_text.get(entry)
+            if getattr(self, key, None) is not None and action is not None:
+                found.append((said.get(key) or idle, stop, action.trigger))
+        if self.dupes is not None:
+            found.append(("doublons…", "Arrêter la recherche de doublons",
+                          self._stop_dupes))
+        if self.cfg["burst"]:
+            found.append(("rafale", "Arrêter la rafale", self.toggle_burst))
+        return found
+
     def _show_activity(self) -> None:
-        """Dit ce qui se fabrique, en toutes lettres et sans barre qui ondule.
+        """Dit ce qui tourne en fond, en toutes lettres et sans barre qui ondule.
 
         Une barre indeterminee va et vient sans rien promettre : elle attire
         l'oeil en permanence pour ne rien apprendre. Un compte discret a cote du
-        fil d'Ariane suffit, et s'efface des qu'il n'y a plus rien a dire.
+        fil d'Ariane suffit, et s'efface des qu'il n'y a plus rien a dire. Il
+        se reecrit a chaque battement, mais ne touche a l'ecran que s'il change.
         """
-        if self.scanning or self.backfill is not None:
+        if not hasattr(self, "activity_label"):
             return
-        busy = self.preview.busy()
-        self.activity_label.setText(f"⋯ {busy} aperçu(s)" if busy else "")
+        found = self._activities()
+        busy = 0 if found else self.preview.busy()
+        text = found[0][0] if found else (f"⋯ {busy} aperçu(s)" if busy else "")
+        if len(found) > 1:
+            text += f"  ·  +{len(found) - 1}"
+        tip = ("\n".join(f"• {line}" for line, _stop, _slot in found)
+               + "\n\nCliquer pour en arrêter un." if found else "")
+        said = (text, tip)
+        if said != self._activity_said:
+            self._activity_said = said
+            label = self.activity_label
+            # Une largeur qui avance par pas de quarante points : un chiffre
+            # qui change dix fois par seconde pendant l'analyse ne remet pas
+            # toute la ligne en page -- ni le fil d'Ariane a recouper.
+            need = label.fontMetrics().horizontalAdvance(text) + 8 if text else 0
+            width = min(280, -(-need // 40) * 40)
+            if label.minimumWidth() != width or label.maximumWidth() != width:
+                label.setFixedWidth(width)
+            label.setText(text)
+            label.setToolTip(tip)
+            label.setCursor(Qt.PointingHandCursor if found else Qt.ArrowCursor)
+        self._name_task_actions(found)
+        self._show_share_badge()
+
+    def _name_task_actions(self, found=None) -> None:
+        """Les entrees du menu disent ce qu'elles feront : lancer, ou arreter."""
+        said = self.__dict__.get("_task_text", {})
+        for key, _idle, entry, stop in self.TASKS:
+            if key == "backfill":
+                continue                   # `_name_backfill_action`
+            action = self._menu_by_text.get(entry)
+            if action is None:
+                continue
+            running = getattr(self, key, None) is not None
+            label = (f"{stop}   ({said[key]})" if running and said.get(key)
+                     else stop if running else entry)
+            if action.text() != label:
+                action.setText(label)
+        kinds = {"size": "Chercher les doublons (même taille)",
+                 "image": "Chercher les doublons (même image)",
+                 "sigs": "Doublons d'après les empreintes"}
+        running = self._dupes_kind() if self.dupes is not None else ""
+        for kind, entry in kinds.items():
+            action = self._menu_by_text.get(entry)
+            if action is None:
+                continue
+            label = ("Arrêter la recherche de doublons" if kind == running
+                     else entry)
+            if action.text() != label:
+                action.setText(label)
+
+    def _activity_menu(self) -> None:
+        """Un clic sur l'activite : de quoi arreter ce qui tourne."""
+        found = [entry for entry in self._activities() if entry[2] is not None]
+        if not found:
+            return
+        menu = QMenu(self)
+        for line, stop, slot in found:
+            action = menu.addAction(f"{stop}   ({line})")
+            action.triggered.connect(lambda _c=False, slot=slot: slot())
+        menu.exec(self.activity_label.mapToGlobal(
+            QPoint(0, self.activity_label.height())))
+        menu.deleteLater()
+        self._show_activity()
+
+    def _progress_text(self, text: str, tip: str = "") -> None:
+        """Le texte de la barre, et sa largeur : assez pour se lire en entier.
+
+        Le detail -- la phrase entiere -- va dans l'infobulle. La largeur
+        avance par pas de vingt points : pas de remise en page a chaque
+        chiffre qui change.
+        """
+        self.progress.setFormat(text)
+        self.progress.setToolTip(tip)
+        need = self.progress.fontMetrics().horizontalAdvance(text) + 24
+        width = max(130, min(300, -(-need // 20) * 20))
+        if self.progress.minimumWidth() != width:
+            self.progress.setFixedWidth(width)
 
     def _name_backfill_action(self, seen: int = -1, total: int = 0) -> None:
         """Dit, dans le menu, ou en est la preparation — ou quand elle a fini."""
         if self.backfill is not None:
-            label = (f"Arrêter la préparation   ({seen} / {total})"
-                     if seen >= 0 else "Arrêter la préparation")
+            label = (f"Arrêter la préparation des vignettes   "
+                     f"({self._thousands(seen)} / {self._thousands(total)})"
+                     if seen >= 0 else "Arrêter la préparation des vignettes")
         else:
             done = self.cfg["thumbs_last_run"]
             label = ("Préparer toutes les vignettes"
                      + (f"   (dernière : {done})" if done else "   (jamais faite)"))
-        for action in self._menu_actions():
-            if action.text().startswith("Préparer toutes les vignettes"):
-                action.setText(label)
-                return
+        # Par l'entree elle-meme : une fois renommee « Arrêter … », sa
+        # recherche par le texte ne la retrouvait plus, et le menu gardait
+        # « Arrêter » bien apres la fin.
+        action = self._menu_by_text.get("Préparer toutes les vignettes")
+        if action is not None and action.text() != label:
+            action.setText(label)
 
     def on_backfill_counting(self, found: int) -> None:
         """Le recensement dure : il dit ce qu'il trouve en chemin."""
@@ -2078,7 +2490,9 @@ class MainWindow(QMainWindow):
             return
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
-        self.progress.setFormat(f"recensement : {found} vidéo(s) trouvée(s)…")
+        self._progress_text(f"recensement : {self._thousands(found)}",
+                            f"Préparation des vignettes : recensement, "
+                            f"{self._thousands(found)} vidéo(s) trouvée(s)…")
         self.progress.show()
 
     def on_backfill_counted(self, total: int) -> None:
@@ -2086,13 +2500,13 @@ class MainWindow(QMainWindow):
             return
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(0)
-        self.progress.setFormat("vignettes : %v / %m")
+        self._progress_text(f"vignettes : 0 / {self._thousands(total)}")
         self.progress.show()
 
     def on_backfill_progress(self, made: int, kept: int, total: int) -> None:
         self._name_backfill_action(made + kept, total)
-        self._refresh_state(f"préparation {self._thousands(made + kept)} / "
-                            f"{self._thousands(total)}")
+        self._task_said("backfill", f"préparation {self._thousands(made + kept)} / "
+                                    f"{self._thousands(total)}")
         if self.scanning:
             return
         seen = made + kept
@@ -2101,10 +2515,15 @@ class MainWindow(QMainWindow):
         # Une barre qui avance sans dire combien de temps il reste n'apprend
         # rien qu'on ne voie deja : c'est la fin qu'on veut connaitre.
         elapsed = time.monotonic() - self._backfill_started
+        counts = f"{self._thousands(seen)} / {self._thousands(total)}"
         if seen > 20 and elapsed > 5:
-            left = (total - seen) * elapsed / seen
-            self.progress.setFormat(
-                f"vignettes : %v / %m — {human_duration(left)} restant")
+            left = human_duration((total - seen) * elapsed / seen)
+            self._progress_text(
+                f"{counts} · {left}",
+                f"Préparation des vignettes : {counts} — {left} restant")
+        else:
+            self._progress_text(f"vignettes : {counts}",
+                                f"Préparation des vignettes : {counts}")
         self.progress.show()
 
     def on_backfill_done(self, made: int, kept: int, complete: bool) -> None:
@@ -2118,7 +2537,7 @@ class MainWindow(QMainWindow):
             self._refresh_state()
         if not self.scanning:
             self.progress.hide()
-            self.progress.setFormat("%v / %m analysés")
+            self._progress_text("%v / %m analysés")
         if complete:
             self.cfg["thumbs_last_run"] = datetime.now().strftime("%d/%m/%Y à %H:%M")
             self.cfg.save()
@@ -2227,6 +2646,8 @@ class MainWindow(QMainWindow):
         puis `start_root` refusait le dossier disparu -- et les onglets, ↑ et
         la relecture ne repondaient plus jusqu'a « Changer de racine ».
         """
+        if self._quiet:
+            return False
         previous, state = None, ""
         while self.visited:
             candidate = self.visited.pop()
@@ -2243,7 +2664,6 @@ class MainWindow(QMainWindow):
         if previous["board"] != self.browsing:
             self.browsing = previous["board"]
             self._apply_selectors()
-            self.cfg["view"] = self.view
         # Revenir en arriere n'empile pas l'endroit qu'on quitte.
         self.start_root(previous["root"], previous["mode"], reset_levels=False,
                         restore_id=previous["item_id"], state=state,
@@ -2361,6 +2781,10 @@ class MainWindow(QMainWindow):
     def on_scan_progress(self, done: int, total: int, name: str = "") -> None:
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(done)
+        if not self.progress.isHidden():
+            self._progress_text(
+                f"{self._thousands(done)} / {self._thousands(total)} analysés",
+                f"En cours : {name}" if name else "")
         self._scan_done, self._scan_total, self._scan_name = done, total, name
         self._refresh_scan_button()
         if not self.items:
@@ -2455,40 +2879,11 @@ class MainWindow(QMainWindow):
         """Dit sans ambiguite si une analyse tourne, et ou elle en est.
 
         C'etait la vraie plainte : on ne savait pas distinguer une application
-        lente d'une analyse en cours. Le bouton porte donc l'etat, et le nom du
-        dossier en cours montre que quelque chose avance meme quand le chiffre
-        met du temps a changer.
+        lente d'une analyse en cours. Elle s'ecrivait dans un bouton cache,
+        repoli a chaque dossier lu ; c'est l'activite, a cote du fil
+        d'Ariane, qui le dit maintenant (`_show_activity`).
         """
-        if not hasattr(self, "scan_button"):
-            return
-        harvest_done, harvest_total = getattr(self, "_harvest", (0, 0))
-        if not self.scanning and harvest_total:
-            # L'analyse est finie, les apercus se preparent encore : il faut le
-            # dire, sinon on croit l'application occupee sans savoir a quoi.
-            self.scan_button.setText(f"◷  aperçus {harvest_done} / {harvest_total}")
-            self.scan_button.setProperty("running", "true")
-            self.scan_button.setToolTip(
-                "Les aperçus se fabriquent d'avance, en arrière-plan.\n"
-                "Ils s'effacent dès que vous regardez quelque chose.\n"
-                "Cliquer pour arrêter.")
-        elif not self.scanning:
-            self.scan_button.setText("⟲  Analyser")
-            self.scan_button.setProperty("running", "false")
-            self.scan_button.setToolTip(
-                "Relire le disque et mettre à jour ce qui a changé   (Ctrl+R "
-                "pour tout relire sans se fier aux dates)")
-        else:
-            total = getattr(self, "_scan_total", 0)
-            done = getattr(self, "_scan_done", 0)
-            self.scan_button.setText(f"⟳  {done} / {total}" if total
-                                     else "⟳  Analyse…")
-            self.scan_button.setProperty("running", "true")
-            name = getattr(self, "_scan_name", "")
-            self.scan_button.setToolTip(
-                (f"En cours : {name}\n" if name else "")
-                + "Cliquer pour arrêter l'analyse")
-        self.scan_button.style().unpolish(self.scan_button)
-        self.scan_button.style().polish(self.scan_button)
+        self._show_activity()
 
     def toggle_scan(self) -> None:
         """Le bouton lance l'analyse, ou l'arrête si elle tourne."""
@@ -3009,17 +3404,22 @@ class MainWindow(QMainWindow):
 
     def _mark_current_seen(self) -> None:
         item = self.current
-        if item is not None and not self.browsing and not item.is_tag:
+        if (item is not None and not self.browsing and not item.is_tag
+                and not self._quiet):
             INDEX.mark_seen(item.item_id)
 
     def _burst_next(self) -> None:
         if (self.cfg["burst"] and not self.browsing and self.items
-                and self.index + 1 < len(self.items)):
+                and not self._quiet and self.index + 1 < len(self.items)):
             self.show_item(self.index + 1)
 
     def toggle_burst(self) -> None:
         self.cfg["burst"] = not self.cfg["burst"]
         self.cfg.save_soon()
+        action = self._menu_by_text.get("Rafale : passer tout seul après 8 s")
+        if action is not None:
+            action.setChecked(bool(self.cfg["burst"]))
+        self._show_activity()
         if self.cfg["burst"]:
             self.show_banner("Rafale : la suivante arrive toute seule après 8 s "
                              "sans décision. Une décision, une flèche, et elle "
@@ -3093,66 +3493,213 @@ class MainWindow(QMainWindow):
     def enter_quiet(self) -> None:
         """Tout s'efface, et l'on voit autre chose. Sans rien perdre.
 
-        Les lecteurs se taisent d'abord : une image figee ou un son qui
-        continue trahirait la page en un instant.
+        Les lecteurs se mettent en pause -- une image qui bouge ou un son qui
+        continue trahirait la page --, mais ne s'arretent pas : au retour, la
+        video reprend a l'instant ou on l'a laissee, le lecteur de cote et sa
+        liste sont la, le mur montre les memes panneaux. Rien ne s'affiche
+        par-dessus la page, pas meme la premiere fois : c'est souvent
+        justement parce que quelqu'un arrive qu'on s'en sert.
         """
-        if self.stack.currentIndex() == PAGE_QUIET:
+        if self._quiet or self._closing:
             return
+        # Les menus et les dialogues ouverts d'abord : ils restaient par-dessus
+        # la page neutre, noms de fichiers compris.
+        self._close_overlays()
+        self._quiet = True
         self._quiet_from = self.stack.currentIndex()
+        self._quiet_show = False
         # Ce qui flotte par-dessus la fenetre d'abord, puis la page : elle
-        # doit paraitre tout de suite. Arreter les lecteurs coute cent a cinq
-        # cents millisecondes ; fait avant, c'etait autant de temps ou l'on
-        # voyait encore ce qu'on voulait cacher.
+        # doit paraitre tout de suite.
         self.banner.hide()
+        self.banner_timer.stop()
         self.single_bar.hide()
         self.aside_bar.hide()
         self.single.marks.hide()
         self.radial.close_menu()
-        first = not self.cfg["quiet_explained"]
+        QToolTip.hideText()
+        # Ni « vu » ni rafale en coulisse : une video regardee 0,4 s sortait
+        # des « Non vus » apres cinq secondes de repli, et la rafale relancait
+        # la suivante, avec le son, derriere la page neutre.
+        self._quiet_timers = tuple(timer for timer in (self.seen_timer,
+                                                       self.burst_timer)
+                                   if timer.isActive())
+        for timer in self._quiet_timers:
+            timer.stop()
+        playing = QMediaPlayer.PlaybackState.PlayingState
+        self._quiet_playing = [
+            player for player in
+            [self.single.player, self.aside_player.player]
+            + [pane.player for pane in self.wall.panes]
+            if player.playbackState() == playing]
+        # Le mur en plein ecran : la page neutre n'a pas a l'etre, elle
+        # attirait l'oeil. La fenetre reprend sa taille d'avant le mur.
+        self._quiet_full = self.wall_full
+        if self.wall_full:
+            kept = getattr(self, "_wall_kept", (False, False, None))[2]
+            state = (kept & ~Qt.WindowFullScreen if kept is not None
+                     else Qt.WindowMaximized)
+            self.setWindowState(state)
         self.quiet_page.start()
-        self.stack.setCurrentIndex(PAGE_QUIET)
+        # Caches, les lecteurs se mettent en pause au lieu de s'arreter.
+        for holder in (self.single, self.aside_player, self.wall):
+            holder.hold = True
+        try:
+            self.stack.setCurrentIndex(PAGE_QUIET)
+        finally:
+            for holder in (self.single, self.aside_player, self.wall):
+                holder.hold = False
         self.setWindowTitle(QUIET_TITLE)
+        # L'icone de Prisme restait dans la barre des taches, sous un titre
+        # d'utilitaire d'indexation.
+        self._quiet_icon = (self.windowIcon(),
+                            self.testAttribute(Qt.WA_SetWindowIcon))
+        self.setWindowIcon(self.style().standardIcon(QStyle.SP_DriveHDIcon))
         self.quiet_page.setFocus()
         QTimer.singleShot(0, self._hush_for_quiet)
-        if first:
-            # Une page dont on ne sait plus sortir pieg e au lieu de proteger :
-            # la premiere fois, elle dit comment on la quitte. Une seule fois.
-            self.cfg["quiet_explained"] = True
-            self.cfg.save()
-            QMessageBox.information(
-                self, "Passer à autre chose",
-                "Prisme s'efface derrière une page qui ne dit rien de ce que "
-                "vous faisiez.\n\nPour revenir : Ctrl+K, la touche Échap, "
-                "ou un double-clic n'importe où sur la page.\n\nCe message "
-                "ne reparaîtra plus.")
 
     def _hush_for_quiet(self) -> None:
-        """Les lecteurs se taisent, une fois la page de repli a l'ecran."""
-        if self.stack.currentIndex() != PAGE_QUIET:
+        """Ce qui jouerait encore se tait, une fois la page de repli a l'ecran."""
+        if not self._quiet:
             return
         self._hush_players()
-        self.wall.stop()
-        self.close_aside()
         self.single.peek_end()
-        # `close_aside` rend le clavier a la fenetre : la page le reprend.
+        self.wall.end_peeks()
+        self._wall_peek = None
         self.quiet_page.setFocus()
 
+    def _close_overlays(self) -> None:
+        """Ferme menus et dialogues ouverts, dans le sens prudent (Annuler).
+
+        « Supprimer ce dossier ? » rend Non, une saisie rend « annule », les
+        mots-cles et les destinations ne changent pas. Un dialogue qui refuse
+        de se fermer (une restauration en cours) est laisse tel quel.
+        """
+        for _ in range(8):
+            popup = QApplication.activePopupWidget()
+            if popup is None:
+                break
+            popup.close()
+            if QApplication.activePopupWidget() is popup:
+                break
+        for _ in range(8):
+            modal = QApplication.activeModalWidget()
+            if modal is None or modal is self:
+                break
+            if isinstance(modal, QDialog):
+                modal.reject()
+            else:
+                modal.close()
+            if QApplication.activeModalWidget() is modal:
+                break
+        for widget in QApplication.topLevelWidgets():
+            if (isinstance(widget, QDialog) and widget.isVisible()
+                    and widget is not self):
+                widget.reject()
+        # Plus de dialogue : le filtre de Ctrl+K n'a plus lieu d'etre.
+        self._quiet_keys.follow()
+
+    def quiet_now(self) -> None:
+        """Le repli, d'ou qu'on le demande -- un dialogue, une autre fenetre.
+
+        N'y fait jamais revenir : presse deux fois, il ne doit pas ramener
+        Prisme a l'ecran au moment ou l'on voulait le cacher.
+        """
+        if self._closing:
+            return
+        if self._quiet:
+            self._close_overlays()
+            return
+        self.enter_quiet()
+
+    def _quiet_key(self) -> None:
+        """Ctrl+K, par le raccourci de l'application (menus ouverts compris)."""
+        if QApplication.activePopupWidget() is not None:
+            # Depuis un menu : on se cache, on ne revient pas.
+            return self.quiet_now()
+        self.toggle_quiet()
+
     def leave_quiet(self) -> None:
-        """On revient là où l'on était."""
-        if self.stack.currentIndex() != PAGE_QUIET:
+        """On revient là où l'on était, dans l'état où on l'avait laissé."""
+        if not self._quiet:
             return
         self.quiet_page.stop()
-        self.stack.setCurrentIndex(getattr(self, "_quiet_from", PAGE_SORT))
+        self._quiet = False
+        page = self._quiet_from
+        self.stack.setCurrentIndex(page)
         self.setWindowTitle(APP_NAME)
+        icon_was, own = self._quiet_icon or (QIcon(), False)
+        self.setWindowIcon(icon_was if own else QIcon())
+        if self._quiet_full and self.wall_full:
+            self.showFullScreen()
+            self.activateWindow()
         self.setFocus()
-        if self.tab == TAB_SPLIT:
-            self.show_wall()
+        # Echap ou Ctrl+K maintenus : la repetition ne continue pas ici.
+        self._eat_repeat = True
+        playing, self._quiet_playing = self._quiet_playing, []
+        timers, self._quiet_timers = self._quiet_timers, ()
+        if page == PAGE_SORT:
+            if self._quiet_show:
+                # Une autre fiche a ete demandee pendant le repli (rafale,
+                # fin d'un rangement) : elle s'ouvre maintenant.
+                self._quiet_show = False
+                self.show_item(self.index)
+            else:
+                if self.single.player in playing:
+                    self.single.player.play()
+                # Le delai « vu » et la rafale repartent de zero : la video
+                # n'a pas ete regardee pendant qu'elle etait cachee.
+                for timer in timers:
+                    timer.start()
+            if self.aside_player.player in playing and not self.aside.isHidden():
+                self.aside_player.player.play()
+            if self.tab == TAB_SPLIT and self.viewer.currentWidget() is self.wall:
+                self.wall.resume(playing)
+                if self.wall.pool and any(not pane.video_path
+                                          for pane in self.wall.panes):
+                    self.wall.fill_empty()
+        self._quiet_show = False
+        self._tell_after_quiet()
+
+    def _tell_after_quiet(self) -> None:
+        """Ce qui s'est dit pendant le repli, puis, une fois, comment on en sort."""
+        if any(tone == "error" for _t, tone, _a, _s in self._held_banners):
+            return self._show_held_banners()
+        if not self.cfg["quiet_explained"]:
+            # Au premier retour, et non a la premiere entree : une boite au
+            # milieu de la page neutre annoncait que c'etait un leurre.
+            self.cfg["quiet_explained"] = True
+            self.cfg.save_soon()
+            self._held_banners = []
+            self.show_banner(
+                "C'était le repli : Ctrl+K pour y passer (Ctrl+Alt+K depuis "
+                "une autre fenêtre), et Ctrl+K, Échap ou un double-clic "
+                "n'importe où pour en revenir.", "info", seconds=8, keep=True)
+            return
+        self._show_held_banners()
 
     def toggle_quiet(self) -> None:
-        if self.stack.currentIndex() == PAGE_QUIET:
+        if self._quiet:
             self.leave_quiet()
         else:
             self.enter_quiet()
+
+    def _page(self) -> int:
+        """La page ou l'on est -- pendant le repli, celle qu'on retrouvera."""
+        if self._quiet:
+            return self._quiet_from
+        return self.stack.currentIndex()
+
+    def _goto_page(self, page: int) -> bool:
+        """Change de page, sauf pendant le repli : on note ou revenir.
+
+        Un tri qui finissait derriere la page neutre y posait son bilan, a la
+        place de la page neutre, et Ctrl+K n'y faisait plus rien.
+        """
+        if self._quiet:
+            self._quiet_from = page
+            return False
+        self.stack.setCurrentIndex(page)
+        return True
 
     def toggle_veiled(self) -> None:
         """Montre, ou remasque, les dossiers mis de côté.
@@ -3626,6 +4173,54 @@ class MainWindow(QMainWindow):
     def open_share(self) -> None:
         from .share_dialog import ShareDialog
         ShareDialog(self, self).exec()
+        self._show_share_badge()
+
+    # L'adresse publique : chaque ecriture -- la fenetre, le dialogue du
+    # partage -- met le temoin a jour.
+    @property
+    def tunnel_address(self) -> str:
+        return self.__dict__.get("_tunnel_address", "")
+
+    @tunnel_address.setter
+    def tunnel_address(self, address: str) -> None:
+        self.__dict__["_tunnel_address"] = address or ""
+        self._show_share_badge()
+
+    def _show_share_badge(self) -> None:
+        """Le temoin de l'adresse publique : visible tant qu'elle est ouverte."""
+        badge = self.__dict__.get("share_badge")
+        if badge is None:
+            return
+        address = self.tunnel_address
+        if not address:
+            if not badge.isHidden():
+                badge.hide()
+            return
+        sessions = 0
+        server = self.share_server
+        guard = getattr(server, "guard", None)
+        if guard is not None:
+            now = time.time()
+            try:
+                sessions = sum(1 for until, _label in list(guard.sessions.values())
+                               if until > now)
+            except (RuntimeError, ValueError, TypeError):
+                sessions = 0
+        tip = (f"Adresse publique ouverte : {address}\n"
+               + (f"{sessions} session(s) ouverte(s)\n" if sessions else
+                  "Aucune session ouverte\n")
+               + "Cliquer : Partage à distance…   ·   Clic droit : fermer l'adresse")
+        if badge.toolTip() != tip:
+            badge.setToolTip(tip)
+        if badge.isHidden():
+            badge.show()
+
+    def _share_badge_menu(self, where) -> None:
+        menu = QMenu(self)
+        menu.addAction("Partage à distance…", self.open_share)
+        menu.addAction("Fermer l'adresse publique", self.stop_tunnel)
+        menu.exec(self.share_badge.mapToGlobal(where))
+        menu.deleteLater()
 
     def open_radial(self) -> None:
         """Clic droit : les destinations en rond autour de la souris."""
@@ -3748,6 +4343,12 @@ class MainWindow(QMainWindow):
             return
         mark(f"show_item {index}")
         self.index = max(0, min(index, len(self.items) - 1))
+        if self._quiet:
+            # Rien ne se charge derriere la page neutre : la fiche suivante
+            # (rafale, fin d'un rangement) partait avec le son. Elle s'ouvrira
+            # au retour (`leave_quiet`).
+            self._quiet_show = True
+            return
         item = self.items[self.index]
         # Les comptes se refont plus bas (`_update_page_bar`), une seule fois.
         self._rebuild_commands()
@@ -4229,27 +4830,80 @@ class MainWindow(QMainWindow):
     def _update_page_bar(self) -> None:
         self._show_counts()
 
+    # Combien de temps un echec reste a l'abri d'un message ordinaire.
+    BANNER_GUARD_S = 4.0
+
     def show_banner(self, text: str, tone: str = "info", action=None,
-                    seconds: int = 4) -> None:
+                    seconds: int = 4, keep: bool = False) -> None:
         """Un bandeau, quatre tons : info, quiet, done, error. Rien d'autre.
 
         `action` : ce que fait un clic sur le bandeau (« afficher les
         doublons ») ; il reste alors plus longtemps, le temps d'y aller.
+        `keep` : comme un echec, il ne se laisse pas effacer aussitot.
         """
-        color = BANNER_TONES.get(tone, BANNER_TONES["info"])
+        if self._quiet or self.isMinimized():
+            # Retenu, et montre au retour : un « Échec sur … » dit pendant le
+            # repli ou fenetre reduite etait efface sans avoir ete lu, et l'on
+            # croyait rangee une video qui n'avait pas bouge.
+            self._held_banners.append((text, tone, action, seconds))
+            del self._held_banners[:-12]
+            return
+        now = time.monotonic()
+        if (action is None and tone != "error" and not keep
+                and now < self._banner_guard and self.banner.isVisible()):
+            # Un echec encore frais : le message ordinaire attend son tour au
+            # lieu de l'effacer avant qu'on l'ait lu.
+            self._banner_next = (text, tone, action, seconds)
+            QTimer.singleShot(int((self._banner_guard - now) * 1000) + 20,
+                              self._flush_banner_next)
+            return
+        self._banner_next = None
+        self._banner_guard = (now + self.BANNER_GUARD_S
+                              if tone == "error" or keep else 0.0)
         self._banner_action = action
         self.banner.setCursor(Qt.PointingHandCursor if action is not None
                               else Qt.ArrowCursor)
         self.banner.setText(text)
-        self.banner.setStyleSheet(
-            f"QLabel {{ background: {color}; color: #e9eef4; border-radius: 8px;"
-            " padding: 8px 14px; font-weight: 600; }")
-        if self.stack.currentIndex() == PAGE_QUIET or self.isMinimized():
-            return
+        if tone != self._banner_tone:
+            # Restyler coute : un comptage qui parlait trois fois par seconde
+            # refaisait la feuille de style a chaque fois, pour le meme ton.
+            self._banner_tone = tone
+            color = BANNER_TONES.get(tone, BANNER_TONES["info"])
+            self.banner.setStyleSheet(
+                f"QLabel {{ background: {color}; color: #e9eef4; border-radius: 8px;"
+                " padding: 8px 14px; font-weight: 600; }")
         self._place_banner()
         self.banner.show()
         self.banner.raise_()
         self.banner_timer.start(max(1, int(seconds)) * 1000)
+
+    def _flush_banner_next(self) -> None:
+        """Le message qui attendait la fin d'un echec, maintenant."""
+        following, self._banner_next = self._banner_next, None
+        if following is not None and not self._closing:
+            self._banner_guard = 0.0
+            self.show_banner(*following)
+
+    def _show_held_banners(self) -> None:
+        """Ce qui s'est dit pendant le repli ou fenetre reduite.
+
+        Les echecs d'abord, ensemble, et plus longtemps : c'est ce qu'il ne
+        faut pas manquer. A defaut, le dernier message seulement.
+        """
+        held, self._held_banners = self._held_banners, []
+        if not held:
+            return
+        errors = []
+        for text, tone, _action, _seconds in held:
+            if tone == "error" and text not in errors:
+                errors.append(text)
+        if errors:
+            action = next((a for _t, tone, a, _s in reversed(held)
+                           if tone == "error"), None)
+            self.show_banner("\n".join(errors[-3:]), "error", action, seconds=10)
+            return
+        text, tone, action, seconds = held[-1]
+        self.show_banner(text, tone, action, seconds)
 
     def _place_banner(self) -> None:
         """En haut de la zone d'image, centre : il se lit sans rien pousser."""
@@ -5199,12 +5853,10 @@ class MainWindow(QMainWindow):
                           else self._tab_sorts.get(tab, ""))
         self._tab_sorts[tab] = self.sort_mode
         self.controls.set_sort(self.sort_mode or "random")
-        # Changer de collection ramene aux vignettes.
+        # Changer de collection ramene aux vignettes. L'onglet ne s'ecrit
+        # plus dans les reglages : on demarre toujours sur « Dossiers », et
+        # chaque clic reecrivait le fichier pour rien.
         self.browsing = True
-        self.cfg["tab"] = tab
-        self.cfg["content"] = self.content
-        self.cfg["view"] = self.view
-        self.cfg.save_soon()
         # On ne deplace aucun fichier ici : inutile de relacher les verrous,
         # et surtout d'attendre les ffmpeg en cours. `_release_media` bloquait
         # le fil de l'interface jusqu'a 1,2 s a chaque onglet — c'etait la
@@ -5234,7 +5886,6 @@ class MainWindow(QMainWindow):
         # c est donc « envoyer vers » ; en videos on se promene, et c est
         # « aller dans ». Se tromper de geste deplace des fichiers.
         self.tree.set_action("go" if tab == TAB_VIDEOS else "send")
-        self.cfg["tree_action"] = self.tree.action
 
         top = self.top_root()
         if tab == TAB_SPLIT:
@@ -5281,7 +5932,7 @@ class MainWindow(QMainWindow):
         self.browsing = True
         # Une liste de passage (doublons) s'efface devant celle de l'onglet.
         self._transient = ""
-        self.stack.setCurrentIndex(PAGE_SORT)
+        self._goto_page(PAGE_SORT)
         self._hush_players()
         self._list_leaf = ""
         self.crumbs.set_path(top, top)
@@ -5346,12 +5997,14 @@ class MainWindow(QMainWindow):
         self._own_thread(self.sig_scan, "sig_scan")
         self._sigs_unreadable = 0
         self.sig_scan.progress.connect(
-            lambda done, total: self._refresh_state(
+            lambda done, total: self._task_said(
+                "sig_scan",
                 f"empreintes {self._thousands(done)} / {self._thousands(total)}"))
         # Le recensement dure : il dit ce qu'il trouve en chemin, au lieu de
         # laisser croire que rien ne se passe.
         self.sig_scan.walking.connect(
-            lambda found: self._refresh_state(
+            lambda found: self._task_said(
+                "sig_scan",
                 f"empreintes : recensement {self._thousands(found)} vidéos"))
         self.sig_scan.unreadable.connect(self._sigs_unreadable_count)
         self.sig_scan.done.connect(self._told_sigs)
@@ -5411,7 +6064,8 @@ class MainWindow(QMainWindow):
         self.scene_scan = SceneScan(top, self.cfg["skip_hidden"], self)
         self._own_thread(self.scene_scan, "scene_scan")
         self.scene_scan.progress.connect(
-            lambda done, total: self._refresh_state(
+            lambda done, total: self._task_said(
+                "scene_scan",
                 f"plans {self._thousands(done)} / {self._thousands(total)}"))
         self.scene_scan.done.connect(self._told_scenes)
         self.scene_scan.start()
@@ -5450,7 +6104,8 @@ class MainWindow(QMainWindow):
         self.titles_scan = TitleScan(top, self.cfg["skip_hidden"], self)
         self._own_thread(self.titles_scan, "titles_scan")
         self.titles_scan.progress.connect(
-            lambda done, total: self._refresh_state(
+            lambda done, total: self._task_said(
+                "titles_scan",
                 f"titres {self._thousands(done)} / {self._thousands(total)}"))
         self.titles_scan.done.connect(self._told_titles)
         self.titles_scan.start()
@@ -6015,8 +6670,14 @@ class MainWindow(QMainWindow):
                     WATCH._beat = time.monotonic()
                     WATCH.timer.start()
                 self._wake_watch()
+            if not self.isMinimized() and not self._quiet:
+                # Ce qui s'est dit pendant que la fenetre etait reduite.
+                QTimer.singleShot(0, self._show_held_banners)
         elif event.type() == QEvent.ActivationChange:
             self._wake_watch()
+            # Un dialogue modal prend le clavier : Ctrl+K doit y repondre
+            # aussi, le temps qu'il est ouvert (`_QuietKeys`).
+            self._quiet_keys.follow()
 
     def aside_fullscreen(self) -> None:
         """Donne tout l'ecran a la video ouverte a cote, et sait en revenir.
@@ -6103,6 +6764,11 @@ class MainWindow(QMainWindow):
         self.setFocus()
 
     def eventFilter(self, watched, event):
+        if (watched is getattr(self, "activity_label", None)
+                and event.type() == QEvent.MouseButtonRelease
+                and event.button() == Qt.LeftButton):
+            self._activity_menu()
+            return True
         if (watched is getattr(self, "banner", None)
                 and event.type() == QEvent.MouseButtonRelease):
             action, self._banner_action = self._banner_action, None
@@ -6643,8 +7309,6 @@ class MainWindow(QMainWindow):
                 if not self.tree.root:
                     return
         self.tree.setVisible(show)
-        self.cfg["tree_visible"] = show
-        self.cfg.save()
         self.tree_button.setChecked(show)
         self.setFocus()
 
@@ -6672,8 +7336,7 @@ class MainWindow(QMainWindow):
         self.act_move({"path": path, "label": Path(path).name})
 
     def on_tree_action(self, action: str) -> None:
-        self.cfg["tree_action"] = action
-        self.cfg.save()
+        # Le geste suit l'onglet (`set_tab`) : rien a retenir sur le disque.
         self.setFocus()
 
     def on_tree_root_changed(self, path: str) -> None:
@@ -6939,8 +7602,8 @@ class MainWindow(QMainWindow):
         self.apply_sort()
         self._show_counts()
         self.index = 0
-        if self.stack.currentIndex() == PAGE_DONE:
-            self.stack.setCurrentIndex(PAGE_SORT)
+        if self._page() == PAGE_DONE:
+            self._goto_page(PAGE_SORT)
         if self.browsing:
             self.refresh_board()
         else:
@@ -7046,8 +7709,8 @@ class MainWindow(QMainWindow):
             self.index = found
         else:
             self.index = min(self.index, len(self.items) - 1)
-        if self.stack.currentIndex() == PAGE_DONE:
-            self.stack.setCurrentIndex(PAGE_SORT)
+        if self._page() == PAGE_DONE:
+            self._goto_page(PAGE_SORT)
         if self.browsing:
             self.refresh_board()
         else:
@@ -7702,6 +8365,10 @@ class MainWindow(QMainWindow):
         self.show_item(self.index + 1)
 
     def _advance_when_ready(self) -> None:
+        if self._quiet:
+            # Rien ne se charge derriere la page neutre : on reessaie ensuite.
+            QTimer.singleShot(400, self._advance_when_ready)
+            return
         if self.index + 1 < len(self.items):
             self.show_item(self.index + 1)
         elif self.scanning:
@@ -7723,10 +8390,12 @@ class MainWindow(QMainWindow):
         if self.transfers.busy:
             summary += f"\n\n{self.transfers.active} transfert(s) encore en cours."
         self.done_page.summary.setText(summary)
-        self.stack.setCurrentIndex(PAGE_DONE)
-        # Le clavier reste a la fenetre : Echap ramene aux vignettes, et un
-        # Espace de plus ne declenche aucun bouton.
-        self.setFocus()
+        # Pendant le repli, le bilan attend le retour : il remplacait la page
+        # neutre, sous son titre factice.
+        if self._goto_page(PAGE_DONE):
+            # Le clavier reste a la fenetre : Echap ramene aux vignettes, et
+            # un Espace de plus ne declenche aucun bouton.
+            self.setFocus()
 
     def leave_done(self) -> None:
         """Quitte « Tri terminé » pour les vignettes de la liste, sur la derniere.
@@ -7903,15 +8572,36 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, event):
         key = event.key()
         ctrl = bool(event.modifiers() & Qt.ControlModifier)
+        if self._eat_repeat:
+            # La touche qui a ramene du repli, encore maintenue : Echap
+            # remontait ensuite jusqu'en haut, Ctrl+K rebasculait.
+            if event.isAutoRepeat():
+                return
+            self._eat_repeat = False
+
+        # Avant tout : le repli doit repondre d'ou que l'on vienne -- la page
+        # de fin comprise, qui l'ignorait --, et en sortir de meme. Une touche
+        # maintenue ne bascule qu'une fois : sinon l'etat final tenait du pile
+        # ou face, et le mur se rechargeait a chaque retour.
+        if ctrl and key == Qt.Key_K:
+            if event.isAutoRepeat():
+                return
+            if event.modifiers() & Qt.AltModifier:
+                # Ctrl+Alt+K ne fait que cacher, ici comme ailleurs.
+                return self.quiet_now()
+            self.toggle_quiet()
+            return
+        if self._quiet:
+            # Rien ne traverse la page de repli : Alt+← y faisait reparaitre
+            # les vignettes. Echap en sort, meme si le clavier est revenu a
+            # la fenetre (apres un dialogue ferme par Ctrl+K).
+            if key == Qt.Key_Escape and not event.isAutoRepeat():
+                self.leave_quiet()
+            return
         if event.modifiers() & Qt.AltModifier and key == Qt.Key_Left:
             if not self.go_back() and self.stack.currentIndex() == PAGE_DONE:
                 self.leave_done()
             return
-
-        # Avant tout : le repli doit repondre d'ou que l'on vienne -- la page
-        # de fin comprise, qui l'ignorait --, et en sortir de meme.
-        if ctrl and key == Qt.Key_K:
-            return self.toggle_quiet()
         if self.stack.currentIndex() == PAGE_DONE:
             # Le tri d'un sous-dossier fini, on revient d'ou l'on venait ; a
             # la racine d'un onglet, a ses vignettes. Il n'y avait la aucune
@@ -7920,8 +8610,6 @@ class MainWindow(QMainWindow):
                 if not self.go_up():
                     self.leave_done()
                 return
-            return super().keyPressEvent(event)
-        if self.stack.currentIndex() == PAGE_QUIET:
             return super().keyPressEvent(event)
         if self.stack.currentIndex() != PAGE_SORT:
             return super().keyPressEvent(event)
@@ -8288,6 +8976,9 @@ class MainWindow(QMainWindow):
         return QSize(min(hint.width(), top_w), min(hint.height(), top_h))
 
     def keyReleaseEvent(self, event):
+        if self._eat_repeat and not event.isAutoRepeat():
+            self._eat_repeat = False
+            return
         if event.key() == Qt.Key_Shift and not event.isAutoRepeat():
             self.peek_hide()
             return
@@ -8304,6 +8995,9 @@ class MainWindow(QMainWindow):
         mark("fermeture")
         # Plus rien ne doit repartir : recolte, partage, guet des bandeaux.
         self._closing = True
+        self._quiet_keys.arm(False)
+        if self.global_quiet is not None:
+            self.global_quiet.stop()
         # Ce qui est local et rapide d'abord : reglages et favoris ne doivent
         # jamais dependre d'un NAS qui repond.
         self.cfg["window"] = self._geometry_to_keep()

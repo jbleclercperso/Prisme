@@ -57,6 +57,8 @@ SHORTCUTS = [
         ("Ctrl+R", "réanalyser ce dossier en entier — à la racine, toute la "
                    "collection, après confirmation"),
         ("Ctrl+K", "passer à autre chose — Échap ou un double-clic pour revenir"),
+        ("Ctrl+Alt+K", "la même chose depuis n'importe quelle fenêtre — sans jamais "
+                       "ramener Prisme"),
         ("Chip « Note »", "n'afficher que les éléments notés ainsi — exactement, pas « au moins »"),
         ("Chip « Non vus »", "ne garder que ce qui n'a été ni décidé ni regardé"),
         ("⋯ → Rafale", "la suivante arrive toute seule après 8 s sans décision"),
