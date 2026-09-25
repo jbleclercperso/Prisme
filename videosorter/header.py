@@ -9,12 +9,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtGui import QIntValidator
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtGui import QIntValidator, QPainter
+from PySide6.QtCore import QSize, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QWidgetAction,
     QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QSizePolicy, QStyle, QStyleOptionButton, QStylePainter, QVBoxLayout, QWidget,
 )
 
 from .icons import dress
@@ -77,24 +76,13 @@ QPushButton#lineAction:checked { background: #1d2a40; border-color: #4c8dff; }
 QLabel#counter { color: #9fb0c4; font-size: 13px; }
 QLabel#segmentLabel { color: #6f7885; font-size: 12px; }
 QPushButton#crumb { background: transparent; border: 0; padding: 3px 6px;
-                    color: #9fb0c4; font-size: 14px; }
+                    color: #9fb0c4; font-size: 14px; text-align: left; }
 QPushButton#crumb:hover { color: #ffffff; text-decoration: underline; }
 QPushButton#crumb[last="true"] { color: #ffffff; font-weight: 600; }
 QLabel#crumbSep { color: #4d5563; font-size: 14px; }
 QLabel#crumb { color: #ffffff; font-weight: 600; font-size: 14px; }
 """
 
-
-# Les chiffres de la note, en or, sur une rangee : on voit d'un coup ce qu'on
-# choisit, et celui qui est pris.
-RATING_CHOICE_STYLE = (
-    "QPushButton { background: transparent; border: 1px solid transparent;"
-    " border-radius: 6px; padding: 4px 8px; color: #c9d1db; font-size: 13px; }"
-    "QPushButton[gold=\"true\"] { color: #f5c542; font-size: 15px;"
-    " font-weight: 700; }"
-    "QPushButton:hover { background: #222a35; }"
-    "QPushButton[chosen=\"true\"] { border-color: #4c8dff;"
-    " background: #1d2a40; }")
 
 class Segmented(QWidget):
     """Deux ou trois choix exclusifs, celui en cours restant visiblement allumé."""
@@ -107,9 +95,12 @@ class Segmented(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        caption = QLabel(label, self)
-        caption.setObjectName("segmentLabel")
-        layout.addWidget(caption)
+        # Une legende vide occupait quand meme sa place et son ecart : les
+        # onglets commencaient vingt pixels trop loin du bord.
+        if label:
+            caption = QLabel(label, self)
+            caption.setObjectName("segmentLabel")
+            layout.addWidget(caption)
 
         frame = QFrame(self)
         frame.setObjectName("segment")
@@ -157,7 +148,10 @@ class Chips(QWidget):
             button.clicked.connect(lambda _c=False, k=key: self.chosen.emit(k))
             layout.addWidget(button)
             self.buttons[key] = button
-        layout.addStretch(1)
+        # Ses pastilles, et pas un pixel de plus. Le ressort qui les suivait
+        # rendait l'ensemble extensible : sur la premiere ligne, il disputait
+        # au fil d'Ariane la place qui lui revenait.
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
 
     def set_value(self, key: str) -> None:
         for name, button in self.buttons.items():
@@ -227,8 +221,100 @@ class SortChips(QWidget):
             button.style().polish(button)
 
 
+def _shrink(wants: list, floors: list, budget: int):
+    """Largeurs qui tiennent dans `budget` en rognant les plus longues
+    d'abord, chacune au plus jusqu'a son plancher ; None si meme les
+    planchers ne tiennent pas."""
+    def widths(level: int) -> list:
+        return [min(want, max(floor, level)) for want, floor in zip(wants, floors)]
+
+    if sum(floors) > budget:
+        return None
+    low, high = 0, max(wants, default=0)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if sum(widths(middle)) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    return widths(low)
+
+
+class _Crumb(QPushButton):
+    """Un segment du fil d'Ariane : son nom entier quand la place le permet,
+    rogne au milieu sinon — le debut et la fin d'un nom sont ce qui le
+    distingue. Le texte du bouton reste entier ; seul le dessin l'abrege.
+    """
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("crumb")
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setToolTip(text)
+
+    def natural(self) -> int:
+        """Largeur voulue pour le nom entier, marges comprises."""
+        self.ensurePolished()
+        return QPushButton.sizeHint(self).width()
+
+    def floor(self) -> int:
+        """La plus petite largeur qui dise encore quelque chose : deux
+        lettres et les points de suspension."""
+        metrics = self.fontMetrics()
+        margins = self.natural() - metrics.horizontalAdvance(self.text())
+        return min(self.natural(), margins + metrics.horizontalAdvance("ab…"))
+
+    def paintEvent(self, event):
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        room = self.style().subElementRect(QStyle.SE_PushButtonContents,
+                                           option, self).width()
+        option.text = self.fontMetrics().elidedText(self.text(), Qt.ElideMiddle,
+                                                    max(0, room))
+        painter = QStylePainter(self)
+        painter.drawControl(QStyle.CE_PushButton, option)
+
+
+class _Leaf(QLabel):
+    """Le dernier segment quand il n'est pas un dossier : un mot-cle, une
+    video. Il s'abrege comme les autres, au lieu d'etre coupe net a
+    soixante-dix lettres puis rogne au pixel sans rien en dire."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("crumb")
+        self.setToolTip(text)
+        self.setContentsMargins(6, 0, 4, 0)
+
+    def natural(self) -> int:
+        self.ensurePolished()
+        return QLabel.sizeHint(self).width()
+
+    def floor(self) -> int:
+        metrics = self.fontMetrics()
+        margins = self.natural() - metrics.horizontalAdvance(self.text())
+        return min(self.natural(), margins + metrics.horizontalAdvance("ab…"))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setFont(self.font())
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        room = self.contentsRect()
+        painter.drawText(room, Qt.AlignLeft | Qt.AlignVCenter,
+                         self.fontMetrics().elidedText(self.text(), Qt.ElideMiddle,
+                                                       max(0, room.width())))
+        painter.end()
+
+
 class Breadcrumb(QWidget):
-    """Chemin cliquable depuis la racine ouverte jusqu'au dossier courant."""
+    """Chemin cliquable depuis la racine ouverte jusqu'au dossier courant.
+
+    Quand la place manque, les segments s'abregent, les intermediaires
+    d'abord et les plus longs en premier ; le dernier — ce qu'on regarde —
+    ne cede qu'en dernier. Sur la fiche d'une video, ou tout tient sur une
+    ligne, les boutons comprimes perdaient les deux bouts de leur nom :
+    « root › ssie › clip. », et l'on ne lisait ni la video ni son dossier.
+    """
 
     jumped = Signal(str)
 
@@ -239,6 +325,52 @@ class Breadcrumb(QWidget):
         self.layout_.setSpacing(2)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._top: Path | None = None
+
+    # -- mesure ------------------------------------------------------------
+    def _pieces(self) -> list:
+        return [self.layout_.itemAt(i).widget() for i in range(self.layout_.count())
+                if self.layout_.itemAt(i).widget() is not None]
+
+    def sizeHint(self):
+        """La largeur du chemin entier, quelle que soit l'abreviation en cours :
+        sans quoi abreger reduirait la place demandee, qui ferait abreger
+        davantage."""
+        hint = super().sizeHint()
+        pieces = self._pieces()
+        if not pieces:
+            return hint
+        width = sum(p.natural() if isinstance(p, (_Crumb, _Leaf)) else p.sizeHint().width()
+                    for p in pieces)
+        return QSize(width + self.layout_.spacing() * len(pieces), hint.height())
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit()
+
+    def _fit(self) -> None:
+        """Donne a chaque segment sa largeur : entiere si possible, sinon
+        abregee, a commencer par les plus longs des intermediaires."""
+        pieces = self._pieces()
+        names = [p for p in pieces if isinstance(p, (_Crumb, _Leaf))]
+        if not names:
+            return
+        fixed = sum(p.sizeHint().width() for p in pieces if p not in names)
+        room = self.width() - fixed - self.layout_.spacing() * len(pieces)
+        wants = [name.natural() for name in names]
+        floors = [name.floor() for name in names]
+        widths = list(wants)
+        if sum(wants) > room:
+            head = _shrink(wants[:-1], floors[:-1], room - wants[-1])
+            if head is not None:
+                widths = head + [wants[-1]]
+            else:
+                widths = floors[:-1] + [max(floors[-1], room - sum(floors[:-1]))]
+        for name, width in zip(names, widths):
+            if name.minimumWidth() != width or name.maximumWidth() != width:
+                name.setFixedWidth(width)
 
     def append_leaf(self, text: str) -> None:
         """Ajoute un dernier segment qui ne correspond a aucun dossier.
@@ -259,13 +391,12 @@ class Breadcrumb(QWidget):
             separator = QLabel("›", self)
             separator.setObjectName("crumbSep")
             self.layout_.addWidget(separator)
-            label = QLabel(text if len(text) <= 70 else text[:67] + "…", self)
-            label.setToolTip(text)
-            label.setContentsMargins(6, 0, 4, 0)
-            label.setObjectName("crumb")
+            label = _Leaf(text, self)
             label.setProperty("last", "true")
             self.layout_.addWidget(label)
             self.layout_.addItem(item)
+            self.updateGeometry()
+            self._fit()
 
     def set_path(self, top, current) -> None:
         """Affiche la chaîne de `top` à `current`, chaque segment cliquable."""
@@ -294,15 +425,15 @@ class Breadcrumb(QWidget):
                 separator = QLabel("›", self)
                 separator.setObjectName("crumbSep")
                 self.layout_.addWidget(separator)
-            button = QPushButton(path.name or str(path), self)
-            button.setObjectName("crumb")
+            button = _Crumb(path.name or str(path), self)
             button.setToolTip(str(path))
             button.setCursor(Qt.PointingHandCursor)
-            button.setFocusPolicy(Qt.NoFocus)
             button.setProperty("last", "true" if position == len(chain) - 1 else "false")
             button.clicked.connect(lambda _c=False, p=str(path): self.jumped.emit(p))
             self.layout_.addWidget(button)
         self.layout_.addStretch(1)
+        self.updateGeometry()
+        self._fit()
 
 
 class ControlBar(QWidget):
@@ -324,16 +455,10 @@ class ControlBar(QWidget):
     released = Signal()
     unseenChanged = Signal(bool)
     clearRequested = Signal()
-    starsChanged = Signal(int)       # -1 : toutes ; 0 a 5 : exactement
-
-    RESOLUTIONS = (
-        ("toutes", 0), ("360p", 360), ("480p", 480), ("720p", 720),
-        ("1080p", 1080), ("1440p", 1440), ("4K", 2160),
-    )
-    SORTS = (
-        ("name", "Nom"), ("duration_desc", "Durée ▼"), ("duration_asc", "Durée ▲"),
-        ("stars_desc", "Note ▼"), ("size_desc", "Taille ▼"), ("random", "Au hasard"),
-    )
+    # Les notes de 1 a 5 ont laisse la place a l'etoile des favoris et a leur
+    # onglet : plus rien ne choisit une note ici. Le signal reste declare
+    # parce que la fenetre s'y abonne encore ; il n'est plus jamais emis.
+    starsChanged = Signal(int)
 
     def __init__(self, columns_choices, parent=None):
         super().__init__(parent)
@@ -357,47 +482,10 @@ class ControlBar(QWidget):
         self.sorts.chosen.connect(self.sortChanged)
         row.addWidget(self.sorts)
 
-        # La note : non pas « au moins », mais « exactement ». On cherche
-        # ses cinq etoiles, pas tout ce qui en a au moins quatre. Le choix
-        # tient sur une rangee — tout, 1 a 5 en chiffres d'or, sans note —
-        # et non plus dans une colonne d'etoiles qu'il fallait dechiffrer.
+        # Conserve pour la fenetre, qui le relit encore : -1, aucune note
+        # imposee. Le bouton « ★ Note », son menu et ses sept choix, toujours
+        # caches mais repolis a chaque appel, sont partis.
         self.stars_pick = -1
-        self.rating_pick = QPushButton("★ Note", self)
-        self.rating_pick.setObjectName("sortChip")
-        self.rating_pick.setCursor(Qt.PointingHandCursor)
-        self.rating_pick.setFocusPolicy(Qt.NoFocus)
-        self.rating_pick.setProperty("chosen", "false")
-        self.rating_pick.setToolTip("N'afficher que les éléments de cette note")
-        self.rating_menu = QMenu(self.rating_pick)
-        self.rating_menu.setStyleSheet(
-            "QMenu { background: #151a21; border: 1px solid #2a313b;"
-            " border-radius: 8px; padding: 6px; }")
-        strip = QWidget(self.rating_menu)
-        strip_row = QHBoxLayout(strip)
-        strip_row.setContentsMargins(4, 2, 4, 2)
-        strip_row.setSpacing(4)
-        self.rating_choices: dict = {}
-        for value, text, tip in ([(-1, "Toutes", "Toutes les notes")]
-                                 + [(n, str(n), f"Notés exactement {n}")
-                                    for n in range(1, 6)]
-                                 + [(0, "Sans", "Sans note")]):
-            choice = QPushButton(text, strip)
-            choice.setObjectName("ratingChoice")
-            choice.setCursor(Qt.PointingHandCursor)
-            choice.setFocusPolicy(Qt.NoFocus)
-            choice.setToolTip(tip)
-            choice.setProperty("gold", "true" if value > 0 else "false")
-            choice.setMinimumWidth(34 if value > 0 else 58)
-            choice.setStyleSheet(RATING_CHOICE_STYLE)
-            choice.clicked.connect(
-                lambda _c=False, v=value: self._choose_rating(v))
-            strip_row.addWidget(choice)
-            self.rating_choices[value] = choice
-        action = QWidgetAction(self.rating_menu)
-        action.setDefaultWidget(strip)
-        self.rating_menu.addAction(action)
-        self.rating_pick.setMenu(self.rating_menu)
-        row.addWidget(self.rating_pick)
 
         # Ce qui reste a voir : ni decide, ni deja regarde. Au bout d'une
         # semaine sur cent mille videos, c'est la seule vue qui compte.
@@ -428,15 +516,18 @@ class ControlBar(QWidget):
 
         # Dossiers d'au moins, d'au plus tant de videos. Visible en onglet
         # Dossiers seulement.
+        # Quatre-vingt-quatre pixels : a soixante-huit, une fois les marges du
+        # champ otees, il en restait quarante-six pour un texte qui en
+        # demande cinquante et un, et l'on lisait « ≥ vid… ».
         self.folder_min = QLineEdit(self)
         self.folder_min.setObjectName("bound")
         self.folder_min.setPlaceholderText("≥ vidéos")
-        self.folder_min.setFixedWidth(68)
+        self.folder_min.setFixedWidth(84)
         self.folder_min.setValidator(QIntValidator(0, 999999, self))
         self.folder_max = QLineEdit(self)
         self.folder_max.setObjectName("bound")
         self.folder_max.setPlaceholderText("≤ vidéos")
-        self.folder_max.setFixedWidth(68)
+        self.folder_max.setFixedWidth(84)
         self.folder_max.setValidator(QIntValidator(0, 999999, self))
         for field in (self.folder_min, self.folder_max):
             field.setToolTip("Ne garder que les dossiers qui comptent au moins, "
@@ -504,7 +595,6 @@ class ControlBar(QWidget):
         self.clear.setProperty("chosen", "true")
         self.clear.clicked.connect(self.clearRequested)
         self.clear.hide()
-        row.addWidget(self.clear)
 
         row.addWidget(self.wider)
         row.addWidget(self.columns_label)
@@ -525,6 +615,10 @@ class ControlBar(QWidget):
         row.addWidget(self.previous)
         row.addWidget(self.count)
         row.addWidget(self.next)
+        # Apres la pagination, et non avant la densite : il apparait des
+        # qu'on tape une recherche, et poussait alors le « − n + » de
+        # soixante-sept pixels, sous la souris.
+        row.addWidget(self.clear)
         row.addWidget(self.random_here)
 
         self.timer = QTimer(self)
@@ -562,10 +656,6 @@ class ControlBar(QWidget):
             "que dans « tous formats ».")
         self._mark(button, self.orientation != "all")
 
-    def _choose_rating(self, value: int) -> None:
-        self.rating_menu.close()
-        self.starsChanged.emit(value)
-
     @staticmethod
     def _mark(button, on: bool) -> None:
         button.setProperty("chosen", "true" if on else "false")
@@ -591,18 +681,19 @@ class ControlBar(QWidget):
         """Conserve : c'est `set_mode` qui decide desormais."""
 
     def criteria(self) -> dict:
+        """Ce que les reglages affiches demandent, et rien d'autre.
+
+        Duree, resolution et note y figuraient encore en constantes, sans
+        aucun champ derriere : le filtre les relisait pour chacun des cent
+        mille elements, pour ne jamais rien ecarter. La fenetre les lit avec
+        une valeur par defaut ; leur absence ne change aucun resultat.
+        """
         return {
             "include": self.include.text(),
             "exclude": self.exclude.text(),
             "orientations": self.orientations(),
-            "stars_pick": self.stars_pick,
             "folder_min": int(self.folder_min.text() or 0),
             "folder_max": int(self.folder_max.text() or 0),
-            "duration_op": "",
-            "duration_s": 0.0,
-            "resolution_op": "gte",
-            "resolution": 0,
-            "stars": -1,
         }
 
     def set_terms(self, include: str, exclude: str) -> None:
@@ -615,17 +706,9 @@ class ControlBar(QWidget):
         self.sorts.set_value(mode)
 
     def set_stars(self, pick: int) -> None:
-        """Pose le choix, et le dit sur le bouton."""
+        """Conserve pour les appels de la fenetre : retient la valeur, sans
+        rien afficher ni filtrer — il n'y a plus de note a choisir."""
         self.stars_pick = int(pick)
-        if pick < 0:
-            self.rating_pick.setText("★ Note")
-        elif pick == 0:
-            self.rating_pick.setText("★ Sans note")
-        else:
-            self.rating_pick.setText(f"★ {pick}")
-        self._mark(self.rating_pick, pick >= 0)
-        for value, choice in self.rating_choices.items():
-            self._mark(choice, value == pick)
 
     def set_unseen(self, on: bool) -> None:
         self.unseen.setProperty("chosen", "true" if on else "false")
@@ -691,8 +774,6 @@ class ControlBar(QWidget):
         wall = mode == "wall"
         folders = mode == "folders"
         self.sorts.setVisible(not wall)
-        # Plus de notes de 1 a 5 : l'onglet Favoris remplace ce filtre.
-        self.rating_pick.setVisible(False)
         self.unseen.setVisible(not wall and not folders)
         self.format_button.setVisible(not wall and not folders)
         self.folder_min.setVisible(folders)

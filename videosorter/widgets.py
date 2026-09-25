@@ -1,12 +1,12 @@
 """Composants d'interface : grille d'aperçus, lecteur, barre de commandes, réglages."""
 from __future__ import annotations
 
-import math
+import os
 import time
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QPoint, QPointF, QRect, QSize, QTimer, QUrl, Qt, Signal,
+    QPoint, QPointF, QRect, QSize, QThread, QTimer, QUrl, Qt, Signal,
 )
 from PySide6.QtGui import (
     QColor, QCursor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
@@ -172,6 +172,15 @@ QProgressBar::chunk { background: #2f6fed; border-radius: 2px; }
 
 def elide(text: str, width: int = 34) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _within(path, target) -> bool:
+    """Vrai si `path` est `target` ou se trouve dessous. Sans toucher au disque."""
+    try:
+        Path(path).relative_to(Path(target))
+    except ValueError:
+        return False
+    return True
 
 
 def seek_step(event, seconds: int) -> int:
@@ -377,7 +386,11 @@ class PreviewTile(QFrame):
 
     def show_duration(self) -> None:
         """Rétablit la durée totale dans la pastille."""
-        if self.duration:
+        # Sur la pellicule, chaque case est un instant de la meme video : sa
+        # duree, en gros et en gras sur les cinq images, ecrasait l'instant,
+        # seule chose qui les distingue. La regle est tenue ici, et non par un
+        # hide() a la construction, que le premier plan recu defaisait.
+        if self.duration and not self.strip_mode:
             self.duration_chip.setText(human_duration(self.duration))
             self.duration_chip.show()
             self._place_chip()
@@ -507,6 +520,20 @@ class PreviewGrid(QWidget):
         self.hover_timer.timeout.connect(self._poll_hover)
         self.setMouseTracking(True)
 
+        # Un autre fichier ne s'ouvre qu'une fois la souris posee sur sa case.
+        # Changer de source fige l'interface le temps de demonter la
+        # precedente (60 a 700 ms selon la machine), et chaque case traversee
+        # ouvrait en plus son fichier sur le partage : balayer la grille
+        # saccadait a chaque case. La case s'allume tout de suite ; seule la
+        # lecture attend. Un autre instant du meme fichier, lui, ne coute
+        # qu'un saut et part aussitot.
+        self.settle_timer = QTimer(self)
+        self.settle_timer.setSingleShot(True)
+        self.settle_timer.setInterval(self.SETTLE_MS)
+        self.settle_timer.timeout.connect(self._settled)
+
+    SETTLE_MS = 120
+
     # -- cycle de vie ----------------------------------------------------
     def showEvent(self, event):
         super().showEvent(event)
@@ -602,8 +629,21 @@ class PreviewGrid(QWidget):
         if slot == -1:
             self._leave()
             return
-        self.tiles[slot].set_hovered(True)
-        self._play_slot(slot)
+        tile = self.tiles[slot]
+        tile.set_hovered(True)
+        if tile.video and self.player.source() != QUrl.fromLocalFile(tile.video):
+            # L'extrait quitte ne se lit plus pour personne : il n'a pas a
+            # continuer de tirer sur le partage pendant l'attente.
+            self.player.pause()
+            self.settle_timer.start()
+        else:
+            self.settle_timer.stop()
+            self._play_slot(slot)
+
+    def _settled(self) -> None:
+        """La souris est restee sur la case : on ouvre son fichier."""
+        if 0 <= self.hovered_slot < len(self.tiles):
+            self._play_slot(self.hovered_slot)
 
     def _leave(self) -> None:
         self.hovered_slot = -1
@@ -722,6 +762,7 @@ class PreviewGrid(QWidget):
         event.accept()
 
     def stop(self) -> None:
+        self.settle_timer.stop()
         self.player.stop()
         self._blank()
         self.marks.clear()
@@ -1154,7 +1195,10 @@ class OverBar(QWidget):
         if name:
             dress(button, name, 20)
         button.setCursor(Qt.PointingHandCursor)
-        button.clicked.connect(slot)
+        # Le geste s'appelle sans argument. PySide passe sinon l'etat coche du
+        # bouton (False) a tout slot qui accepte un parametre : toggle_cinema
+        # le prenait pour « sortir du cinema », et le ⛶ ne faisait rien.
+        button.clicked.connect(lambda _checked=False, s=slot: s())
         self.buttons.addWidget(button)
 
     def set_name(self, text: str) -> None:
@@ -1316,6 +1360,13 @@ class _Deck:
         self.video = QVideoWidget(area)
         self.video.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.video.hide()
+        # Chaque lecteur garde sa sortie son, branchee une fois pour toutes.
+        # Une sortie unique passee de l'un a l'autre a l'echange semblait plus
+        # econome ; mesure faite, c'est l'inverse : debrancher le son d'un
+        # lecteur lui fait payer cent a cent cinquante millisecondes de
+        # demontage sur le fil de l'interface, a chaque video suivante. Un
+        # lecteur qui garde son son se vide, lui, le plus souvent en une
+        # quinzaine.
         self.audio = QAudioOutput(area)
         self.player = QMediaPlayer(area)
         self.player.setVideoOutput(self.video)
@@ -1340,6 +1391,10 @@ class SinglePlayer(QWidget):
     finished = Signal()
     radialRequested = Signal()   # clic droit sur l'image : les destinations en rond
     progressed = Signal(int, int)   # position, duree : pour le bandeau de survol
+    # Double-clic sur l'image : le cinema, comme dans tous les lecteurs. Le
+    # premier clic a deja mis en pause, sans attendre de savoir s'il en
+    # viendrait un second ; le double-clic defait cette pause.
+    cinemaRequested = Signal()
 
     # Cinq reperes suffisent a se reperer dans une video : un cinquieme, deux
     # cinquiemes, et ainsi de suite. Dix prenaient deux fois plus de place pour
@@ -1387,10 +1442,14 @@ class SinglePlayer(QWidget):
             deck.video.mousePressEvent = self._scrub_press
             deck.video.mouseMoveEvent = self._scrub_move
             deck.video.mouseReleaseEvent = self._scrub_release
+            deck.video.mouseDoubleClickEvent = self._double_click
         self._scrub_x0 = None
         self._scrub_pos0 = 0
         self._scrubbing = False
         self._zoomed_while_held = False
+        # Le dernier relachement a-t-il bascule la pause ? Un double-clic la
+        # rebascule, pour que ses deux clics se compensent.
+        self._click_paused = False
         layout.addWidget(self.video_area, 1)
 
         self.zoom = 1.0
@@ -1414,8 +1473,8 @@ class SinglePlayer(QWidget):
         self.tiles: list = []
         for slot in range(self.count):
             tile = PreviewTile(slot, strip)
+            # Sans pastille de duree : `show_duration` le sait.
             tile.strip_mode = True
-            tile.duration_chip.hide()
             # Cinq cases a quatre-vingt-six points imposaient quatre cent
             # trente points de hauteur a la fiche entiere : sur un ecran
             # agrandi, la derniere rangee passait sous le bord. Elles gardent
@@ -1544,14 +1603,58 @@ class SinglePlayer(QWidget):
         was_click = not self._scrubbing and not self._zoomed_while_held
         self._scrub_x0 = None
         self._scrubbing = False
+        self._click_paused = was_click
         if was_click:
-            # Un clic sans glisser : pause ou reprise, comme sur le mur.
+            # Un clic sans glisser : pause ou reprise, comme sur le mur. Tout
+            # de suite : attendre de savoir si un second clic suit ferait
+            # payer a chaque pause le delai du double-clic.
             self.toggle_pause()
         event.accept()
 
-    def release(self) -> None:
-        """Lache les deux fichiers : avant de deplacer ou supprimer."""
+    def _double_click(self, event) -> None:
+        """Double-clic sur l'image : le cinema, sans a-coup dans la lecture.
+
+        Qt livre appui, relachement, double-clic, relachement. Le premier
+        relachement a bascule la pause ; on la rebascule ici, et le second
+        relachement ne fait rien puisqu'aucun appui ne l'a arme. Le
+        double-clic par defaut rappelait l'appui : la video s'arretait puis
+        repartait, sans rien produire d'autre.
+        """
+        if event.button() != Qt.LeftButton:
+            # Le clic droit garde son effet, double ou non : les destinations.
+            return self.mousePressEvent(event)
+        if self.peeking:
+            event.accept()
+            return
+        if self._click_paused:
+            self.toggle_pause()
+        self._click_paused = False
+        self._scrub_x0 = None
+        self._scrubbing = False
+        event.accept()
+        self.cinemaRequested.emit()
+
+    def mouseDoubleClickEvent(self, event):
+        # Seule l'image mene au cinema : un double-clic sur la pellicule
+        # n'est qu'un clic de trop sur une case.
+        local = self.video_area.mapFrom(self, event.position().toPoint())
+        if self.video_area.rect().contains(local):
+            return self._double_click(event)
+        super().mouseDoubleClickEvent(event)
+
+    def release(self, target=None) -> None:
+        """Lache les fichiers : avant de deplacer ou supprimer.
+
+        Sans `target`, les deux. Avec, la reserve garde la video suivante
+        tant qu'elle n'est pas celle qu'on deplace, ni dans le dossier qu'on
+        deplace : apres un tri, la suivante s'affiche alors par simple
+        echange, sans noir ni rechargement sur le partage.
+        """
+        spare = self.spare
         for deck in self.decks:
+            if (target is not None and deck is spare and spare.path
+                    and not _within(spare.path, target)):
+                continue
             deck.clear()
 
     def showEvent(self, event):
@@ -1579,9 +1682,11 @@ class SinglePlayer(QWidget):
         spare = self.spare
         if spare.path == path:
             # La suivante etait deja prete : on echange, sans rien attendre.
+            # Elle part d'abord, l'ancienne n'est videe qu'ensuite : son
+            # demontage ne retarde plus le depart de la suivante, dont le
+            # decodage avance pendant ce temps.
             old = self.decks[self._active]
             self._active = 1 - self._active
-            old.clear()
             self.blackout_timer.stop()
             self._blackout = False
             self.reset_zoom()
@@ -1593,6 +1698,7 @@ class SinglePlayer(QWidget):
                 self._awaiting_frame = True
             spare.player.setPosition(0)
             spare.player.play()
+            old.clear()
             return
         self.reset_zoom()
         deck = self.decks[self._active]
@@ -1814,10 +1920,15 @@ class SinglePlayer(QWidget):
             self.player.play()
 
     def stop(self) -> None:
+        # Seul le lecteur qui joue s'arrete. La reserve reste en pause sur la
+        # premiere image de la suivante : la vider coutait souvent cent a
+        # trois cents millisecondes sur le fil de l'interface, et c'etait le
+        # prix d'Echap, d'un changement d'onglet ou du repli. Si l'on revient
+        # a la suivante, elle est prete ; sinon, son remplacement se fait au
+        # prochain prechargement, pendant le noir d'une ouverture. Elle ne
+        # verrouille rien de genant : `release` la lache avant toute
+        # operation sur le disque.
         self.player.stop()
-        # Une reserve qui continue de tenir un fichier pendant qu'on fait
-        # autre chose n'a plus de sens ; on la lache.
-        self.spare.clear()
 
 
 class TagsDialog(QDialog):
@@ -1830,14 +1941,17 @@ class TagsDialog(QDialog):
 
     def __init__(self, tags: list, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Mots-cles automatiques")
+        self.setWindowTitle("Mots-clés automatiques")
         self.resize(560, 460)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
+        # Repliee : sur une seule ligne, la phrase imposait sa longueur a la
+        # fenetre, qui passait de 560 a plus de 1 000 pixels.
+        self.intro = QLabel(
             "Un mot ou une expression par ligne. Chaque ligne devient un dossier "
-            "virtuel reunissant les videos dont le nom la comporte, ou qu'elle "
-            "soit rangee. La casse et les accents sont ignores."
-        ))
+            "virtuel réunissant les vidéos dont le nom la comporte, où qu'elle "
+            "soit rangée. La casse et les accents sont ignorés.", self)
+        self.intro.setWordWrap(True)
+        layout.addWidget(self.intro)
         self.editor = QPlainTextEdit(self)
         self.editor.setPlaceholderText("plage\nmontagne\nsaison 2")
         self.editor.setPlainText("\n".join(tags))
@@ -1857,6 +1971,31 @@ class TagsDialog(QDialog):
             if term and term.lower() not in [t.lower() for t in seen]:
                 seen.append(term)
         return seen
+
+
+class _Restorer(QThread):
+    """Remet des elements de la corbeille de session en place, hors de
+    l'interface. Rend la liste des echecs, une fois tout tente."""
+
+    done = Signal(list)
+
+    def __init__(self, trash, entries: list, parent=None):
+        super().__init__(parent)
+        self.trash = trash
+        self.entries = list(entries)
+
+    def run(self) -> None:
+        failures = []
+        for entry in self.entries:
+            try:
+                self.trash.restore(entry)
+            except ActionError as exc:
+                failures.append(str(exc))
+            except (OSError, ValueError) as exc:
+                # Un dossier d'origine qu'on ne peut plus recreer, un element
+                # deja retire par ailleurs : on le dit, on passe au suivant.
+                failures.append(f"{entry.name} : {exc}")
+        self.done.emit(failures)
 
 
 class TrashDialog(QDialog):
@@ -1896,12 +2035,16 @@ class TrashDialog(QDialog):
         buttons.addWidget(restore_all)
         buttons.addStretch(1)
         layout.addLayout(buttons)
+        self.actions_ = (restore, restore_all)
 
         box = QDialogButtonBox(QDialogButtonBox.Close, self)
         box.button(QDialogButtonBox.Close).setText("Fermer")
         box.rejected.connect(self.accept)
         layout.addWidget(box)
 
+        # La restauration en cours, et une fermeture demandee pendant ce temps.
+        self.worker: _Restorer | None = None
+        self._close_when_done = False
         self.refresh()
 
     def refresh(self) -> None:
@@ -1923,17 +2066,47 @@ class TrashDialog(QDialog):
         )
 
     def _restore(self, entries: list) -> None:
-        failures = []
-        for entry in entries:
-            try:
-                self.trash.restore(entry)
-            except ActionError as exc:
-                failures.append(str(exc))
+        """Remet les elements en place dans un fil a part.
+
+        Chacun coute quatre ou cinq allers-retours avec le partage (existe-t-il,
+        creer le dossier, renommer) : cinquante elements figeaient la fenetre
+        plusieurs secondes. La boite reste vivante et dit ou elle en est ;
+        elle ne se ferme qu'une fois le travail fini, pour que la fenetre
+        principale relise un etat complet.
+        """
+        if self.worker is not None or not entries:
+            return
+        for button in self.actions_:
+            button.setEnabled(False)
+        self.summary.setText(f"Restauration de {len(entries)} élément(s)…")
+        self.worker = _Restorer(self.trash, entries, self)
+        self.worker.done.connect(self._restored)
+        self.worker.start()
+
+    @property
+    def busy(self) -> bool:
+        return self.worker is not None and self.worker.isRunning()
+
+    def _restored(self, failures: list) -> None:
+        self.worker.wait()
+        self.worker = None
+        for button in self.actions_:
+            button.setEnabled(True)
         self.refresh()
         if failures:
             QMessageBox.warning(
                 self, "Restauration incomplète", "\n".join(failures[:6])
             )
+        if self._close_when_done:
+            self._close_when_done = False
+            self.accept()
+
+    def done(self, result) -> None:
+        # Fermer pendant la restauration : on attend qu'elle finisse.
+        if self.worker is not None:
+            self._close_when_done = True
+            return
+        super().done(result)
 
     def restore_selected(self) -> None:
         entries = [row.data(0, Qt.UserRole) for row in self.tree.selectedItems()]
@@ -1955,7 +2128,7 @@ class FavoriteStar(QPushButton):
     """Une etoile : vide, ou doree quand l'element est en favori.
 
     Elle remplace les cinq etoiles de la note : on ne classait pas de 1 a 5,
-    on voulait seulement retrouver ce qu'on aime. Meme interface que
+    on voulait seulement retrouver ce qu'on aime. Elle garde l'interface de
     l'ancienne bande (`rated`, `value`, `set_value`) : 1 pour favori, 0 sinon.
     """
 
@@ -1981,81 +2154,16 @@ class FavoriteStar(QPushButton):
                         else "Mettre en favori   (touche 1)")
 
 
-class StarStrip(QWidget):
-    """Cinq étoiles cliquables : survoler montre la note, cliquer la pose.
-
-    Rappuyer sur l'étoile déjà atteinte efface la note, ce qui évite un bouton
-    « remettre à zéro » de plus.
-    """
-
-    rated = Signal(int)
-
-    def __init__(self, size: int = 20, parent=None):
-        super().__init__(parent)
-        self.star_size = size
-        self.value = 0
-        self.preview = -1
-        self.setMouseTracking(True)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(size * 5 + 8, size + 4)
-        self.setToolTip("Noter de 1 à 5 étoiles   (touches 1 à 5, 0 pour effacer)")
-
-    def set_value(self, value: int) -> None:
-        self.value = max(0, min(5, int(value)))
-        self.update()
-
-    def _index_at(self, x: int) -> int:
-        return max(0, min(4, (x - 4) // self.star_size))
-
-    def mouseMoveEvent(self, event):
-        self.preview = self._index_at(event.position().toPoint().x())
-        self.update()
-
-    def leaveEvent(self, event):
-        self.preview = -1
-        self.update()
-        super().leaveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.rated.emit(self._index_at(event.position().toPoint().x()) + 1)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        shown = (self.preview + 1) if self.preview >= 0 else self.value
-        drawn = self.value if not self.isEnabled() else 5
-        for index in range(drawn):
-            filled = index < shown
-            if self.preview >= 0 and index < shown:
-                colour = QColor("#ffd479")
-            elif filled:
-                colour = QColor("#e0a53d")
-            else:
-                colour = QColor("#3a4150")
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(colour)
-            painter.drawPolygon(self._star(index))
-        painter.end()
-
-    def _star(self, index: int) -> QPolygonF:
-        size = self.star_size
-        cx = 4 + index * size + size / 2
-        cy = self.height() / 2
-        radius = size * 0.42
-        points = []
-        for step in range(10):
-            angle = math.pi / 2 + step * math.pi / 5
-            length = radius if step % 2 == 0 else radius * 0.45
-            points.append(QPointF(cx + length * math.cos(angle),
-                                  cy - length * math.sin(angle)))
-        return QPolygonF(points)
-
-
 class KeyCap(QFrame):
     """Un raccourci et son effet — utilisable au clavier comme à la souris."""
 
     clicked = Signal()
+
+    # Un simple garde-fou contre un libelle demesure. La vraie limite est la
+    # largeur de la ligne : c'est la barre qui rogne, a la mesure de la place.
+    # Un plafond fixe de dix-huit lettres coupait « Supprimer définit… » meme
+    # avec mille pixels libres.
+    LONGEST = 60
 
     def __init__(self, key: str, label: str, tone: str = "", parent=None):
         super().__init__(parent)
@@ -2067,7 +2175,8 @@ class KeyCap(QFrame):
         layout.setSpacing(8)
         key_label = QLabel(key, self)
         key_label.setObjectName("keyLetter")
-        text = QLabel(elide(label, 18), self)
+        self.full = elide(label, self.LONGEST)
+        text = QLabel(self.full, self)
         text.setObjectName("keyLabel")
         layout.addWidget(key_label)
         layout.addWidget(text)
@@ -2086,6 +2195,17 @@ class KeyCap(QFrame):
         place, on resserre plutot que d'ouvrir une deuxieme rangee."""
         self.text.setVisible(not on)
         self._layout.setContentsMargins(*((8, 4, 8, 4) if on else (9, 4, 11, 4)))
+
+    def label_width(self) -> int:
+        """Largeur du libelle entier, en pixels."""
+        return self.text.fontMetrics().horizontalAdvance(self.full)
+
+    def set_room(self, width: int | None) -> None:
+        """Le libelle entier (None), ou rogne pour tenir en `width` pixels."""
+        shown = self.full if width is None else self.text.fontMetrics().elidedText(
+            self.full, Qt.ElideRight, max(0, int(width)))
+        if self.text.text() != shown:
+            self.text.setText(shown)
 
     def mouseReleaseEvent(self, event):
         # Relâcher en dehors annule le clic, comme sur un vrai bouton.
@@ -2146,22 +2266,42 @@ class FlowLayout(QLayout):
                             margins.top() + margins.bottom())
 
     def _arrange(self, rect, apply: bool) -> int:
+        """Deux passes : former les rangees, puis y centrer chaque element.
+
+        Un element cache ne compte plus : il ajoutait quand meme son ecart, et
+        la ligne des filtres avait des trous de vingt a quarante pixels selon
+        l'onglet. Et chaque element est centre sur la hauteur de sa rangee,
+        au lieu d'etre colle en haut, ou des hauteurs de 17 a 31 pixels
+        donnaient une ligne en escalier.
+        """
         margins = self.contentsMargins()
         left = rect.x() + margins.left()
         right = rect.right() - margins.right()
-        x, y = left, rect.y() + margins.top()
-        line_height = 0
+        rows, row, x = [], [], left
         for item in self._items:
+            if item.isEmpty():
+                continue
             hint = item.sizeHint()
-            if x > left and x + hint.width() > right:
-                x = left
-                y += line_height + self.spacing()
-                line_height = 0
-            if apply:
-                item.setGeometry(QRect(QPoint(x, y), hint))
+            if row and x + hint.width() > right:
+                rows.append(row)
+                row, x = [], left
+            row.append((item, hint))
             x += hint.width() + self.spacing()
-            line_height = max(line_height, hint.height())
-        return y + line_height + margins.bottom() - rect.y()
+        if row:
+            rows.append(row)
+        y = rect.y() + margins.top()
+        for index, row in enumerate(rows):
+            if index:
+                y += self.spacing()
+            height = max(hint.height() for _item, hint in row)
+            if apply:
+                x = left
+                for item, hint in row:
+                    item.setGeometry(QRect(QPoint(x, y + (height - hint.height()) // 2),
+                                           hint))
+                    x += hint.width() + self.spacing()
+            y += height
+        return y + margins.bottom() - rect.y()
 
 
 class CommandBar(QWidget):
@@ -2221,17 +2361,37 @@ class CommandBar(QWidget):
                 if self.layout_.itemAt(i).widget() is not None]
 
     def _fit(self) -> None:
-        """Resserre les vignettes si la ligne deborde, les rouvre sinon."""
+        """Les libelles entiers si la ligne le permet. Sinon, les plus longs
+        se rognent d'abord, a la mesure de la place qui manque ; la touche
+        seule ne vient qu'en dernier recours, quand meme trois lettres ne
+        tiendraient plus. C'etait tout ou rien : des libelles entiers
+        auraient fait passer toute la ligne aux touches seules bien plus tot."""
         caps = self.caps()
         if not caps:
             return
         for cap in caps:
+            cap.ensurePolished()
             cap.set_compact(False)
+            cap.set_room(None)
         spacing = self.layout_.spacing()
-        wanted = sum(cap.sizeHint().width() + spacing for cap in caps)
-        self.compact = wanted > max(1, self.width())
-        for cap in caps:
-            cap.set_compact(self.compact)
+        room = max(1, self.width())
+        hints = [cap.sizeHint().width() + spacing for cap in caps]
+        self.compact = False
+        if sum(hints) <= room:
+            return
+        labels = [cap.label_width() for cap in caps]
+        # Ce que les vignettes occupent hors libelle : touche, marges, ecarts ;
+        # un pixel de marge chacune pour les arrondis de mesure.
+        frame = sum(hint - label for hint, label in zip(hints, labels)) + len(caps)
+        floor = caps[0].text.fontMetrics().horizontalAdvance("Abc…")
+        level = _water_level(labels, room - frame, floor)
+        if level is None:
+            self.compact = True
+            for cap in caps:
+                cap.set_compact(True)
+            return
+        for cap, label in zip(caps, labels):
+            cap.set_room(level if label > level else None)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2239,6 +2399,28 @@ class CommandBar(QWidget):
 
     def minimumSizeHint(self):
         return QSize(0, super().minimumSizeHint().height())
+
+
+def _water_level(widths: list, budget: int, floor: int):
+    """Le plus haut plafond (au moins `floor`) qui fait tenir `widths` dans
+    `budget` une fois chacune ramenee a ce plafond ; None s'il n'y en a pas.
+
+    Seules les plus longues sont rognees, et toutes a la meme longueur : un
+    nom court reste entier tant qu'un long peut ceder.
+    """
+    def used(level: int) -> int:
+        return sum(min(width, level) for width in widths)
+
+    if not widths or used(floor) > budget:
+        return None
+    low, high = floor, max(max(widths), floor)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if used(middle) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    return low
 
 
 def pick_folders(parent, caption: str, start: str = "") -> list:
@@ -2275,11 +2457,14 @@ class DestinationsDialog(QDialog):
         self.resize(820, 480)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
+        # Repliee, comme celle des mots-cles : la phrase d'une traite
+        # elargissait la fenetre au-dela de ses 820 pixels.
+        self.intro = QLabel(
             "Chaque destination est déclenchée par sa touche pendant le tri. "
             "Double-cliquez une cellule pour la modifier, et glissez une ligne "
-            "par sa poignée pour changer l'ordre des boutons."
-        ))
+            "par sa poignée pour changer l'ordre des boutons.", self)
+        self.intro.setWordWrap(True)
+        layout.addWidget(self.intro)
 
         self.tree = QTreeWidget(self)
         self.tree.setObjectName("destTree")
@@ -2405,18 +2590,30 @@ class DestinationsDialog(QDialog):
         parent = QFileDialog.getExistingDirectory(
             self, "Dossier contenant les destinations"
         )
-        if not parent:
-            return
-        children = sorted(
-            (p for p in Path(parent).iterdir() if p.is_dir()),
-            key=lambda p: p.name.lower(),
-        )
+        if parent:
+            self._add_children(parent)
+
+    def _add_children(self, parent: str) -> int:
+        """Ajoute chaque sous-dossier de `parent` ; rend le nombre ajoute."""
+        # Une seule lecture du dossier : scandir rapporte deja la nature de
+        # chaque entree, la ou is_dir() interrogeait le partage une fois par
+        # sous-dossier — trois cents allers-retours pour trois cents
+        # destinations, la fenetre figee pendant ce temps.
+        try:
+            with os.scandir(parent) as entries:
+                children = sorted(
+                    (Path(entry.path) for entry in entries if entry.is_dir()),
+                    key=lambda p: p.name.lower(),
+                )
+        except OSError as exc:
+            QMessageBox.warning(self, "Dossier illisible", str(exc))
+            return 0
         if not children:
             QMessageBox.information(
                 self, "Rien à ajouter", "Ce dossier ne contient aucun sous-dossier."
             )
-            return
-        self._add_paths(children)
+            return 0
+        return self._add_paths(children)
 
     def remove_selected(self) -> None:
         for item in self.tree.selectedItems():
