@@ -43,6 +43,14 @@ class Transfer:
     result: Path | None = None
     reversible: bool = False
     error: str = ""
+    # Abouti, mais avec une reserve a dire (source pas entierement videe).
+    warning: str = ""
+    # Pour un dossier ecarte : combien d'autres fichiers que des videos on y a
+    # trouves en le recomptant apres coup (-1 : pas recompte). La garde de
+    # suppression se fiait aux comptes de l'index, qui ignorent ce qui a
+    # change plus bas ; c'est ici, avant que la perte ne devienne definitive
+    # a la fermeture, qu'on peut encore le dire.
+    others: int = -1
 
     @property
     def name(self) -> str:
@@ -69,21 +77,60 @@ class _Runner(QRunnable):
                     attempts=RETRY_ATTEMPTS, delay=RETRY_DELAY,
                 )
                 job.reversible = True
+                if job.purpose == "delete":
+                    _count_others(job)
             elif job.kind == "delete":
                 job.result, job.reversible = actions.retry(
                     actions.delete, job.src, job.mode,
                     attempts=RETRY_ATTEMPTS, delay=RETRY_DELAY,
                 )
             else:
-                actions.retry(
+                # L'endroit reel ou l'element est revenu : a cote de sa place
+                # d'origine si elle a ete reprise entre-temps.
+                job.result = actions.retry(
                     actions.undo, job.entry,
                     attempts=RETRY_ATTEMPTS, delay=RETRY_DELAY,
                 )
             job.state = "done"
+        except actions.PartialMove as exc:
+            # Tout est arrive ; seule la source n'a pas pu etre videe. Refaire
+            # la copie aurait cree « (2) » : c'est fait, avec une reserve.
+            job.result = exc.target
+            job.reversible = True
+            job.state = "done"
+            job.warning = str(exc)
         except ActionError as exc:
             job.state = "failed"
             job.error = str(exc)
-        self.signals.done.emit(job)
+        except Exception as exc:                        # noqa: BLE001
+            # Toute autre erreur echoue proprement. Autrefois elle traversait,
+            # « done » n'etait jamais emis : la file restait « en cours » a
+            # vie, Ctrl+Z refuse, et la fenetre ne pouvait plus se fermer.
+            job.state = "failed"
+            job.error = f"{type(exc).__name__} : {actions.describe(exc)}"
+        finally:
+            try:
+                self.signals.done.emit(job)
+            except RuntimeError:
+                pass            # l'application se ferme : plus personne n'ecoute
+
+
+def _count_others(job: Transfer) -> None:
+    """Recompte un dossier qu'on vient d'ecarter : documents, images, programmes.
+
+    Le deplacement est deja fait (un renommage, instantane) : on regarde apres
+    coup, en tache de fond, ce qu'il emportait vraiment. Rien n'est encore
+    detruit -- la fenetre peut le dire tant qu'un Ctrl+Z suffit.
+    """
+    try:
+        if job.result is None or not Path(job.result).is_dir():
+            return
+        from .scan import scan_folder
+        found = scan_folder(Path(job.result))
+    except OSError:
+        return
+    if not found.unreadable:
+        job.others = max(0, found.file_count - found.video_count)
 
 
 class TransferQueue(QObject):
