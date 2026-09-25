@@ -1290,7 +1290,7 @@ def _row_builder():
     redecoupe et recompose chaque chemin. Ceux de l'index sont deja sous leur
     forme definitive ; `fast_path` les prend tels quels.
     """
-    from .scan import MODE_FILES, Item, fast_path
+    from .scan import INCOMPLETE_SIG, MODE_FILES, Item, fast_path
     seps = ("\\", "/")
 
     def video_path(head: str, name: str):
@@ -1312,6 +1312,10 @@ def _row_builder():
             video_count=video_count, subdir_count=subdir_count, mtime=mtime,
             videos=[video_path(head, name) for name in videos.split("\n") if name],
             loose_only=bool(loose),
+            # Lu en partie au dernier passage : ses comptes sont trop bas, et
+            # la garde de suppression doit le savoir des le lancement suivant,
+            # avant que la relecture ne revienne a lui.
+            incomplete=(_sig == INCOMPLETE_SIG),
         )
 
     return build

@@ -79,6 +79,14 @@ class TrashEntry:
     # Retrouvé d'une séance précédente sans registre : l'origine est devinée
     # (la racine), à confirmer avant de restaurer.
     guessed: bool = False
+    # Autre chose que des vidéos dedans : leur nombre, ou -2 pour un dossier
+    # relu en partie. Ctrl+B les montre en tête.
+    others: int = 0
+    # Laissé par une séance interrompue : il n'est détruit à la fermeture
+    # qu'une fois vu dans Ctrl+B (`seen`). Repris d'office, il partait à la
+    # première fermeture sans qu'on l'ait jamais vu -- l'incident « Drop ».
+    adopted: bool = False
+    seen: bool = False
 
     @property
     def name(self) -> str:
@@ -182,8 +190,10 @@ class SessionTrash(QObject):
         return self._hold(folder)
 
     # -- registre ---------------------------------------------------------
-    def record(self, origin: Path, stored: Path, size: int = 0) -> TrashEntry:
-        entry = TrashEntry(origin=Path(origin), stored=Path(stored), size=size)
+    def record(self, origin: Path, stored: Path, size: int = 0,
+               others: int = 0) -> TrashEntry:
+        entry = TrashEntry(origin=Path(origin), stored=Path(stored), size=size,
+                           others=others)
         self.entries.append(entry)
         self.folders.add(Path(stored).parent)
         self.changed.emit(len(self.entries))
@@ -202,7 +212,7 @@ class SessionTrash(QObject):
     def _snapshot(self, folder: Path) -> list:
         return [
             {"origin": str(entry.origin), "stored": Path(entry.stored).name,
-             "size": entry.size, "at": entry.at}
+             "size": entry.size, "at": entry.at, "others": entry.others}
             for entry in self.entries if Path(entry.stored).parent == folder
         ]
 
@@ -285,6 +295,10 @@ class SessionTrash(QObject):
         purged: list = []
         touched: set = set()
         for entry in list(self.entries):
+            if entry.adopted and not entry.seen:
+                # Jamais vu : il reste sur le disque, tel qu'on l'a trouve, et
+                # reviendra au lancement suivant.
+                continue
             stored = Path(entry.stored)
             touched.add(stored.parent)
             state = actions.probe(stored)
@@ -401,6 +415,8 @@ class SessionTrash(QObject):
         added = [entry for entry in entries if Path(entry.stored) not in known]
         if not added:
             return
+        for entry in added:
+            entry.adopted = True
         self.entries.extend(added)
         for entry in added:
             self.folders.add(Path(entry.stored).parent)
@@ -470,7 +486,8 @@ def _read_session(folder: Path, base: Path | None) -> list:
         found.append(TrashEntry(origin=Path(row.get("origin") or name),
                                 stored=folder / name,
                                 size=int(row.get("size") or 0),
-                                at=float(row.get("at") or 0.0)))
+                                at=float(row.get("at") or 0.0),
+                                others=int(row.get("others") or 0)))
     # Sans registre (séance d'avant cette version) : l'origine se devine.
     for name in sorted(present):
         if name.endswith(actions.PARTIAL_SUFFIX):

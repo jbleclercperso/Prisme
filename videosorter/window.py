@@ -44,7 +44,7 @@ from .header import (
 from . import media
 from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
-from .tagging import TagsThread, build_tag_items
+from .tagging import TagsThread, iter_tag_items
 from .split import DEFAULT_PANES, SPLIT_STYLE, Deck, SplitWall
 from .access import JOURNAL
 from .perf import LOG as STALL_LOG, WATCH, mark
@@ -229,6 +229,19 @@ def _as_path(video) -> Path:
     """Le chemin tel quel s'il en est deja un : `Path(Path)` refait l'objet,
     et cent mille fois de suite, cela se sent."""
     return video if isinstance(video, Path) else fast_path(str(video))
+
+
+def _within(key: str, places: set) -> bool:
+    """Vrai si ce chemin (deja en `normcase`) est l'un de ces endroits, ou
+    s'il est dessous : un dossier ecarte emporte toutes ses videos."""
+    while key:
+        if key in places:
+            return True
+        parent = os.path.dirname(key)
+        if parent == key:
+            return False
+        key = parent
+    return False
 
 
 def _folder_state(path) -> str:
@@ -593,6 +606,15 @@ class MainWindow(QMainWindow):
         # suit attend (`show_banner`).
         self._banner_guard = 0.0
         self._banner_next = None
+        # Une alerte (echec qu'on garde) : tout autre bandeau attend qu'elle
+        # ait ete lue -- cliquee, ou son temps ecoule.
+        self._alarm_until = 0.0
+        # La racine qu'on est en train d'ouvrir, et son numero (`open_root_async`).
+        self._opening = None
+        self._opening_serial = 0
+        self._opening_text = ""
+        # Le calcul de « Mes mots-clés », par tranches (`_in_slices`).
+        self._mine_slicer = None
         self._quiet_keys = _QuietKeys(self)
         self.global_quiet = None
         self._menu_by_text: dict = {}
@@ -670,9 +692,7 @@ class MainWindow(QMainWindow):
         # Une racine prise dans cette liste est l'origine du fil, comme une
         # racine choisie : elle ne s'accrochait pas sous la precedente.
         self.welcome.recent.itemActivated.connect(
-            lambda item: self.start_root(canon_root(item.text()),
-                                         new_origin=True)
-        )
+            lambda item: self.open_root_async(canon_root(item.text())))
         self.stack.addWidget(self.welcome)
 
         sort_page = QWidget(self)
@@ -1414,10 +1434,42 @@ class MainWindow(QMainWindow):
         root = self.cfg["root"]
         if not root or self.root is not None or self._closing:
             return
+        self.open_root_async(canon_root(root), MODE_FOLDERS, launch=True)
+
+    def open_root_async(self, path, mode: str = "", launch: bool = False) -> None:
+        """Ouvre une racine sans jamais attendre le NAS sur le fil de l'interface.
+
+        Le seul chemin du lancement, de l'accueil, des racines recentes et de
+        « Changer de racine… ». Un NAS en veille met des secondes, parfois des
+        dizaines, a repondre : l'accueil restait muet, l'air d'avoir oublie
+        la racine, et la redouble-cliquer figeait la fenetre tout ce temps.
+        On le dit, et l'accueil attend la reponse sans rien relancer.
+        """
+        path = Path(path)
+        opening = self._opening
+        if opening is not None and os.path.normcase(str(opening[0])) == \
+                os.path.normcase(str(path)):
+            return          # deja demandee : la meme reponse servira
         from .tunnel import Chore
-        path = canon_root(root)
+        self._opening_serial += 1
+        serial = self._opening_serial
+        self._opening = (path, serial)
+        self.welcome.recent.setEnabled(False)
+        self.welcome.choose.setEnabled(False)
+        self._opening_text = (f"Ouverture de « {path} »… le NAS peut mettre "
+                              "quelques secondes à répondre.")
+
+        def tell() -> None:
+            # Seulement si la reponse tarde : une racine qui repond tout de
+            # suite n'a rien a annoncer, et le message effacait ceux du
+            # lancement.
+            if self._opening is not None and self._opening[1] == serial:
+                self.show_banner(self._opening_text, "quiet", seconds=60)
+
+        QTimer.singleShot(300, tell)
         Chore(lambda: _folder_state(path), self, fallback="injoignable",
-              then=lambda state: self._launch_into(path, state)).start()
+              then=lambda state: self._launch_into(path, state, serial, mode,
+                                                   launch)).start()
 
     def _fill_recent_menu(self) -> None:
         """Les racines choisies ces derniers temps, la courante cochee."""
@@ -1429,19 +1481,32 @@ class MainWindow(QMainWindow):
             action.setCheckable(True)
             action.setChecked(os.path.normcase(root) == here)
             action.triggered.connect(
-                lambda _c=False, root=root: self.start_root(
-                    canon_root(root), new_origin=True))
+                lambda _c=False, root=root: self.open_root_async(canon_root(root)))
         if menu.isEmpty():
             menu.addAction("Aucune pour l'instant").setEnabled(False)
 
-    def _launch_into(self, path, state: str) -> None:
-        if not shiboken6.isValid(self) or self._closing or self.root is not None:
+    def _launch_into(self, path, state: str, serial: int | None = None,
+                     mode: str = MODE_FOLDERS, launch: bool = True) -> None:
+        """La reponse du NAS est la : on ouvre, si c'est encore voulu."""
+        if not shiboken6.isValid(self) or self._closing:
+            return
+        opening = self._opening
+        if serial is not None and (opening is None or opening[1] != serial):
+            return                      # une autre racine demandee entre-temps
+        self._opening = None
+        self.welcome.recent.setEnabled(True)
+        self.welcome.choose.setEnabled(True)
+        if self.banner.isVisible() and self.banner.text() == self._opening_text:
+            self.banner.hide()
+        if launch and self.root is not None:
             return                      # on a choisi autre chose entre-temps
         if state == "absent":
-            self.show_banner(f"La dernière racine, « {path} », n'existe plus : "
-                             "choisissez-en une autre.", "error", seconds=8)
+            self.show_banner(
+                f"La dernière racine, « {path} », n'existe plus : choisissez-en "
+                "une autre." if launch else f"« {path} » n'existe plus.",
+                "error", seconds=8)
             return
-        self.start_root(path, MODE_FOLDERS, new_origin=True, state=state)
+        self.start_root(path, mode, new_origin=True, state=state)
 
     def arm_global_quiet(self) -> bool:
         """Ctrl+Alt+K, depuis n'importe quelle fenetre (`_GlobalQuietKey`)."""
@@ -1456,7 +1521,7 @@ class MainWindow(QMainWindow):
         if chosen:
             # « Réseau › AS1104T › partage » ou « X: » : la meme racine, donc
             # les memes cles d'index, de favoris et de vignettes.
-            self.start_root(canon_root(chosen), new_origin=True)
+            self.open_root_async(canon_root(chosen))
 
     def _under_origin(self, path) -> bool:
         if self.origin is None or path is None:
@@ -1479,7 +1544,7 @@ class MainWindow(QMainWindow):
                    reset_levels: bool = True, restore_id: str = "",
                    new_origin: bool = False,
                    force: bool = False, state: str = "",
-                   remember: bool = True) -> None:
+                   remember: bool = True, departure: dict | None = None) -> None:
         """Ouvre ce dossier : ce que l'index en sait d'abord, puis la relecture.
 
         `state` : l'appelant vient de regarder si le dossier est la (« ok »,
@@ -1487,6 +1552,9 @@ class MainWindow(QMainWindow):
         coute un aller-retour.
         `remember` a faux : on revient en arriere (Alt+←), l'endroit quitte
         ne s'empile pas dans l'historique.
+        `departure` : l'endroit quitte, pris par l'appelant avant qu'il ne
+        touche aux niveaux (`_here`) ; sans lui, l'historique retenait le
+        niveau qu'on venait d'empiler, et Alt+← laissait un niveau fantome.
         """
         if root is None:
             return
@@ -1508,12 +1576,7 @@ class MainWindow(QMainWindow):
             # ne doit rien a la liste : elle continue.
             self.close_aside()
         if remember and self.root is not None and moving:
-            self.visited.append({
-                "root": self.root, "mode": self.mode,
-                "levels": list(self.levels), "board": self.browsing,
-                "item_id": self.current.item_id if self.current else "",
-            })
-            del self.visited[:-40]
+            self._remember(departure or self._here())
         if reset_levels:
             self.levels = []
             # L'origine du fil d'Ariane est la racine qu'on a choisie. Elle ne
@@ -1606,12 +1669,17 @@ class MainWindow(QMainWindow):
         self._rebuild_commands()
         # En planche, la vue reste la planche : basculer sur la fiche le temps
         # de l'analyse faisait clignoter l'affichage a chaque changement d'onglet.
-        self.viewer.setCurrentWidget(
-            self.board if self.browsing
-            else (self.grid if self.mode == MODE_FOLDERS else self.single)
-        )
-        if self.browsing:
-            self.board.set_items([], self.ratings.get)
+        if self.tab == TAB_SPLIT:
+            # Sous l'onglet « Mur », le mur reste a l'ecran quoi qu'on relise
+            # (Ctrl+R, Alt+←…) : une planche vide prenait sa place.
+            self.viewer.setCurrentWidget(self.wall)
+        else:
+            self.viewer.setCurrentWidget(
+                self.board if self.browsing
+                else (self.grid if self.mode == MODE_FOLDERS else self.single)
+            )
+            if self.browsing:
+                self.board.set_items([], self.ratings.get)
         if self._goto_page(PAGE_SORT):
             self.setFocus()
 
@@ -1718,8 +1786,9 @@ class MainWindow(QMainWindow):
 
         Lu hors du fil de l'interface (c'est le NAS) : un Prisme arrete net
         laissait ses dossiers de session invisibles et irrestaurables. Repris
-        dans la seance, ils se restaurent comme les autres — et sinon, partent
-        a la fermeture, comme ce qu'on ecarte aujourd'hui.
+        dans la seance, ils se restaurent comme les autres — et sinon, une
+        fois vus dans Ctrl+B, partent a la fermeture comme ce qu'on ecarte
+        aujourd'hui. Jamais vus, ils restent sur le disque.
         """
         if top is None:
             return
@@ -1737,12 +1806,20 @@ class MainWindow(QMainWindow):
             return
         self.trash.adopt(found)
         guessed = sum(1 for entry in found if getattr(entry, "guessed", False))
+        names = ", ".join(f"« {entry.name} »" for entry in found[:3])
+        if len(found) > 3:
+            names += "…"
+        # Une alerte qu'on clique, et non un « info » de quatre secondes que
+        # la fin de l'analyse remplacait aussitot. Rien ne part sans avoir
+        # ete vu : ces elements restent sur le disque tant que Ctrl+B ne les
+        # a pas montres (`TrashEntry.seen`).
         self.show_banner(
             f"{len(found)} élément(s) laissé(s) dans la corbeille par une séance "
-            "interrompue — Ctrl+B pour les voir et restaurer ce qu'il faut "
-            "garder ; le reste partira à la fermeture."
+            f"interrompue : {names}. Cliquez ici (ou Ctrl+B) pour les voir et "
+            "restaurer ce qu'il faut garder ; une fois vus, ils partiront à la "
+            "fermeture comme le reste."
             + (f" L'origine de {guessed} d'entre eux est devinée." if guessed
-               else ""), "info")
+               else ""), "error", action=self.open_trash, seconds=20, keep=True)
 
     def _show_known(self, known: list, restore_id: str = "") -> None:
         """Affiche d'emblee ce que l'index savait de cette racine."""
@@ -1770,9 +1847,11 @@ class MainWindow(QMainWindow):
                         break
             self.show_item(target)
         self._show_counts()
-        if self.tab == TAB_TAGS and self.mode == MODE_FOLDERS:
+        if self.mode == MODE_FOLDERS and self._at_tag_list():
             # Les mots-cles n'attendent plus la fin de la relecture : ils se
             # tirent de ce que l'index connait deja, et se referont a la fin.
+            # A la racine seulement : un vrai dossier ouvert sous cet onglet
+            # montre son contenu, et non les mots de toute la collection.
             self._add_tag_items()
         elif self.tab == TAB_FAVS and self._scan_top:
             self.show_favorites()
@@ -2243,6 +2322,7 @@ class MainWindow(QMainWindow):
             return
         if from_sigs:
             groups = self._only_in_collection(groups)
+        groups = self._one_spelling(groups)
         by_image = getattr(self, "_dupes_by_image", False)
         if not groups:
             self.show_banner(
@@ -2306,6 +2386,11 @@ class MainWindow(QMainWindow):
         groups, by_image = pending
         if self.root is None:
             return
+        groups = self._still_here(groups)
+        if not groups:
+            self.show_banner("Plus aucun doublon à examiner : ce qui a été "
+                             "trouvé a été écarté ou rangé depuis.", "quiet")
+            return
         if self.tab == TAB_SPLIT:
             if self.wall_full:
                 self.toggle_wall_fullscreen(False)
@@ -2326,6 +2411,9 @@ class MainWindow(QMainWindow):
             sure = getattr(group, "sure", True)
             to_check = {os.path.normcase(str(path))
                         for path in getattr(group, "to_check", ())}
+            # Jamais le meilleur, meme sous une autre casse : sous Windows et
+            # sur le NAS, c'est le meme fichier.
+            to_check.discard(os.path.normcase(str(paths[0])) if paths else "")
             if to_check:
                 extra_size += getattr(group, "gain", 0)
             for rank, path in enumerate(paths):
@@ -2472,6 +2560,85 @@ class MainWindow(QMainWindow):
             elif len(inside) >= 2:
                 kept.append(group.subset(inside) if hasattr(group, "subset")
                             else (_each, [paths[at] for at in inside]))
+        return kept
+
+    def _gone_paths(self) -> set:
+        """Ce qui a quitte sa place, ou s'apprete a le faire (`normcase`).
+
+        La corbeille de session, et la source de ce qui est encore dans la
+        file (rangement, mise a l'ecart, renommage) : une video ecartee depuis
+        le mur n'a pas toujours d'element a son nom. Tout est en memoire.
+        """
+        # Une origine devinee (reste d'une seance plantee) ne designe rien de
+        # sur : un dossier du meme nom a la racine n'est pas parti pour autant.
+        gone = {os.path.normcase(str(entry.origin)) for entry in self.trash.entries
+                if not getattr(entry, "guessed", False)}
+        for job in list(self.transfers.pending.values()):
+            if job.kind in ("move", "delete", "rename") and job.src is not None:
+                gone.add(os.path.normcase(str(job.src)))
+        return gone
+
+    def _still_here(self, groups: list) -> list:
+        """Les groupes de doublons, sans ce qui a ete ecarte ou range depuis.
+
+        Le resultat attend qu'on le demande, parfois toute la seance, pendant
+        qu'on continue de trier : un « ✓ à garder » deja a la corbeille
+        laissait sa seule copie cochee d'office, et « Supprimer » emportait
+        le dernier exemplaire. Un groupe qui a perdu son meilleur n'est plus
+        coche du tout : c'est peut-etre l'autre qu'on a choisi de garder.
+        """
+        gone = self._gone_paths()
+        if not gone:
+            return groups
+        kept = []
+        for group in groups:
+            _each, paths = group
+            inside = [at for at, path in enumerate(paths)
+                      if not _within(os.path.normcase(str(path)), gone)]
+            if len(inside) == len(paths):
+                kept.append(group)
+                continue
+            if len(inside) < 2:
+                continue
+            if not hasattr(group, "subset"):
+                kept.append((_each, [paths[at] for at in inside]))
+                continue
+            smaller = group.subset(inside)
+            if inside[0] != 0:
+                smaller.sure = False
+            kept.append(smaller)
+        return kept
+
+    def _one_spelling(self, groups: list) -> list:
+        """Un meme fichier sous deux casses ne fait pas un groupe de doublons.
+
+        L'index peut garder l'ancienne ecriture d'un fichier renomme par la
+        seule casse (hors de Prisme, ou par F2 pendant un sondage). Sous
+        Windows et sur le NAS c'est le meme fichier : montre comme doublon de
+        lui-meme, ses deux cartes etaient cochees, et la seule copie partait.
+        On garde l'ecriture que la collection connait.
+        """
+        spelled = None
+        kept = []
+        for group in groups:
+            _each, paths = group
+            keys = [os.path.normcase(str(path)) for path in paths]
+            if len(set(keys)) == len(keys):
+                kept.append(group)
+                continue
+            if spelled is None:
+                # Seulement dans ce cas rare : toute la collection, une fois.
+                spelled = {str(video) for item in self._plain_items
+                           for video in item.videos}
+            chosen: dict = {}
+            for at, key in enumerate(keys):
+                if key not in chosen or str(paths[at]) in spelled:
+                    chosen[key] = at
+            inside = sorted(chosen.values())
+            if len(inside) < 2:
+                continue
+            kept.append(group.subset(inside) if hasattr(group, "subset")
+                        else (_each, [paths[at] for at in inside]))
         return kept
 
     def toggle_backfill(self) -> None:
@@ -2739,7 +2906,9 @@ class MainWindow(QMainWindow):
         if self.root is None:
             return
         top = self.top_root()
-        if top is None or Path(self.root) != Path(top):
+        # Le mur montre la collection, quel que soit le dossier d'ou on l'a
+        # ouvert : c'est elle qu'on relit.
+        if self.tab != TAB_SPLIT and (top is None or Path(self.root) != Path(top)):
             self.show_banner(
                 f"Réanalyse complète de « {Path(self.root).name} »…", "info")
             self.start_root(self.root, self.mode, reset_levels=False, force=True)
@@ -2810,12 +2979,31 @@ class MainWindow(QMainWindow):
             # Des sous-dossiers, ou un compte incertain : `start_root` bascule
             # sur les videos si la lecture n'en trouve aucun.
             mode = self.mode_for_content()
+        here = self._here()
         self.levels.append({
             "root": self.root,
             "mode": self.mode,
             "item_id": item.item_id,
         })
-        self.start_root(target, mode, reset_levels=False, state=state)
+        self.start_root(target, mode, reset_levels=False, state=state,
+                        departure=here)
+
+    def _here(self) -> dict:
+        """L'endroit ou l'on est, tel qu'Alt+← doit pouvoir y revenir.
+
+        L'onglet en fait partie : sans lui, revenir rejouait un dossier sous
+        l'onglet d'arrivee -- des dossiers sous « Vidéos », et sous
+        « Dossiers » un parcours a plat de tout le partage.
+        """
+        return {
+            "root": self.root, "mode": self.mode, "tab": self.tab,
+            "levels": list(self.levels), "board": self.browsing,
+            "item_id": self.current.item_id if self.current else "",
+        }
+
+    def _remember(self, place: dict) -> None:
+        self.visited.append(place)
+        del self.visited[:-40]
 
     def go_back(self) -> bool:
         """Revient a l'endroit precedemment visite, quel qu'en soit le niveau.
@@ -2824,12 +3012,22 @@ class MainWindow(QMainWindow):
         supprime depuis se saute. On effacait d'abord la racine affichee,
         puis `start_root` refusait le dossier disparu -- et les onglets, ↑ et
         la relecture ne repondaient plus jusqu'a « Changer de racine ».
+        L'endroit revient sous son onglet ; la racine de la collection
+        revient par la liste de l'onglet, deja en memoire, sans rien relire.
         """
         if self._quiet:
+            return False
+        if self.tab == TAB_SPLIT:
+            # Le mur n'a pas d'endroit d'avant : il remplacait les panneaux
+            # par la fiche d'un dossier, sous l'onglet « Mur ».
+            self.show_banner("Le mur n'a pas de page précédente : changez "
+                             "d'onglet pour en sortir.", "quiet")
             return False
         previous, state = None, ""
         while self.visited:
             candidate = self.visited.pop()
+            if candidate.get("tab") == TAB_SPLIT:
+                continue
             # Une question au NAS par endroit essaye, que `start_root` ne
             # repose pas ; une racine injoignable n'est pas une racine partie.
             state = _folder_state(candidate["root"])
@@ -2839,7 +3037,27 @@ class MainWindow(QMainWindow):
         if previous is None:
             self.show_banner("Rien avant cet endroit", "quiet")
             return False
+        tab = previous.get("tab") or self.tab
+        if tab != self.tab and tab in TABS:
+            self._enter_tab(tab)
         self.levels = list(previous["levels"])
+        top = self.top_root()
+        if top is not None and Path(previous["root"]) == Path(top):
+            # La racine de la collection : la liste de l'onglet, sans relire.
+            # Rejouer son mode relancait, sous « Dossiers », le parcours a plat
+            # de tout le partage laisse par l'onglet « Vidéos ».
+            self.levels = []
+            if self._show_tab_list(restore_id=previous["item_id"],
+                                   remember=False):
+                current = self.current
+                if (not previous["board"] and current is not None
+                        and current.item_id == previous["item_id"]):
+                    self.on_board_open(self.index)
+                return True
+            self.start_root(top, MODE_FOLDERS, reset_levels=False,
+                            restore_id=previous["item_id"], state=state,
+                            remember=False)
+            return True
         if previous["board"] != self.browsing:
             self.browsing = previous["board"]
             self._apply_selectors()
@@ -2931,19 +3149,22 @@ class MainWindow(QMainWindow):
         if state == "absent":
             self.show_banner("Déjà au sommet.", "quiet")
             return
-        self.start_root(parent, self.mode_for_content(),
+        self.start_root(parent, self._mode_for_folder(),
                         restore_id=str(self.root), state=state)
 
     def go_up(self) -> bool:
         """Remonte d'un niveau, en retrouvant le dossier d'ou l'on etait parti."""
         if not self.levels:
             return False
+        # L'endroit qu'on quitte, niveaux compris : Alt+← y ramene.
+        here = self._here()
         level = self.levels.pop()
         top = self.top_root()
         on_sheet = not self.browsing
         if (not self.levels and top is not None
                 and Path(level["root"]) == Path(top)
-                and self._show_tab_list(restore_id=level["item_id"])):
+                and self._show_tab_list(restore_id=level["item_id"],
+                                        departure=here)):
             # Revenir au premier niveau, c'est retrouver la liste de l'onglet
             # — les favoris, les mots-cles — sans relire toute la racine. Depuis
             # une fiche, on retrouve la fiche du dossier d'ou l'on venait.
@@ -2953,7 +3174,7 @@ class MainWindow(QMainWindow):
             return True
         self.start_root(
             level["root"], level["mode"],
-            reset_levels=False, restore_id=level["item_id"],
+            reset_levels=False, restore_id=level["item_id"], departure=here,
         )
         return True
 
@@ -3316,12 +3537,16 @@ class MainWindow(QMainWindow):
             if self._mine_key != wanted:
                 self._mine_key = wanted
                 videos = [video for item in plain for video in item.videos]
-                chosen = list(words)
-                from .tunnel import Chore
-                Chore(lambda: build_tag_items(chosen, videos, minimum), self,
-                      fallback=[],
-                      then=lambda found, k=wanted: self._on_mine_tags(k, found)
-                      ).start()
+                # Par tranches sur le fil de l'interface, et non dans un fil :
+                # un calcul Python y garde le verrou global, et la fenetre
+                # restait figee jusqu'a la fin (`iter_tag_items`).
+                old = self._mine_slicer
+                if old is not None and shiboken6.isValid(old):
+                    old.stop()
+                    old.deleteLater()
+                self._mine_slicer = self._in_slices(
+                    iter_tag_items(list(words), videos, minimum),
+                    lambda found, k=wanted: self._on_mine_tags(k, found))
             if cached is None or cached[0][1:] != wanted[1:]:
                 return self._tags_computing("Calcul de vos mots-clés…")
             # Memes mots, collection un peu changee : l'ancienne liste reste
@@ -3331,6 +3556,42 @@ class MainWindow(QMainWindow):
             return self._no_tags(
                 "Aucun de vos mots-clés ne figure dans les noms de fichiers.")
         self._show_tag_list(found)
+
+    def _in_slices(self, work, then, budget_ms: float = 8.0) -> QTimer:
+        """Mene un calcul (un generateur) par tranches sur le fil de l'interface.
+
+        Quelques millisecondes, puis la main revient a la boucle
+        d'evenements : une image passe entre deux tranches. `then` recoit ce
+        que le generateur rend ([] s'il echoue). Le minuteur rendu l'arrete.
+        """
+        timer = QTimer(self)
+        # Une milliseconde, et non zero : un minuteur a zero se relance dans la
+        # meme passe d'evenements, et un `processEvents` menait alors tout le
+        # calcul d'un bloc.
+        timer.setInterval(1)
+
+        def finish(result) -> None:
+            timer.stop()
+            timer.deleteLater()
+            if not self._closing:
+                then(result)
+
+        def tick() -> None:
+            if self._closing:
+                timer.stop()
+                return
+            end = time.perf_counter() + budget_ms / 1000.0
+            try:
+                while time.perf_counter() < end:
+                    next(work)
+            except StopIteration as done:
+                finish(done.value)
+            except Exception:                           # noqa: BLE001
+                finish([])
+
+        timer.timeout.connect(tick)
+        timer.start()
+        return timer
 
     def _tags_up_to_date(self) -> bool:
         """Les mots-cles a l'ecran sont-ils ceux de la collection actuelle ?
@@ -3355,7 +3616,7 @@ class MainWindow(QMainWindow):
             return
         self._mine_key = None
         self._mine_tags = (key, found)
-        if self.tab == TAB_TAGS and self.tag_family == "mine":
+        if self._at_tag_list() and self.tag_family == "mine":
             self._add_tag_items()
 
     def _tags_computing(self, text: str) -> None:
@@ -3462,7 +3723,8 @@ class MainWindow(QMainWindow):
                 # total est la premiere reponse a « combien de videos ? ».
                 counted = sum(i.video_count for i in self._plain_items)
                 self._note_state(videos=counted, scanned_at=self._stamp())
-        if self.tab != TAB_TAGS or not self._tags_up_to_date():
+        if self.tab != TAB_TAGS or (self._at_tag_list()
+                                    and not self._tags_up_to_date()):
             self._add_tag_items()
         self._show_counts()
         if thread is not None and not failed and shiboken6.isValid(thread):
@@ -4519,7 +4781,9 @@ class MainWindow(QMainWindow):
             self._commands_signature = signature
             self.commands.rebuild(self.cfg.destinations, label)
 
-    def show_item(self, index: int) -> None:
+    def show_item(self, index: int, spare: str = "") -> None:
+        """La fiche de cet element. `spare` : la video a charger en reserve,
+        quand la suivante n'est pas la voisine dans la liste (`step`)."""
         if not self.items:
             return
         mark(f"show_item {index}")
@@ -4605,11 +4869,13 @@ class MainWindow(QMainWindow):
                 nxt = self.items[self.index + offset]
                 keep.add(self._plan_key(nxt, self.page_of(nxt)))
                 self._request_previews(nxt, current=False)
-                if (offset == 1 and item.kind != MODE_FOLDERS
+                if (offset == 1 and not spare and item.kind != MODE_FOLDERS
                         and nxt.kind != MODE_FOLDERS and not nxt.locked):
                     # La suivante se charge des maintenant dans le lecteur de
                     # reserve : la fleche ne montrera plus de noir.
                     self.single.preload(str(nxt.path))
+        if spare and item.kind != MODE_FOLDERS and spare != str(item.path):
+            self.single.preload(spare)
         # Uniquement hors planche : les vignettes de la planche portent des
         # cles « board@… » que cet ensemble ne contient jamais, et les annuler
         # revenait a vider la planche de ses images a chaque fois qu'une fiche
@@ -5022,7 +5288,9 @@ class MainWindow(QMainWindow):
 
         `action` : ce que fait un clic sur le bandeau (« afficher les
         doublons ») ; il reste alors plus longtemps, le temps d'y aller.
-        `keep` : comme un echec, il ne se laisse pas effacer aussitot.
+        `keep` : comme un echec, il ne se laisse pas effacer aussitot. Un
+        echec garde (`keep` et « error ») est une alerte : aucun autre bandeau,
+        pas meme un echec, ne la remplace avant qu'on l'ait lue.
         """
         if self._quiet or self.isMinimized():
             # Retenu, et montre au retour : un « Échec sur … » dit pendant le
@@ -5032,6 +5300,14 @@ class MainWindow(QMainWindow):
             del self._held_banners[:-12]
             return
         now = time.monotonic()
+        alarm = keep and tone == "error"
+        if (not alarm and now < self._alarm_until and self.banner.isVisible()):
+            # Une alerte a l'ecran : ce qui suit -- la suppression suivante,
+            # par exemple -- attend qu'elle ait ete lue au lieu de l'effacer.
+            self._banner_next = (text, tone, action, seconds)
+            QTimer.singleShot(int((self._alarm_until - now) * 1000) + 20,
+                              self._flush_banner_next)
+            return
         if (action is None and tone != "error" and not keep
                 and now < self._banner_guard and self.banner.isVisible()):
             # Un echec encore frais : le message ordinaire attend son tour au
@@ -5043,6 +5319,7 @@ class MainWindow(QMainWindow):
         self._banner_next = None
         self._banner_guard = (now + self.BANNER_GUARD_S
                               if tone == "error" or keep else 0.0)
+        self._alarm_until = now + max(1, int(seconds)) if alarm else 0.0
         self._banner_action = action
         self.banner.setCursor(Qt.PointingHandCursor if action is not None
                               else Qt.ArrowCursor)
@@ -5767,6 +6044,16 @@ class MainWindow(QMainWindow):
             return
         if self.cinema:
             self.toggle_cinema(False)
+        # La fiche avait ouvert le dossier de sa video : le mur, lui, regarde
+        # la collection. Reste sur ce dossier, Ctrl+R le relisait, et le fil
+        # d'Ariane ou Alt+← posaient une planche a la place des panneaux.
+        top = self.top_root()
+        if top is not None and (self.levels or Path(self.root) != Path(top)):
+            if self.scanning and not self._scan_top:
+                self.stop_scan()
+                self.progress.hide()
+            self.levels = []
+            self.root = top
         # Un mur de videos cochees : ce sont elles qu'on retrouve. Poses
         # avant l'onglet, qui s'ouvre sur elles.
         self._wall_pinned = list(back["pinned"])
@@ -6054,6 +6341,31 @@ class MainWindow(QMainWindow):
             # Recliquer l'onglet ou l'on est ramene chez soi ; s'y trouver
             # deja ne coute rien.
             return self.go_home()
+        # L'endroit qu'on quitte, sous son onglet, pour Alt+← (`_show_tab_list`).
+        here = self._here() if self.root is not None else None
+        self._enter_tab(tab)
+        if self.root is None:
+            return
+        top = self.top_root()
+        if tab == TAB_SPLIT:
+            # Le fil ne porte plus la fiche qu'on vient de quitter.
+            self.crumbs.set_path(top, self.root)
+            # Le mur ne change ni de dossier ni de mode : il regarde autrement
+            # ce que l'on a deja sous la main.
+            self.show_wall()
+            self.setFocus()
+            return
+        # Un onglet est un point de vue sur **toute** la collection, pas sur
+        # la liste qu'on quitte : depuis les favoris ou un sous-dossier,
+        # « Vidéos » ne montrait que ceux-la, et « Dossiers » restait sur les
+        # favoris. Chaque onglet repart donc de la collection.
+        if not self._show_tab_list(departure=here):
+            self.start_root(top, MODE_FOLDERS, reset_levels=True)
+
+    def _enter_tab(self, tab: str) -> None:
+        """Passe sous cet onglet -- classement, geste de l'arborescence, mur --
+        sans rien afficher encore : a l'appelant de dire quoi (sa liste, ou
+        l'endroit qu'Alt+← retrouve)."""
         was = self.tab
         self.tab = tab
         self.content = (CONTENT_VIDEOS if tab == TAB_VIDEOS
@@ -6101,28 +6413,16 @@ class MainWindow(QMainWindow):
         # « aller dans ». Se tromper de geste deplace des fichiers.
         self.tree.set_action("go" if tab == TAB_VIDEOS else "send")
 
-        top = self.top_root()
-        if tab == TAB_SPLIT:
-            # Le fil ne porte plus la fiche qu'on vient de quitter.
-            self.crumbs.set_path(top, self.root)
-            # Le mur ne change ni de dossier ni de mode : il regarde autrement
-            # ce que l'on a deja sous la main.
-            self.show_wall()
-            self.setFocus()
-            return
-        # Un onglet est un point de vue sur **toute** la collection, pas sur
-        # la liste qu'on quitte : depuis les favoris ou un sous-dossier,
-        # « Vidéos » ne montrait que ceux-la, et « Dossiers » restait sur les
-        # favoris. Chaque onglet repart donc de la collection.
-        if not self._show_tab_list():
-            self.start_root(top, MODE_FOLDERS, reset_levels=True)
-
-    def _show_tab_list(self, restore_id: str = "") -> bool:
+    def _show_tab_list(self, restore_id: str = "", remember: bool = True,
+                       departure: dict | None = None) -> bool:
         """La liste de l'onglet courant, tiree de la collection, sans relire.
 
         Seul chemin vers la liste d'un onglet : en changer, le recliquer ou
         remonter du dernier niveau y menent tous. Faux quand la collection
         n'est pas encore connue et qu'il faut donc lire la racine.
+        Le vrai dossier qu'on quitte ainsi s'empile dans l'historique : Alt+←
+        y ramene (`departure`, pris par l'appelant avant de changer d'onglet
+        ou de niveau). Un simple changement d'onglet a la racine, non.
         """
         top = self.top_root()
         if top is None:
@@ -6131,6 +6431,10 @@ class MainWindow(QMainWindow):
                  and Path(self._plain_root) == Path(top))
         if not known and self.tab != TAB_VIDEOS:
             return False
+        place = departure or (self._here() if self.root is not None else None)
+        if (remember and place is not None and place.get("root") is not None
+                and Path(place["root"]) != Path(top)):
+            self._remember(place)
         if self.scanning and not self._scan_top:
             # Une relecture de sous-dossier n'a plus rien a dire. Celle de la
             # racine, elle, continue : elle tient la collection a jour.
@@ -6189,7 +6493,7 @@ class MainWindow(QMainWindow):
         self.board.empty.setText("Rien à afficher ici.")
         self._top_tags = (self._tags_key, found)
         self._tags_thread = None
-        if self.tab == TAB_TAGS and self.tag_family != "mine":
+        if self._at_tag_list() and self.tag_family != "mine":
             self._add_tag_items()
 
     def scan_signatures(self) -> None:
@@ -6334,7 +6638,7 @@ class MainWindow(QMainWindow):
         self.show_banner(
             f"Titres : {seen} vidéo(s) sondée(s), {found} avec un titre dans "
             "leurs métadonnées. Les mots fréquents en tiennent compte.", "done")
-        if self.tab == TAB_TAGS and self.tag_family != "mine":
+        if self._at_tag_list() and self.tag_family != "mine":
             self._add_tag_items()
 
     def at_home(self) -> bool:
@@ -6360,8 +6664,17 @@ class MainWindow(QMainWindow):
         un mot-cle et plus rien ne repondait — il fallait deviner qu'une
         fleche, ailleurs, faisait remonter.
         """
-        if self.at_home() or self.tab == TAB_SPLIT:
+        if self.tab == TAB_SPLIT:
             # Le mur n'a pas de « chez soi » : le recliquer le laisse tel quel.
+            return
+        if self.at_home():
+            if self.tab == TAB_FAVS and self.root is not None:
+                # Recliquer « Favoris » refait la liste : une etoile retiree
+                # garde sa carte (un clic de trop se rattrape d'un autre),
+                # jusqu'ici. Rien n'est relu du disque.
+                current = self.current
+                self._show_tab_list(
+                    restore_id=current.item_id if current is not None else "")
             return
         mark("go_home")
         self.close_aside()
@@ -6403,6 +6716,22 @@ class MainWindow(QMainWindow):
         ouverts ensuite se listaient a plat, relus recursivement sur le NAS.
         """
         return MODE_FLAT if self.tab == TAB_VIDEOS else MODE_FOLDERS
+
+    def _mode_for_folder(self) -> str:
+        """Le mode d'un vrai dossier ouvert par le fil d'Ariane ou ↑.
+
+        Sous « Mots-clés », ses videos, comme on y voit celles d'un mot-cle :
+        en dossiers, il recevait la liste des mots-cles de toute la
+        collection, sous un chemin qui disait le contraire.
+        """
+        return MODE_FLAT if self.tab == TAB_TAGS else self.mode_for_content()
+
+    def _at_tag_list(self) -> bool:
+        """Vrai a la racine de l'onglet « Mots-clés », la ou vivent ses mots."""
+        if self.tab != TAB_TAGS or self.levels or self.root is None:
+            return False
+        top = self.top_root()
+        return top is not None and Path(self.root) == Path(top)
 
     def _apply_selectors(self) -> None:
         """Aligne l'entête sur l'état réel, pour qu'il dise où l'on se trouve."""
@@ -6550,6 +6879,10 @@ class MainWindow(QMainWindow):
         savoir où aller : le chemin cliqué suffit, et la pile est simplement
         ramenée à ce qui reste au-dessus de lui.
         """
+        if self.tab == TAB_SPLIT:
+            # Le mur n'a pas de dossier : ouvrir un dossier ici posait une
+            # planche a la place des panneaux, sous l'onglet « Mur ».
+            return
         target = Path(path)
         item = self.current
         if (not self.browsing and item is not None and item.kind == MODE_FOLDERS
@@ -6575,6 +6908,8 @@ class MainWindow(QMainWindow):
         if state == "absent":
             self.show_banner(f"Introuvable : {target}", "error")
             return
+        # L'endroit quitte, tel quel : les niveaux sont retailles juste apres.
+        here = self._here()
         kept = []
         for level in self.levels:
             above = Path(level["root"])
@@ -6586,8 +6921,8 @@ class MainWindow(QMainWindow):
                 continue
             kept.append(level)
         self.levels = kept
-        self.start_root(target, self.mode_for_content(), reset_levels=False,
-                        state=state)
+        self.start_root(target, self._mode_for_folder(), reset_levels=False,
+                        state=state, departure=here)
 
     def toggle_board(self, visible: bool | None = None) -> None:
         target = (not self.browsing) if visible is None else visible
@@ -7017,6 +7352,8 @@ class MainWindow(QMainWindow):
                 and event.type() == QEvent.MouseButtonRelease):
             action, self._banner_action = self._banner_action, None
             if action is not None:
+                # Lue : ce qui attendait derriere l'alerte peut passer.
+                self._alarm_until = 0.0
                 self.banner.hide()
                 action()
                 return True
@@ -7398,10 +7735,14 @@ class MainWindow(QMainWindow):
         if not groups:
             return items, 0
         wanted = {id(item) for item in items}
+        # Un exemplaire deja a la corbeille, ou en route, n'est plus la pour
+        # garder le groupe -- meme si sa carte, faite avant, ne le sait pas.
+        gone = self._gone_paths()
         members: dict = {}
         for item in self.all_items:
             group = getattr(item, "dupe_group", None)
-            if group in groups and not item.locked:
+            if (group in groups and not item.locked
+                    and not _within(os.path.normcase(str(item.path)), gone)):
                 members.setdefault(group, []).append(item)
         keep = set()
         for group, present in members.items():
@@ -7663,11 +8004,12 @@ class MainWindow(QMainWindow):
         d'un côté, décider de l'autre.
         """
         if self.tree.action == "go" or self.browsing:
+            here = self._here()
             self.levels.append({
                 "root": self.root, "mode": self.mode,
                 "item_id": self.current.item_id if self.current else "",
             })
-            self.start_root(Path(path), reset_levels=False)
+            self.start_root(Path(path), reset_levels=False, departure=here)
             return
         self.act_move({"path": path, "label": Path(path).name})
 
@@ -8133,14 +8475,27 @@ class MainWindow(QMainWindow):
         compter (lu en partie, ou favori plus profond que la collection lue)
         ne rassure pas davantage : on demande aussi.
         """
-        if item.kind != MODE_FOLDERS:
+        what = self._folder_doubt(item)
+        if not what:
             return True
+        where = str(item.path) + (f" — {human_size(item.size)}" if item.size > 0 else "")
+        answer = QMessageBox.question(
+            self, "Supprimer ce dossier ?",
+            f"{what}\n\n{where}\n\nTout le dossier sera écarté. "
+            f"{self._fate_text(item.path)}\n\nContinuer ?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
+
+    def _folder_doubt(self, item) -> str:
+        """Ce qui fait douter qu'un dossier ne contienne que des videos, ou ""."""
+        if item.kind != MODE_FOLDERS:
+            return ""
         unknown = item.file_count < 0
         others = 0 if unknown else item.file_count - item.video_count
         partial = bool(getattr(item, "incomplete", False)
                        or getattr(item, "unreadable", False))
         if others <= 0 and not unknown and not partial:
-            return True
+            return ""
         if others > 0:
             what = (f"« {item.name} » contient {item.video_count} vidéo(s), mais "
                     f"aussi {others} autre(s) fichier(s) : documents, images, "
@@ -8151,13 +8506,7 @@ class MainWindow(QMainWindow):
         else:
             what = (f"« {item.name} » n'a pas pu être lu en entier (NAS) : il "
                     "contient peut-être autre chose que des vidéos.")
-        where = str(item.path) + (f" — {human_size(item.size)}" if item.size > 0 else "")
-        answer = QMessageBox.question(
-            self, "Supprimer ce dossier ?",
-            f"{what}\n\n{where}\n\nTout le dossier sera écarté. "
-            f"{self._fate_text(item.path)}\n\nContinuer ?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        return answer == QMessageBox.Yes
+        return what
 
     def _submit_delete(self, item, ask: bool = True, disk: bool = True) -> tuple:
         """Ecarte cet element dans la corbeille de session, sans avancer.
@@ -8180,6 +8529,9 @@ class MainWindow(QMainWindow):
                 # Il n'a pas disparu : le NAS ne repond pas. On reste dessus.
                 return "refused", (f"NAS injoignable : « {item.name} » n'a pas "
                                    "été touché. Réessayez dans un instant.")
+        # Sa question, ou celle du lot (`_confirm_many_delete`), en a parle :
+        # l'alerte d'apres coup n'a pas a le redire.
+        asked = bool(self._folder_doubt(item))
         if ask and not self._confirm_folder_delete(item):
             return "refused", ""
         self._release_media(item.path)
@@ -8187,7 +8539,8 @@ class MainWindow(QMainWindow):
         item.status_detail = "Corbeille"
         self._submit(Transfer(kind="move", purpose="delete", src=item.path,
                               dest=self.trash.folder_for(item.path),
-                              label="Corbeille", item_id=item.item_id), item)
+                              label="Corbeille", item_id=item.item_id,
+                              asked=asked), item)
         return "sent", ""
 
     def _submit_move(self, item, dest: dict, disk: bool = True) -> tuple:
@@ -8383,7 +8736,10 @@ class MainWindow(QMainWindow):
             self.stats["deleted"] += 1
             self._note_decision()
             size = item.size if item is not None else 0
-            self.trash.record(Path(job.src), job.result, size)
+            # Ce qu'il emportait d'autre que des videos, retenu avec lui : Ctrl+B
+            # le met en tete, bien apres que le bandeau a disparu.
+            others = job.others if job.others > 0 or job.others == -2 else 0
+            self.trash.record(Path(job.src), job.result, size, others=others)
             self.ratings.rename(job.src, job.result)
             # Ses « pas des doublons » le suivent dans la corbeille : restaure,
             # il les retrouve ; detruit, ils s'effacent avec lui.
@@ -8569,6 +8925,15 @@ class MainWindow(QMainWindow):
             return
         old = Path(item.path)
         name = text.strip()
+        if not name or name.startswith("."):
+            # Avant l'extension : un champ vide devenait « .mp4 », un nom
+            # cache, et la video disparaissait de la collection.
+            what = "le dossier" if item.kind == MODE_FOLDERS else "la vidéo"
+            self.show_banner("Le nom ne peut pas être vide." if not name else
+                             f"Un nom qui commence par « . » serait caché : {what} "
+                             "disparaîtrait de Prisme.", "error")
+            QTimer.singleShot(0, lambda: self.start_rename(text))
+            return
         if (item.kind != MODE_FOLDERS and old.suffix
                 and not name.lower().endswith(old.suffix.lower())):
             # L'extension reste : sans elle, la video ne s'ouvrirait plus.
@@ -8687,16 +9052,22 @@ class MainWindow(QMainWindow):
         fermeture, qu'on peut encore le rattraper.
         """
         others = getattr(job, "others", -1)
-        if others <= 0:
+        if others in (0, -1) or getattr(job, "asked", False):
+            # Rien d'autre que des videos, ou la question l'a dit a la touche.
+            # Juge sur ce qu'on savait a l'appui, et non sur l'element a
+            # l'arrivee : la relecture a pu le remplacer par un autre, deja
+            # recompte, et l'on se taisait sans avoir rien demande.
             return
-        expected = 0
-        if item is not None and item.kind == MODE_FOLDERS:
-            expected = max(0, item.file_count - item.video_count)
-        if expected:
-            return          # la question a ete posee avant d'ecarter
+        what = (f"contenait aussi {others} autre(s) fichier(s)" if others > 0
+                else "n'a pas pu être relu en entier : il contenait peut-être "
+                     "autre chose que des vidéos")
+        # Une alerte qui reste, et qui mene a la corbeille : un bandeau
+        # ordinaire etait efface par la suppression suivante, et Ctrl+B ne
+        # disait rien.
         self.show_banner(
-            f"« {job.name} » contenait aussi {others} autre(s) fichier(s). "
-            f"{self._fate_text(job.src)}", "error")
+            f"« {job.name} » {what}. {self._fate_text(job.src)} Cliquez ici "
+            "pour le reprendre.", "error", action=self.open_trash,
+            seconds=15, keep=True)
 
     def _follow_move(self, old, new) -> None:
         """La collection en memoire suit un deplacement reussi.
@@ -8818,9 +9189,20 @@ class MainWindow(QMainWindow):
                 and item.kind != MODE_FOLDERS and not self.browsing):
             target = self._folder_neighbour(str(item.path), delta)
             if target:
+                # La reserve prend la voisine suivante dans le dossier, et non
+                # dans la liste (melangee sous « Vidéos ») : la fleche d'apres
+                # tombait toujours a cote, et chaque appui changeait deux fois
+                # de source, avec un noir force. La liste du dossier est en
+                # memoire, `_folder_neighbour` vient de la faire.
+                listing = self._folder_videos(target)
+                spare = ""
+                if len(listing) >= 2 and target in listing:
+                    spare = listing[(listing.index(target) + delta) % len(listing)]
+                    if spare == target:
+                        spare = ""
                 for position, other in enumerate(self.items):
                     if str(other.path) == target:
-                        return self.show_item(position)
+                        return self.show_item(position, spare=spare)
                 return self.play_in_app(target)
         if self.items:
             self.show_item(self.index + delta)
@@ -9044,6 +9426,8 @@ class MainWindow(QMainWindow):
         already_there = (self.root == parent and self.mode == MODE_FILES
                          and not self.browsing)
         if not already_there:
+            # L'endroit quitte, avant d'y toucher : planche, niveaux.
+            here = self._here()
             if self.browsing:
                 # La fiche de la video demandee, directement : ouvrir d'abord
                 # celle de l'element courant de la planche chargeait une video
@@ -9056,7 +9440,7 @@ class MainWindow(QMainWindow):
                     "item_id": self.current.item_id if self.current else "",
                 })
             self.start_root(parent, MODE_FILES, reset_levels=False,
-                            restore_id=str(video), state="ok")
+                            restore_id=str(video), state="ok", departure=here)
             return
         for position, item in enumerate(self.items):
             if item.path == video:
@@ -9605,11 +9989,8 @@ class MainWindow(QMainWindow):
             return
         super().keyReleaseEvent(event)
 
-    # A la fermeture, combien de temps attendre les transferts en vol avant de
-    # proposer de fermer quand meme : un NAS qui ne repond plus les tiendrait
-    # sinon indefiniment, fenetre masquee et Prisme impossible a relancer.
-    CLOSE_TRANSFER_WAIT_S = 30
-    # Et les fils de fond, tous ensemble, une fois arretes.
+    # A la fermeture, les fils de fond, tous ensemble, une fois arretes. Les
+    # transferts en vol, eux, s'attendent jusqu'au bout (`_wait_transfers`).
     CLOSE_THREADS_WAIT_S = 3
 
     def closeEvent(self, event):
@@ -9703,7 +10084,14 @@ class MainWindow(QMainWindow):
 
     def _wait_transfers(self) -> None:
         """Un transfert interrompu laisserait un dossier a moitie copie : on
-        l'attend, en le disant — mais pas indefiniment."""
+        l'attend, en le disant, jusqu'a ce qu'il aboutisse.
+
+        Seul « Fermer quand même » y renonce : c'est un choix. On passait
+        outre de soi-meme au bout de trente secondes, et ce qui arrivait
+        ensuite -- dans un processus qui ne recevait plus rien -- perdait son
+        etoile et ses « pas des doublons », ou restait hors de la corbeille
+        de session. Le processus attendait le transfert de toute facon.
+        """
         if not self.transfers.busy:
             return
         waiter = QProgressDialog(
@@ -9712,9 +10100,7 @@ class MainWindow(QMainWindow):
         waiter.setWindowTitle(APP_NAME)
         waiter.setMinimumDuration(0)
         waiter.show()
-        deadline = time.monotonic() + self.CLOSE_TRANSFER_WAIT_S
-        while (self.transfers.busy and not waiter.wasCanceled()
-               and time.monotonic() < deadline):
+        while self.transfers.busy and not waiter.wasCanceled():
             QApplication.processEvents()
             self.transfers.wait(100)
         waiter.close()

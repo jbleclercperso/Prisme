@@ -2170,14 +2170,34 @@ class TrashDialog(QDialog):
 
     def refresh(self) -> None:
         self.tree.clear()
-        for entry in reversed(self.trash.entries):
+        # En tete, ce qui emportait autre chose que des videos : c'est ce
+        # qu'on ne doit pas laisser partir sans l'avoir vu.
+        entries = sorted(reversed(self.trash.entries),
+                         key=lambda entry: not getattr(entry, "others", 0))
+        today = time.strftime("%Y%m%d")
+        for entry in entries:
+            name = entry.name
+            others = getattr(entry, "others", 0)
+            if others > 0:
+                name += f"  ⚠ contient {others} autre(s) fichier(s)"
+            elif others == -2:
+                name += "  ⚠ lu en partie : peut-être d'autres fichiers"
+            if getattr(entry, "adopted", False):
+                name += "  (séance interrompue)"
+            stamp = time.localtime(entry.at)
+            origin = str(Path(entry.origin).parent)
+            if getattr(entry, "guessed", False):
+                origin += "  (origine devinée)"
             row = QTreeWidgetItem([
-                entry.name,
-                time.strftime("%H:%M:%S", time.localtime(entry.at)),
-                str(Path(entry.origin).parent),
+                name,
+                time.strftime("%H:%M:%S" if time.strftime("%Y%m%d", stamp) == today
+                              else "%d/%m %H:%M", stamp),
+                origin,
             ])
             row.setData(0, Qt.UserRole, entry)
             self.tree.addTopLevelItem(row)
+            # Vu ici : il suivra le sort des autres a la fermeture.
+            entry.seen = True
         self.summary.setText(trash_fate(list(self.trash.entries), self.mode))
 
     def _restore(self, entries: list) -> None:

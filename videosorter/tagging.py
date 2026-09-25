@@ -210,6 +210,28 @@ def build_tag_items(tags: list, videos: list, minimum: int = 1) -> list:
     automatiquement des noms de fichiers, eux, se dissolvent plus volontiers :
     personne ne les a demandés, et une catégorie à une vidéo n'y range rien.
     """
+    work = iter_tag_items(tags, videos, minimum)
+    while True:
+        try:
+            next(work)
+        except StopIteration as done:
+            return done.value
+
+
+# Combien de videos entre deux pauses de `iter_tag_items` : quelques
+# millisecondes de calcul.
+_STRIDE = 128
+
+
+def iter_tag_items(tags: list, videos: list, minimum: int = 1):
+    """`build_tag_items`, par petites etapes : chaque `yield` rend la main.
+
+    Un fil Python ne soulageait pas l'interface d'un calcul Python : il garde
+    le verrou global, et la fenetre ne se repeignait qu'a la fin -- un quart
+    de seconde fige pour vingt mille videos, une seconde et plus sur toute la
+    collection. Mene par tranches sur le fil de l'interface, une image passe
+    entre deux (`MainWindow._in_slices`). Le resultat sort par StopIteration.
+    """
     if not tags or not videos:
         return []
 
@@ -228,7 +250,9 @@ def build_tag_items(tags: list, videos: list, minimum: int = 1) -> list:
     # de refaire le test, un nom etant relu autant de fois qu'il y a de mots.
     carried: list = []
     counts: dict = {needle: 0 for _term, needle in folded}
-    for video in videos:
+    for at, video in enumerate(videos):
+        if at % _STRIDE == 0:
+            yield
         # Le nom sans fabriquer de Path : cent mille fois par calcul.
         name = fold(os.path.basename(str(video)))
         hits = [needle for _term, needle in folded if needle in name]
@@ -248,12 +272,16 @@ def build_tag_items(tags: list, videos: list, minimum: int = 1) -> list:
     buckets: dict = {}
     for _ in range(8):
         buckets = {needle: [] for needle in active}
-        for video, hits in carried:
+        for at, (video, hits) in enumerate(carried):
+            if at % _STRIDE == 0:
+                yield
             eligible = [needle for needle in hits if needle in active]
             if not eligible:
                 continue
             best = max(eligible, key=lambda needle: (counts[needle], len(needle)))
-            buckets[best].append(Path(video))
+            # Le chemin tel quel s'il en est deja un : `Path(Path)` refait
+            # l'objet, a chaque video.
+            buckets[best].append(video if isinstance(video, Path) else Path(video))
         thin = {needle for needle, found in buckets.items()
                 if len(found) < minimum}
         if not thin or len(thin) == len(active):
@@ -266,6 +294,7 @@ def build_tag_items(tags: list, videos: list, minimum: int = 1) -> list:
     for needle, found in buckets.items():
         if not found:
             continue
+        yield
         found.sort(key=lambda path: str(path).lower())
         item = Item(path=Path(labels[needle]), kind=MODE_FOLDERS, videos=found,
                     video_count=len(found), file_count=len(found))

@@ -6857,9 +6857,8 @@ def check_review_fixes(app, window, base, root, tri) -> None:
           and fresh.trash.flush_result == (1, "") and not warned,
           f"fermer pendant un Suppr : le transfert finit, puis la corbeille se vide "
           f"({fresh.trash.flush_result}, {spent:.1f} s)")
-    check(not any(str(closing) in key for key in reread.data)
-          and spent < fresh.CLOSE_TRANSFER_WAIT_S,
-          "le favori de ce qui est détruit est oublié, sans attendre le délai de secours")
+    check(not any(str(closing) in key for key in reread.data) and spent < 30,
+          "le favori de ce qui est détruit est oublié, sans attendre au-delà du transfert")
     fresh.deleteLater()
     pump(app, 0.2)
     window.set_tab(TAB_FOLDERS)

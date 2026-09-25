@@ -51,8 +51,13 @@ class Transfer:
     # trouves en le recomptant apres coup (-1 : pas recompte). La garde de
     # suppression se fiait aux comptes de l'index, qui ignorent ce qui a
     # change plus bas ; c'est ici, avant que la perte ne devienne definitive
-    # a la fermeture, qu'on peut encore le dire.
+    # a la fermeture, qu'on peut encore le dire. -2 : relu en partie seulement,
+    # il contenait peut-etre autre chose.
     others: int = -1
+    # La garde a-t-elle parle de ce dossier a la touche (sa question, ou celle
+    # du lot) ? Decide a l'appui : a l'arrivee, l'element a pu etre remplace
+    # par un autre, fraichement recompte, et l'on se taisait a tort.
+    asked: bool = False
 
     @property
     def name(self) -> str:
@@ -191,8 +196,15 @@ def _count_others(job: Transfer) -> None:
         found = scan_folder(Path(job.result))
     except OSError:
         return
-    if not found.unreadable:
-        job.others = max(0, found.file_count - found.video_count)
+    others = 0 if found.unreadable else max(0, found.file_count - found.video_count)
+    if others:
+        job.others = others
+    elif found.unreadable or found.incomplete:
+        # Un sous-dossier illisible cachait peut-etre les documents : rien ne
+        # permet de dire que ce ne sont que des videos.
+        job.others = -2
+    else:
+        job.others = 0
 
 
 class TransferQueue(QObject):
@@ -208,14 +220,19 @@ class TransferQueue(QObject):
         self.signals = _Signals()
         self.signals.done.connect(self._on_done)
         self.active = 0
+        # Ce qui est encore dans la file, par numero : ce qui s'apprete a
+        # quitter sa place se sait sans rien demander au disque.
+        self.pending: dict = {}
 
     def submit(self, transfer: Transfer) -> Transfer:
         self.active += 1
+        self.pending[transfer.id] = transfer
         self.changed.emit(self.active)
         self.pool.start(_Runner(self.signals, transfer))
         return transfer
 
     def _on_done(self, transfer: Transfer) -> None:
+        self.pending.pop(transfer.id, None)
         self.active = max(0, self.active - 1)
         self.changed.emit(self.active)
         self.finished.emit(transfer)
