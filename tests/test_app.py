@@ -3458,6 +3458,189 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
               "on sait quel fichier les fils de fond lisent : on n'attend que lui")
 
 
+def check_media(app, window, base) -> None:
+    """Vignettes, sondages et travaux de fond : les corrections de l'audit."""
+    import threading as _th
+    from make_fixture import make_video
+    from videosorter import media as M
+    from videosorter import stamps as S
+    from videosorter.backfill import SceneScan, ThumbAudit
+    from videosorter.index import INDEX
+
+    print("\n[85] Médias : libérer sans attendre, vignettes qui suivent, fond qui cède")
+    lot = base / "medias"
+    shutil.rmtree(lot, ignore_errors=True)
+    one = lot / "a" / "clip.mp4"
+    make_video(one, 6, 91)
+    longue = lot / "a" / "longue.mp4"
+    make_video(longue, 40, 92)
+    real_spawn = M._spawn
+
+    # -- ranger ne gèle plus : le ffmpeg qui lit la cible est arrêté net ------
+    out = {}
+
+    def lit():
+        with M._Reading(longue):
+            out["r"] = M._spawn([Tools.ffmpeg, "-re", "-i", str(longue),
+                                 "-f", "null", "-"], 30)
+
+    reader = _th.Thread(target=lit)
+    reader.start()
+    wait_for(app, lambda: M.reading_under(longue) and any(M._PROCS.values()), 5)
+    started = time.perf_counter()
+    window.preview.release(longue)
+    spent = time.perf_counter() - started
+    reader.join(5)
+    check(spent < 0.05, f"libérer un fichier rend la main aussitôt ({spent * 1000:.1f} ms)")
+    check(out.get("r", (0, "", "", ""))[3] == "tue" and not M.reading_under(longue),
+          "et le ffmpeg qui le lisait est arrêté")
+    M.unblock(longue)
+
+    # -- une seule extraction pour deux demandes, jamais de JPEG tronqué ------
+    calls = []
+
+    def compte(cmd, timeout):
+        calls.append(cmd)
+        time.sleep(0.2)
+        return real_spawn(cmd, timeout)
+
+    M._spawn = compte
+    try:
+        got = []
+        hands = [_th.Thread(target=lambda: got.append(M.extract_thumb(one, 1.0, 200)))
+                 for _ in range(2)]
+        for hand in hands:
+            hand.start()
+        for hand in hands:
+            hand.join()
+    finally:
+        M._spawn = real_spawn
+    check(len(calls) == 1 and len(got) == 2 and all(got),
+          f"deux demandes de la même image : un seul ffmpeg ({len(calls)})")
+    check(calls and "-noaccurate_seek" not in calls[0],
+          "le premier essai tombe pile sur l'instant")
+    check(not list(M.THUMB_DIR.rglob("*.part.jpg")),
+          "l'image s'écrit à côté puis prend son nom : rien de partiel ne reste")
+    calls.clear()
+    M._spawn = compte
+    try:
+        M.extract_thumb(longue, 35.0, 200, keyframe=True)
+    finally:
+        M._spawn = real_spawn
+    check(calls and "passthrough" in calls[0],
+          "une carte loin dans la vidéo se contente de l'image-clé")
+
+    # -- le nom d'une vignette ne dépend plus du dossier ----------------------
+    copie = lot / "b" / "clip.mp4"
+    copie.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(one, copie)
+    check(M.thumb_path(one, 1.0, 200) == M.thumb_path(copie, 1.0, 200),
+          "même nom, taille et date : les copies partagent leur vignette")
+    empreinte = S.stamp_of(one)
+    ancienne = M._legacy_key(one, empreinte, 2.5, 200)
+    ancienne.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(M.thumb_path(one, 1.0, 200), ancienne)
+    check(M.cached_thumb(one, 2.5, 200) == M.thumb_path(one, 2.5, 200)
+          and not ancienne.exists(),
+          "une vignette nommée à l'ancienne est reprise, pas refaite")
+    INDEX.put_probe(one, empreinte, {"duration": 6.0, "width": 320, "height": 240,
+                                     "codec": "h264", "ok": True})
+    carte = M.build_preview_plan([one], 1, 0, one_per_video=False, blind=True)[0][1]
+    M.extract_thumb(one, carte, 200)
+    rangee = lot / "c" / "clip (2).mp4"
+    rangee.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(one, rangee)
+    S.forget(one)
+    M.relocate_thumbs(one, rangee)
+    check(S.stamp_of(rangee) == empreinte and INDEX.probe(rangee) is not None,
+          "une vidéo rangée garde son empreinte et son sondage")
+    check(M.cached_thumb(rangee, carte, 200) is not None,
+          "et sa carte, même renommée à l'arrivée")
+
+    # -- empreintes reprises de l'index, sans lecture réseau ------------------
+    fantome = lot / "absent" / "fantome.mp4"
+    INDEX.put_probe(fantome, "123|456", {"duration": 5.0, "width": 320,
+                                         "height": 240, "codec": "", "ok": True})
+    check(S.stamp_of(fantome) == "123|456" and S.known(fantome) == (456, 123.0),
+          "au lancement suivant, l'empreinte vient de l'index, pas du disque")
+    S.forget(fantome)
+    check(S.stamp_of(fantome) == "", "un chemin auquel on vient de toucher se relit")
+
+    # -- une coupure n'est pas un fichier illisible ---------------------------
+    coupure = lot / "partage_absent" / "video.mp4"
+    M.probe(coupure)
+    check(INDEX.probe(coupure) is None, "un sondage raté pendant une coupure n'est pas retenu")
+    abime = lot / "a" / "abime.mp4"
+    abime.write_bytes(os.urandom(4096))
+    M.probe(abime)
+    check(INDEX.probe(abime) is not None and not INDEX.probe(abime)["ok"],
+          "un fichier présent et abîmé, lui, l'est")
+    INDEX.put_probe(copie, "", {"duration": 0.0, "width": 0, "height": 0,
+                                "codec": "", "ok": False})
+    check(M.probe(copie)["ok"], "un échec retenu à tort est revérifié")
+
+    # -- un délai dépassé ne vaut pas « aucun plan » --------------------------
+    check(M.scene_times(copie, timeout=0.001) is None,
+          "relevé des plans interrompu : rien à conclure")
+    real_scenes = M.scene_times
+    M.scene_times = lambda video, timeout=90: None
+    try:
+        releve = SceneScan(lot / "b", True)
+        releve._one(copie)
+    finally:
+        M.scene_times = real_scenes
+    check(not INDEX.has_scenes(copie), "et rien n'est enregistré pour cette vidéo")
+
+    # -- ce qu'on regarde passe devant, même quand ffmpeg est pris ------------
+    manager = M.PreviewManager(200)
+    manager.pool.setMaxThreadCount(1)
+    gate = _th.Event()
+
+    class Bouchon(M._Job):
+        def work(self):
+            gate.wait(10)
+
+    manager.pool.start(Bouchon(manager.signals, "bouchon"))
+    got = {}
+    manager.plan_ready.connect(lambda key, plan: got.setdefault("plan", plan))
+    manager.thumb_ready.connect(lambda key, slot, path: got.setdefault(key, path))
+    manager.request_plan("board@x", [str(copie)], 1, blind=True)
+    check(wait_for(app, lambda: "plan" in got, 2),
+          "un plan à l'aveugle ne fait pas la queue derrière ffmpeg")
+    manager.request_thumb("board@y", 0, str(copie), 1.0)
+    check(M.FOREGROUND.pending > 0, "une demande au premier plan est comptée")
+    check(wait_for(app, lambda: "board@y" in got, 2),
+          "une vignette déjà faite arrive pendant que ffmpeg est occupé")
+    for index in range(150):
+        manager.request_thumb(f"board@{index}", 0, str(copie), 3.0 + index, urgent=False)
+    check(len(manager.tracked) >= 140, f"aucun travail n'échappe au suivi ({len(manager.tracked)})")
+    quitte = manager.cancel_prefix("board@", keep={"board@3"})
+    check(quitte >= 140, f"tourner la page annule ceux de la page quittée ({quitte})")
+    gate.set()
+    manager.pool.setMaxThreadCount(2)
+    manager.quiesce(20000)
+    check(len(manager.tracked) == 0 and wait_for(app, lambda: M.FOREGROUND.pending == 0, 5),
+          "chacun se retire en finissant, et le compte retombe")
+
+    # -- une récolte finie ne garde rien -------------------------------------
+    recolte = manager.start_harvest([("k", str(copie), 1.0)])
+    wait_for(app, lambda: not recolte.isRunning(), 30)
+    check(recolte.tasks == [] and not recolte._queue, "une récolte finie libère ses tâches")
+    manager.stop_harvest()
+    check(manager._retired == [], "et elle est détruite")
+
+    # -- l'état des vignettes ne compte pas la corbeille ---------------------
+    corbeille = lot / "b" / ".videosorter-corbeille"
+    corbeille.mkdir(exist_ok=True)
+    shutil.copy2(copie, corbeille / "jete.mp4")
+    res = {}
+    audit = ThumbAudit(lot / "b", 200, True)
+    audit.done.connect(lambda seen, ready: res.update(seen=seen))
+    audit.start()
+    wait_for(app, lambda: "seen" in res, 30)
+    check(res.get("seen") == 1, f"l'audit ne compte que ce que la préparation voit ({res})")
+
+
 def main() -> int:
     base = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
         os.environ.get("TEMP", "."), "vs-fixture"
@@ -3538,7 +3721,14 @@ def main() -> int:
           "Anniversaire : 10 vidéos distinctes échantillonnées")
 
     melange = by_name.get("Melange")
-    plan_mel = window.plans.get(f"{melange.path}@0", [])
+    # Selon le tirage, Melange n'est pas toujours parmi les deux suivantes :
+    # son plan, demande puis quitte dans le meme tour, n'est plus livre (il
+    # aurait lance des extractions pour rien). On l'ouvre donc.
+    mel_key = f"{melange.path}@0"
+    if mel_key not in window.plans:
+        window.show_item([i.name for i in window.items].index("Melange"))
+        wait_for(app, lambda: mel_key in window.plans, 30)
+    plan_mel = window.plans.get(mel_key, [])
     check(len(plan_mel) == 2,
           f"Melange (2 vidéos) : 2 aperçus, pas dix (obtenu {len(plan_mel)})")
     check(len({entry[0] for entry in plan_mel}) == 2, "Melange : une image par vidéo")
@@ -3652,6 +3842,7 @@ def main() -> int:
     check(window.stack.currentIndex() == 2, "page de fin affichée après le dernier élément")
 
     check_new_features(app, window, base, root, flat, tri)
+    check_media(app, window, base)
 
     window.close()
     pump(app, 0.3)
