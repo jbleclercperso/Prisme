@@ -2068,6 +2068,14 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     found = out["groups"]
     check(len(found) == 1 and {q.name for q in found[0][1]} == {"un.mp4", "deux.mp4"},
           f"les deux copies se retrouvent, la troisième non ({found})")
+    check(bool(found) and not found[0].sure and found[0].to_check == [],
+          "une seule image ne prouve rien : le groupe est « à comparer »")
+    from videosorter.dupes_memory import LookMemo as _LookMemo
+    _looked = _LookMemo()
+    _looked.load()
+    check(len(_looked.values or {}) >= 3,
+          f"l'empreinte de chaque vignette est retenue pour la fois suivante "
+          f"({len(_looked.values or {})})")
 
     print("\n[63] État de la collection en haut, et noir au survol")
     window.set_tab(TAB_FOLDERS)
@@ -2460,6 +2468,187 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     INDEX.reopen(base / "_appdata" / "index.db")
     check(len([e for e in INDEX.all_sigs() if str(marks) in str(e[0])]) == 3,
           "et la base survit à une réouverture")
+
+    print("\n[69b] Doublons : instants exacts, calcul à l'écart, meilleur exemplaire, faux doublons")
+    import random as _rnd
+    from videosorter import dupes as _dupes
+    from videosorter.dupes import (
+        SIG_METHOD, SignatureGroupScan, group_by_look as _look,
+        group_by_size as _by_size, rank_group, sig_current, signature_report)
+    from videosorter.dupes_memory import NotDupes
+    from videosorter.media import thumb_path as _thumb_path
+
+    # -- l'empreinte porte sa methode, et ne laisse rien dans le cache -------
+    copie_b = marks / "lot" / "copie_b.mp4"
+    stamp_b = INDEX.sigs[str(copie_b)][0]
+    check(stamp_b.endswith("|" + SIG_METHOD),
+          f"l'empreinte retient la méthode qui l'a faite ({stamp_b})")
+    width = window.cfg["thumb_width"]
+    duree_b = (INDEX.probe(copie_b) or {}).get("duration") or 0.0
+    instants = [duree_b * (i + 1) / 5 for i in range(4)]
+    values_b, failed_b, tried_b = signature_report(copie_b, width)
+    check(failed_b == 0 and tried_b == 4 and len(values_b) >= 2,
+          f"quatre instants, aucun échec ({failed_b}/{tried_b}, {len(values_b)} empreintes)")
+    check(not any(_thumb_path(copie_b, ts, width).exists() for ts in instants),
+          "les images de l'empreinte ne remplissent plus le cache de vignettes")
+
+    # -- les anciennes empreintes restent valables quand elles le peuvent ----
+    faux = str(base / "faux" / "v1.mp4")
+    INDEX.sigs[faux] = ("100|200", [0x0F0F0F0F0F0F0F0F, 0x3C3C3C3C3C3C3C3C], 200)
+    check(sig_current(faux, "100|200"),
+          "une ancienne empreinte prise aux fractions de la durée reste bonne")
+    INDEX.sigs[faux] = ("100|200", [], 200)
+    check(not sig_current(faux, "100|200"),
+          "une ancienne empreinte vide est refaite : ce pouvait être une coupure")
+    INDEX.sigs[faux] = ("100|200", [1, 2], 200)
+    INDEX.scenes[faux] = [3.0, 9.0]
+    check(not sig_current(faux, "100|200"),
+          "une ancienne empreinte prise sur les plans est refaite")
+    INDEX.scenes.pop(faux, None)
+    INDEX.sigs[faux] = (f"100|200|{SIG_METHOD}", [], 200)
+    check(sig_current(faux, "100|200") and not sig_current(faux, "101|200"),
+          "une empreinte récente vaut tant que le fichier ne change pas")
+    INDEX.sigs.pop(faux, None)
+
+    # -- une coupure passagere n'est pas retenue pour toujours ----------------
+    coupure = base / "sigs_coupure"
+    shutil.rmtree(coupure, ignore_errors=True)
+    coupure.mkdir(parents=True)
+    passage = coupure / "passage.mp4"
+    shutil.copy2(model, passage)
+    real_grab = _dupes._grab
+    _dupes._grab = lambda video, ts, width: (None, True)
+    cut = {}
+    broken_scan = SignatureScan(coupure, width, True)
+    broken_scan.walking.connect(lambda n: cut.update(walk=n))
+    broken_scan.unreadable.connect(lambda n: cut.update(bad=n))
+    broken_scan.done.connect(lambda seen, total: cut.update(seen=seen, total=total))
+    broken_scan.start()
+    check(wait_for(app, lambda: "seen" in cut, 120), "passage pendant une coupure")
+    _dupes._grab = real_grab
+    check(cut.get("bad") == 1 and cut.get("total") == 0
+          and str(passage) not in INDEX.sigs,
+          f"la vidéo illisible est comptée, pas retenue ({cut})")
+    check(cut.get("walk") == 1, f"le recensement se dit pendant le parcours ({cut})")
+    healed = {}
+    retry = SignatureScan(coupure, width, True)
+    retry.done.connect(lambda seen, total: healed.update(seen=seen, total=total))
+    retry.start()
+    check(wait_for(app, lambda: "seen" in healed, 120)
+          and healed["seen"] == 1 and len(INDEX.sig_of(passage)) >= 2,
+          f"et elle est reprise au passage suivant ({healed})")
+
+    # -- le calcul tourne hors du fil de l'interface ---------------------------
+    got = {}
+    grouping = SignatureGroupScan(marks)
+    grouping.found.connect(lambda g: got.update(groups=g))
+    grouping.start()
+    check(wait_for(app, lambda: "groups" in got, 60), "comparaison en fond terminée")
+    sig_groups = got.get("groups") or []
+    check([{p.name for p in g[1]} for g in sig_groups] == [{"copie_a.mp4", "copie_b.mp4"}],
+          f"elle retrouve les deux encodages, et eux seuls ({sig_groups})")
+    if sig_groups:
+        g = sig_groups[0]
+        check(g.sure and len(g.to_check) == 1 and g.keep not in g.to_check,
+              "quatre images et deux durées connues : un sûr, l'autre coché d'office")
+        size_sum = sum(p.stat().st_size for p in g.paths)
+        check(g.gain == size_sum - g.keep.stat().st_size and g[0] * (len(g[1]) - 1) == g.gain,
+              "la place à récupérer est la somme moins l'exemplaire gardé")
+
+    # -- numpy et Python pur rendent les memes groupes, et les bons ------------
+    rng = _rnd.Random(7)
+
+    def _flip(value, count):
+        for bit in rng.sample(range(64), count):
+            value ^= 1 << bit
+        return value
+
+    synth = [(f"x{i:05d}", [rng.getrandbits(64) for _ in range(4)], 1000)
+             for i in range(3000)]
+    planted = set()
+    for k in range(40):
+        src = synth[k * 50]
+        synth.append((f"y{k:05d}", [_flip(v, rng.randint(0, 6)) for v in src[1]], 900))
+        planted.add(frozenset((src[0], f"y{k:05d}")))
+    still = synth[7][1][0]
+    synth.append(("immobile", [_flip(still, 1), _flip(still, 2), _flip(still, 3), still], 5))
+    dark = 0x0008000808080800
+    for k in range(100):
+        synth.append((f"sombre{k:03d}", [_flip(dark, rng.randint(0, 2)), rng.getrandbits(64)], 3))
+
+    def _pairs(found):
+        return {frozenset(str(p) for p in g[1]) for g in found}
+
+    saved = (_dupes.USE_NUMPY, _dupes.NUMPY_FROM)
+    _dupes.USE_NUMPY, _dupes.NUMPY_FROM = False, 0
+    t_py = time.perf_counter()
+    pure = _pairs(group_by_signature(synth, ignored=()))
+    t_py = time.perf_counter() - t_py
+    _dupes.USE_NUMPY = True
+    with_np = _pairs(group_by_signature(synth, ignored=())) if _dupes._numpy() else pure
+    _dupes.USE_NUMPY, _dupes.NUMPY_FROM = saved
+    check(pure == planted,
+          f"les 40 paires plantées, rien d'autre ({len(pure & planted)}/40, "
+          f"{len(pure - planted)} en trop, {t_py:.2f} s)")
+    check(with_np == pure, "numpy et Python pur rendent exactement les mêmes groupes")
+
+    # -- duree, meilleur exemplaire, ecarts ------------------------------------
+    ep = [str(base / "faux" / f"episode{i}.mp4") for i in range(3)]
+    for path, duration, w, h in ((ep[0], 1300.0, 1280, 720), (ep[1], 1500.0, 1280, 720),
+                                 (ep[2], 1301.0, 1920, 1080)):
+        INDEX.put_probe(path, "", {"duration": duration, "width": w, "height": h,
+                                   "codec": "h264", "ok": True})
+    same = 0x0F0F3C3C5A5A6969
+    looks = [(ep[0], 110_000_000, same), (ep[1], 60_000_000, same),
+             (ep[2], 35_000_000, same ^ 1)]
+    found_look = _look(looks, ignored=())
+    check(len(found_look) == 1 and {str(p) for p in found_look[0][1]} == {ep[0], ep[2]},
+          "même image mais durée trop différente : pas un doublon")
+    if found_look:
+        g = found_look[0]
+        check(str(g.keep) == ep[2], "la plus grande définition passe devant la taille")
+        check(not g.sure and g.to_check == [],
+              "une seule image : « à comparer », rien de coché d'office")
+        check(g.gain == 110_000_000 and g[0] == 110_000_000,
+              f"place à récupérer : la somme moins l'exemplaire gardé ({g.gain})")
+        check("720p au lieu de 1080p" in g.gap(ep[0]) and g.gap(ep[2]) == "à garder",
+              f"l'écart au meilleur se dit en clair ({g.gap(ep[0])!r})")
+    check([str(p) for p in rank_group([ep[0], ep[2]], sizes=[900, 10])] == [ep[2], ep[0]],
+          "classement : la définition d'abord")
+    check([str(p) for p in rank_group([ep[1], ep[0]], sizes=[5, 5])] == [ep[1], ep[0]],
+          "à définition et taille égales, la plus longue")
+    short, deep = str(base / "faux" / "film.mp4"), str(base / "faux" / "copie" / "film.mp4")
+    check([str(p) for p in rank_group([deep, short], sizes=[7, 7])] == [short, deep],
+          "puis le chemin le plus court")
+
+    # -- la memoire des faux doublons ------------------------------------------
+    memo_path = base / "_appdata" / "pas-doublons-essai.json"
+    memo_path.unlink(missing_ok=True)
+    memo = NotDupes(memo_path)
+    check(memo.ignorer(ep[0], ep[2]) and memo.est_ignoree(ep[2], ep[0])
+          and not memo.ignorer(ep[2], ep[0]),
+          "« pas des doublons » se retient, dans les deux sens, une fois")
+    check(NotDupes(memo_path).est_ignoree(ep[0], ep[2])
+          and not memo_path.with_suffix(".json.tmp").exists(),
+          "et survit à une réouverture, écrit d'un seul coup")
+    check(_look(looks, ignored=memo) == [], "la paire écartée ne revient plus")
+    trio = [(base / "faux" / n, 5_000_000) for n in ("a.mp4", "b.mp4", "c.mp4")]
+    memo.ignorer(trio[0][0], trio[1][0])
+    sized = _by_size(trio, minimum=1, ignored=memo)
+    check(len(sized) == 1 and len(sized[0][1]) == 3,
+          "A et B écartés, C les relie encore : le groupe tient")
+    memo.ignorer_groupe([p for p, _s in trio])
+    check(_by_size(trio, minimum=1, ignored=memo) == [],
+          "tout le groupe écarté : il disparaît")
+    moved = memo.renommer(base / "faux", base / "range")
+    check(moved >= 4 and memo.est_ignoree(base / "range" / "a.mp4", base / "range" / "b.mp4")
+          and not memo.est_ignoree(trio[0][0], trio[1][0]),
+          f"un dossier déplacé emporte ses paires ({moved})")
+    check(memo.oublier(base / "range" / "a.mp4") == 2
+          and not memo.est_ignoree(base / "range" / "a.mp4", base / "range" / "b.mp4"),
+          "une vidéo supprimée pour de bon est oubliée")
+    check(NotDupes().path.parent == vs_config.APP_DIR,
+          "la mémoire par défaut vit dans le dossier de l'application")
 
     print("\n[70] La fenêtre tient sur un écran agrandi, le lecteur de côté se ferme")
     # A 200 % sur un ecran de 1080p, il ne reste que 960 sur 540 points.
