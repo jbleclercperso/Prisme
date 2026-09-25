@@ -13,10 +13,10 @@ from __future__ import annotations
 import random
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QHBoxLayout, QHeaderView, QLabel, QProgressBar, QPushButton, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QProgressBar,
+    QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 QUIET_TITLE = "Indexation des sauvegardes"
@@ -80,6 +80,14 @@ class QuietPage(QWidget):
         self.table.setHeaderLabels(["Volume", "Éléments", "Taille", "Dernier passage"])
         self.table.setRootIsDecorated(False)
         self.table.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        # Le tableau couvre les trois quarts de la page et gardait pour lui
+        # les double-clics : « n'importe ou » ne valait que dans la marge. On
+        # les intercepte. Ni selection ni focus : une page neutre ne garde
+        # pas de ligne surlignee apres un clic.
+        self._table_area = self.table.viewport()
+        self._table_area.installEventFilter(self)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setFocusPolicy(Qt.NoFocus)
         box.addWidget(self.table, 1)
 
         foot = QHBoxLayout()
@@ -140,8 +148,18 @@ class QuietPage(QWidget):
         self.leave.emit()
         event.accept()
 
+    def eventFilter(self, watched, event):
+        if (watched is self._table_area
+                and event.type() == QEvent.Type.MouseButtonDblClick):
+            self.leave.emit()
+            return True
+        return super().eventFilter(watched, event)
+
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Escape, Qt.Key_F5):
+        # Echap seulement. F5 ramenait Prisme sans que rien ne l'annonce :
+        # c'est la touche qu'un collegue presse pour « rafraichir » une page
+        # qui ne l'interesse pas.
+        if event.key() == Qt.Key_Escape:
             self.leave.emit()
             return
         super().keyPressEvent(event)

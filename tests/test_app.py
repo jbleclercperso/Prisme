@@ -1227,13 +1227,17 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(grid.video.isHidden(), "et à l'arrêt également")
 
     print("\n[48] Mots-cles automatiques")
-    from videosorter.tagging import build_tag_items, fold, matches
+    from videosorter.tagging import build_tag_items, fold, top_words, word_index
     from videosorter.widgets import TagsDialog
 
     check(fold("Été") == fold("ete"), "accents ignorés à la comparaison")
     check(fold("PLAGE") == fold("plage"), "casse ignorée aussi")
-    check(matches("été", "X/mon-ETE-2019.mp4"), "un mot se retrouve dans un nom")
-    check(not matches("ski", "X/plage.mp4"), "et ne se retrouve pas ailleurs")
+    found = word_index([Path("X/mon-PLAGÉ-2019.mp4")])
+    check("plage" in found, "un mot se retrouve dans un nom, accents et casse ignorés")
+    check("ski" not in found, "et ne se retrouve pas ailleurs")
+    check(top_words(["the beach a.mp4", "the beach b.mp4", "IMG_1.mp4", "IMG_2.mp4"])
+          == ["beach"],
+          "les mots proposés sortent du même calcul que l'onglet (ni « the », ni « img »)")
 
     sample = [Path(f"X/plage_{i}.mp4") for i in range(3)]
     sample += [Path("X/MONTAGNE.mp4"), Path("X/autre.mp4")]
@@ -2784,8 +2788,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "le mur joue plusieurs vidéos")
     from PySide6.QtWidgets import QPushButton as _QPB
     gestes = window.wall.panes[1].bar.findChildren(_QPB)
-    check(len(gestes) == 5 and window.wall.panes[1].bar.stay is not None,
-          f"le bandeau d'un panneau pilote tout : ◂ ⏯ ▸ ⤢ ⛶ et la coche "
+    check(len(gestes) == 6 and window.wall.panes[1].bar.stay is not None,
+          f"le bandeau d'un panneau pilote tout : ★ ◂ ⏯ ▸ ⤢ ⛶ et la coche "
           f"« rester dans ce dossier » ({len(gestes)})")
     pane = window.wall.panes[1]
     first_video = pane.video_path
@@ -3671,6 +3675,10 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           and window.wall.panes[1].player.audioOutput() is None
           and not window.wall.audio.isMuted(),
           "sur le mur, seule la vidéo survolée a le son")
+    # Qt finit d'ouvrir la sortie audio par la boucle d'evenements : arreter
+    # le lecteur dans la meme milliseconde que le branchement l'a deja bloque
+    # pour de bon. A l'ecran, aucun geste ne suit un branchement de si pres.
+    pump(app, 0.3)
     window.wall.set_muted(True)
     tab_click(TAB_FOLDERS)
 
@@ -3791,6 +3799,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         check(_media.reading_under(Path("X:/lot")) and not _media.reading_under(Path("X:/autre")),
               "on sait quel fichier les fils de fond lisent : on n'attend que lui")
 
+    check_board_wall(app, window, base, root)
     check_data_safety(app, window, base, root)
 
 
@@ -4273,6 +4282,268 @@ def check_media(app, window, base) -> None:
     audit.start()
     wait_for(app, lambda: "seen" in res, 30)
     check(res.get("seen") == 1, f"l'audit ne compte que ce que la préparation voit ({res})")
+
+
+
+
+def check_board_wall(app, window, base, root) -> None:
+    """Planche et mur : favori d'un clic, survol posé, images décodées à
+    côté, son qui ne rebranche rien, démarrages échelonnés sans rafale."""
+    print("\n[85] Planche et mur : favori d'un clic, survol posé, son économe")
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QColor, QImage
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+    import videosorter.board as vs_board
+    import videosorter.split as vs_split
+    from videosorter.board import HOVER_SETTLE_MS, BoardView
+    from videosorter.scan import Item
+    from videosorter.split import HEAR_SETTLE_MS, STAGGER_MIN_MS, SplitWall
+    from videosorter.widgets import STYLESHEET
+    from videosorter.window import PAGE_QUIET
+
+    clips = [str(p) for p in sorted(root.rglob("*.mp4"))]
+    check(len(clips) >= 4, f"des vidéos pour l'essai ({len(clips)})")
+
+    # Une planche a part, branchee a rien : ce qu'on verifie est a elle.
+    host = QWidget()
+    host.setStyleSheet(STYLESHEET)
+    host.resize(900, 700)
+    board = BoardView(10, 3, host)
+    QVBoxLayout(host).addWidget(board)
+    host.show()
+    pump(app, 0.3)
+    long_name = "Un nom de fichier vraiment très long pour une carte étroite S01E02.mp4"
+    items = [Item(path=Path(c), kind=MODE_FILES, size=1000) for c in clips[:2]]
+    items.append(Item(path=Path("C:/faux") / long_name, kind=MODE_FILES, size=1))
+    board.set_items(items, lambda _p: 0)
+    pump(app, 0.3)
+
+    # -- la legende : coupee au milieu, a la largeur ; la resolution a sa case
+    card = board.cards[2]
+    shown = card.meta.text()
+    check(card.meta.full_text() == long_name and "…" in shown
+          and card.meta.fontMetrics().horizontalAdvance(shown) <= card.meta.width(),
+          f"un nom trop long se coupe à la largeur de la carte ({shown!r})")
+    check(shown.endswith(".mp4"), "au milieu : l'extension et la fin du nom restent")
+    before_x = card.meta.geometry().x()
+    card.set_source("C:/faux/x.mp4", 0.0, 12.0, 1080)
+    pump(app, 0.1)
+    check(card.head.text().startswith("1080p") and card.meta.geometry().x() == before_x,
+          "la résolution arrive dans sa case réservée : le nom ne saute plus")
+
+    # -- les vignettes : decodees a cote, gardees pour la page d'apres
+    thumb = base / "_vignette_planche.jpg"
+    image = QImage(320, 180, QImage.Format_RGB32)
+    image.fill(QColor(40, 120, 200))
+    image.save(str(thumb), "JPG")
+    first = board.cards[0]
+    board.set_thumb(0, str(thumb))
+    check(first._pixmap is None, "l'image se décode à côté : l'appel rend la main aussitôt")
+    check(wait_for(app, lambda: first._pixmap is not None, 10),
+          "puis elle se pose")
+    size = first._pixmap.size()
+    check(size.width() <= first.image.width() and size.height() <= first.image.height(),
+          f"déjà réduite à la taille de la case ({size.width()}×{size.height()})")
+    first.thumb_key = None
+    first._pixmap = None
+    board.set_thumb(0, str(thumb))
+    check(first._pixmap is not None, "revenir à une page ne redécode rien")
+
+    # -- d'une carte a l'autre, l'apercu part de l'instant de la vignette
+    a, b = board.cards[0], board.cards[1]
+    a.set_source(clips[0], 0.0, 6.0, 240)
+    b.set_source(clips[1], 2.0, 6.0, 240)
+    board._play(0)
+    wait_for(app, lambda: board._loaded and board.player.position() > 100, 15)
+    board._play(1)
+    check(board._pending_seek == 2000 and not board._loaded,
+          "changer de carte : le saut attend le nouveau média, l'ancien ne l'avale plus")
+    check(wait_for(app, lambda: board.player.position() >= 1900, 15),
+          f"l'aperçu part bien de l'instant de la vignette ({board.player.position()} ms)")
+
+    # -- le survol : rien ne se charge tant que la souris ne s'est pas posee
+    class _Cursor:
+        spot = QPoint()
+
+        @staticmethod
+        def pos():
+            return _Cursor.spot
+
+    # Hors ecran, l'activation des fenetres va et vient (la fenetre-outil des
+    # poignees la prend parfois en paraissant) : la planche se croit active.
+    host.isActiveWindow = lambda: True
+    real_cursor = vs_board.QCursor
+    vs_board.QCursor = _Cursor
+    try:
+        _Cursor.spot = a.image.mapToGlobal(a.image.rect().center())
+        board._poll_hover()
+        check(board.hovered == 0 and board.settle_timer.isActive()
+              and Path(board.player.source().toLocalFile()) != Path(a.video),
+              "survoler une carte ne charge rien tout de suite")
+        _Cursor.spot = b.image.mapToGlobal(b.image.rect().center())
+        board._poll_hover()
+        check(board.hovered == 1 and not board.settle_timer.isActive(),
+              "revenir sur la carte déjà chargée la relance aussitôt")
+        _Cursor.spot = a.image.mapToGlobal(a.image.rect().center())
+        board._poll_hover()
+        pump(app, (HOVER_SETTLE_MS + 150) / 1000)
+        check(Path(board.player.source().toLocalFile()) == Path(a.video),
+              "la souris posée, l'aperçu part")
+        _Cursor.spot = host.mapToGlobal(QPoint(host.width() - 2, host.height() - 2))
+        board._poll_hover()
+        check(board.hovered == -1
+              and all(c.property("hovered") == "false" for c in board.cards),
+              f"la souris partie, plus aucune carte survolée (rang {board.hovered})")
+    finally:
+        vs_board.QCursor = real_cursor
+
+    # -- le favori d'un clic, depuis l'etoile sous la coche
+    wanted = []
+    board.favoriteToggled.connect(wanted.append)
+    board.floating.attach(b, b.handle_rect())
+    check(not board.floating.star.isHidden() and board.floating.star.text() == "☆",
+          "au survol, une étoile vide sous la coche")
+    board.floating.star.click()
+    check(wanted == [1], f"un clic sur l'étoile demande le favori de cette carte ({wanted})")
+    board.set_stars(1, 1)
+    check(board.floating.star.text() == "★" and b.rating.text() == "★",
+          "et elle se dore quand la fenêtre l'a enregistré")
+    board.floating.detach()
+    board.stop()
+    host.close()
+    host.deleteLater()
+    pump(app, 0.2)
+
+    # -- le mur : demarrages sans rafale, vivier qui grandit, etoile, son
+    host = QWidget()
+    host.resize(900, 500)
+    wall = SplitWall(3, 5, host)
+    wall.set_muted(True)          # le reglage par defaut de Prisme
+    QVBoxLayout(host).addWidget(wall)
+    host.show()
+    pump(app, 0.2)
+    starts = []
+    for pane in wall.panes:
+        real_play = pane.play
+
+        def _timed(path, remember=True, _play=real_play):
+            starts.append(time.monotonic())
+            _play(path, remember)
+        pane.play = _timed
+    pool = clips[:6]
+    wall.set_pool(pool)
+    pump(app, 0.1)
+    wall.shuffle_all()
+    check(sum(1 for p in wall.panes if p.video_path) == 1 and wall.stagger.isActive(),
+          "un remaniement : un panneau part, les autres attendent leur tour")
+    check(wait_for(app, lambda: all(p.video_path for p in wall.panes), 10),
+          "et tous finissent par jouer")
+    tail = starts[-len(wall.panes):]
+    gaps = [round(later - earlier, 3) for earlier, later in zip(tail, tail[1:])]
+    check(all(gap >= (STAGGER_MIN_MS - 20) / 1000 for gap in gaps),
+          f"sans rafale : deux remaniements ne font qu'une file ({gaps} s)")
+    before = [p.video_path for p in wall.panes]
+    wall.grow_pool(pool + clips[6:8])
+    pump(app, 0.3)
+    check([p.video_path for p in wall.panes] == before,
+          "un vivier qui grandit ne remplace pas ce qu'on regarde")
+
+    asked = []
+    wall.favoriteToggled.connect(asked.append)
+    pane = wall.panes[0]
+    pane.star_button.click()
+    check(asked == [pane.video_path], "l'étoile d'un panneau demande le favori de sa vidéo")
+    wall.set_favorite(pane.video_path, True)
+    check(pane.favorite and "Retirer" in pane.star_button.toolTip(),
+          "et se dore quand c'est enregistré")
+    wall.set_favorite_of(lambda path: path == wall.panes[1].video_path)
+    check(not pane.favorite and wall.panes[1].favorite,
+          "chaque panneau dit l'état de sa propre vidéo")
+
+    # La souris, loin du mur : le sondage ne doit rien decider a notre place.
+    wall.watch_timer.stop()
+    real_split_cursor = vs_split.QCursor
+    _Cursor.spot = QPoint(-5000, -5000)
+    vs_split.QCursor = _Cursor
+    try:
+        wall.set_muted(True)
+        wall._choose_heard(wall.panes[1])
+        check(all(p.player.audioOutput() is None for p in wall.panes),
+              "son coupé : survoler ne branche aucune sortie audio")
+        wall.set_muted(False)
+        wall._choose_heard(wall.panes[1])
+        check(wall.panes[1].player.audioOutput() is None
+              and wall._hear_next is wall.panes[1],
+              "son actif : on attend que la souris se pose avant de brancher")
+        pump(app, (HEAR_SETTLE_MS + 150) / 1000)
+        check(wall.panes[1].player.audioOutput() is wall.audio
+              and not wall.audio.isMuted(),
+              "puis le panneau survolé a le son")
+        wall._choose_heard(None)
+        check(wall.panes[1].player.audioOutput() is wall.audio and wall.audio.isMuted(),
+              "la souris partie, le son se coupe sans rien débrancher")
+        wall._choose_heard(wall.panes[1])
+        wall.set_muted(True)
+        check(wall.panes[1].player.audioOutput() is wall.audio and wall.audio.isMuted(),
+              "couper le son juste après l'avoir rendu ne débranche rien : "
+              "Qt s'y bloquait pour de bon")
+    finally:
+        vs_split.QCursor = real_split_cursor
+    wall.stop()
+    host.close()
+    host.deleteLater()
+    pump(app, 0.2)
+
+    # -- l'arborescence dit ce que fait le clic, et pourquoi elle est vide
+    tree = window.tree
+    kept_action, kept_root = tree.action, tree.root
+    tree.set_action("send")
+    tree.set_context(True, 0)
+    check("Aller" in tree.action_button.text() and tree.effect() == "go"
+          and tree.action == "send",
+          "en planche sans coche, le titre annonce « Aller dans » : c'est ce que fait le clic")
+    tree.set_context(True, 3)
+    check("3 cochés" in tree.action_button.text() and tree.effect() == "send",
+          f"avec trois vignettes cochées, il annonce leur envoi ({tree.action_button.text()})")
+    tree.set_context(False, 0)
+    check("Envoyer vers" in tree.action_button.text(), "en fiche, le geste retenu")
+    tree.set_action(kept_action)
+    plain = base / "_sans_plus"
+    (plain / "ordinaire").mkdir(parents=True, exist_ok=True)
+    tree.set_root(str(plain))
+    check(wait_for(app, lambda: not tree.empty.isHidden(), 10),
+          "sans dossier « + », l'arbre dit pourquoi il est vide")
+    if kept_root:
+        tree.set_root(kept_root)
+
+    # -- le repli : F5 ne trahit plus, le double-clic marche au milieu
+    window.cfg["quiet_explained"] = True
+    depart = window.stack.currentIndex()
+    window.enter_quiet()
+    pump(app, 0.2)
+    QTest.keyClick(window.quiet_page, Qt.Key_F5)
+    pump(app, 0.1)
+    check(window.stack.currentIndex() == PAGE_QUIET,
+          "F5 ne fait plus réapparaître Prisme")
+    area = window.quiet_page.table.viewport()
+    QTest.mouseDClick(area, Qt.LeftButton, Qt.NoModifier, area.rect().center())
+    pump(app, 0.2)
+    check(window.stack.currentIndex() == depart,
+          "un double-clic au milieu du tableau ramène, comme annoncé")
+
+    # -- les mots frequents : le fil se libere une fois fini
+    from videosorter.tagging import TagsThread
+    out = {}
+    worker = TagsThread([Path("C:/x/plage a.mp4"), Path("C:/x/plage b.mp4")], {})
+    worker.ready.connect(lambda found: out.update(found=found))
+    worker.destroyed.connect(lambda *_a: out.update(gone=True))
+    worker.start()
+
+    def _gone():
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        return "gone" in out
+    check(wait_for(app, _gone, 20) and out.get("found"),
+          "le calcul des mots fréquents rend son fil et sa copie de la liste")
 
 
 def main() -> int:

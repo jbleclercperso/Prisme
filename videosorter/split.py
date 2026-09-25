@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import random
 
-from PySide6.QtCore import QPoint, QRect, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QCursor
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
@@ -23,15 +23,23 @@ from PySide6.QtWidgets import (
 )
 
 from .perf import mark
-from .icons import dress, icon
-from .widgets import OverBar, PeekOverlay, PlayMarks, Stepper
+from .icons import dress, filled, icon
+from .widgets import GOLD, OverBar, PeekOverlay, PlayMarks, Stepper
 
 # Trois panneaux : sur un ecran large, trois videos verticales le remplissent
 # presque exactement. Quatre les amincissent au point qu'on ne distingue plus
 # grand-chose.
 DEFAULT_PANES = 3
-# Delai entre deux demarrages de panneaux.
+# Delai entre deux demarrages de panneaux, au plus : le suivant part des que
+# le precedent a ouvert son fichier, un court instant apres (STAGGER_MIN_MS).
+# Six ouvertures simultanees sur le partage figeaient tout ; attendre 650 ms
+# fixes mettait six secondes a remplir un mur de dix.
 STAGGER_MS = 650
+STAGGER_MIN_MS = 150
+# Le son suit la souris, mais pas a chaque panneau traverse : brancher la
+# sortie audio sur un lecteur ouvre un flux Windows, l'en debrancher coute
+# jusqu'a une cinquantaine de millisecondes. On attend que la souris se pose.
+HEAR_SETTLE_MS = 250
 # Les nombres qui font un rectangle. Cinq ou sept n'en font pas.
 PANE_CHOICES = (2, 3, 4, 5, 6, 8, 9, 10)
 ORIENTATIONS = (("vertical", "Verticales"), ("horizontal", "Horizontales"),
@@ -112,6 +120,7 @@ class SplitPane(QFrame):
     peekChosen = Signal(int, int)     # une case cliquee : (panneau, case)
     soloRequested = Signal(int)       # cette video seule, sur tout le mur
     stayToggled = Signal(bool)        # la coche « rester dans ce dossier »
+    favoriteToggled = Signal(str)     # l'etoile du bandeau : cette video
 
     def __init__(self, index: int, scroll_seconds: int = 5, parent=None):
         super().__init__(parent)
@@ -168,6 +177,18 @@ class SplitPane(QFrame):
         self.bar.add_stay("Rester dans ce dossier : ▸ prend la suivante du "
                           "même dossier au lieu d'une vidéo au hasard",
                           False, self.stayToggled)
+        # Le favori d'un clic, sans quitter le mur : il fallait ouvrir la
+        # fiche — et perdre le mur — pour marquer une video qu'on aimait.
+        # Juste apres le nom, vide ou doree comme partout ailleurs.
+        self.favorite = False
+        self.favorite_of = lambda _path: False
+        self.bar.add_gesture("☆", "Mettre en favori", self._star)
+        self.star_button = self.bar.buttons.itemAt(
+            self.bar.buttons.count() - 1).widget()
+        self.bar.buttons.removeWidget(self.star_button)
+        self.bar.buttons.insertWidget(0, self.star_button)
+        self.star_button.setIconSize(QSize(18, 18))
+        self._show_star()
         self.hovered = False
 
         # Le son ne vient que de la video survolee : six videos qui parlent
@@ -190,9 +211,33 @@ class SplitPane(QFrame):
         self.video_path = path
         self.bar.set_name(path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1])
         self.name.setToolTip(path)
+        self.set_favorite(self.favorite_of(path))
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
+        if self.video.isHidden() and not self.peeking:
+            # Panneau libere par vacate() : l'image restee dans le lecteur
+            # est celle de la video d'avant, on la vide avant de reparaitre.
+            try:
+                self.video.videoSink().setVideoFrame(QVideoFrame())
+            except (RuntimeError, TypeError):
+                pass
+            self.video.show()
         self._place()
+
+    def set_favorite(self, on: bool) -> None:
+        self.favorite = bool(on)
+        self._show_star()
+
+    def _show_star(self) -> None:
+        button = self.star_button
+        button.setText("")
+        button.setIcon(filled("star", GOLD) if self.favorite else icon("star"))
+        button.setToolTip("Retirer des favoris" if self.favorite
+                          else "Mettre en favori")
+
+    def _star(self) -> None:
+        if self.video_path:
+            self.favoriteToggled.emit(self.video_path)
 
     def set_bare(self, bare: bool) -> None:
         """Le bandeau ne vient plus qu'au survol, plein ecran ou non."""
@@ -228,6 +273,28 @@ class SplitPane(QFrame):
         self.player.setSource(QUrl())
         self.marks.clear()
         self.bar.hide()
+        self.set_favorite(False)
+
+    def vacate(self) -> None:
+        """Libere le panneau sans rien decharger : la video d'avant ne part
+        qu'a l'arrivee de la suivante, par play(), a son tour.
+
+        Changer ou vider la source d'un lecteur fige l'interface le temps que
+        Qt defasse l'ancien media. Remanier le mur videait tous les panneaux
+        d'un coup : autant de gels mis bout a bout. Echelonnes avec les
+        demarrages, ils se perdent entre deux images.
+        """
+        self.peek_end()
+        self.video_path = ""
+        self.name.setText("—")
+        # Pause seulement s'il jouait : sur un lecteur arrete, pause()
+        # rechargerait la video pour en montrer la premiere image.
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        self.video.hide()
+        self.marks.clear()
+        self.bar.hide()
+        self.set_favorite(False)
 
     def stop(self) -> None:
         self.player.stop()
@@ -371,13 +438,25 @@ class SplitWall(QWidget):
     peekRequested = Signal(int, str)
     peekChosen = Signal(int, int)
     sortRequested = Signal(int, str)
+    # L'etoile d'un panneau : bascule le favori de cette video. Le mur
+    # n'enregistre rien lui-meme ; on lui renvoie l'etat par set_favorite.
+    favoriteToggled = Signal(str)
 
     def __init__(self, panes: int = DEFAULT_PANES, scroll_seconds: int = 5,
                  parent=None, orientation: str = "vertical"):
         super().__init__(parent)
         self.setStyleSheet(SPLIT_STYLE)
         self.pool: list = []
-        self.shown: list = []
+        self.favorite_of = lambda _path: False
+        # Les demarrages echelonnes : une seule minuterie, et non une chaine
+        # de minuteries a usage unique. Chaque remaniement en lancait une de
+        # plus, qui vidaient ensemble la meme file : les panneaux partaient a
+        # trois cents millisecondes d'ecart, en rafale sur le partage.
+        self._queue: list = []
+        self._starting = None
+        self.stagger = QTimer(self)
+        self.stagger.setSingleShot(True)
+        self.stagger.timeout.connect(self._start_one)
         self.scroll_seconds = scroll_seconds
         self.orientation = orientation
         self.solo = -1                 # rang du panneau seul en grand, ou -1
@@ -420,7 +499,6 @@ class SplitWall(QWidget):
         self.caption.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.caption.hide()
         controls.addStretch(1)
-        self.count_buttons: dict = {}
         self.count_stepper = Stepper(PANE_CHOICES, "Vidéos à la fois", "",
                                      self.controls)
         self.count_stepper.chosen.connect(self.countChanged)
@@ -487,6 +565,11 @@ class SplitWall(QWidget):
         self.audio = QAudioOutput(self)
         self.audio.setMuted(True)
         self._heard = None
+        self._hear_next = None       # le panneau survole, pas encore branche
+        self.hear_timer = QTimer(self)
+        self.hear_timer.setSingleShot(True)
+        self.hear_timer.setInterval(HEAR_SETTLE_MS)
+        self.hear_timer.timeout.connect(self._settle_heard)
         self.watch_timer = QTimer(self)
         self.watch_timer.setInterval(120)
         self.watch_timer.timeout.connect(self._watch)
@@ -494,7 +577,8 @@ class SplitWall(QWidget):
     def set_muted(self, muted: bool) -> None:
         self.muted = bool(muted)
         self.audio.setMuted(self.muted)
-        self._watch()
+        # Rendre le son est un geste voulu : le panneau survole l'a aussitot.
+        self._watch(at_once=True)
 
     def _hear(self, pane) -> None:
         """Branche l'unique sortie audio sur ce panneau, et sur lui seul."""
@@ -510,7 +594,56 @@ class SplitWall(QWidget):
             pane.player.setAudioOutput(self.audio)
             self.audio.setMuted(self.muted)
 
-    def _watch(self) -> None:
+    def _choose_heard(self, pane, at_once: bool = False) -> None:
+        """Le son pour ce panneau, sans rebrancher quoi que ce soit pour rien.
+
+        Couper ou rendre le son d'une sortie deja branchee ne coute rien ;
+        la brancher sur un autre lecteur ouvre un flux audio, l'en retirer
+        le ferme. Balayer le mur le faisait plusieurs fois par seconde, son
+        coupe compris — ce qui est le reglage par defaut. On ne rebranche
+        donc que pour faire entendre un autre panneau, son actif, et une fois
+        la souris posee dessus.
+        """
+        if self.muted:
+            # Son coupe : on ne branche plus rien, et celui qui l'etait se
+            # tait sans etre debranche. Debrancher coute jusqu'a cinquante
+            # millisecondes, et Qt s'y est deja bloque pour de bon juste apres
+            # un branchement ; une piste son decodee pour rien, sur un seul
+            # panneau, coute bien moins.
+            self.hear_timer.stop()
+            self._hear_next = None
+            self.audio.setMuted(True)
+            return
+        if pane is None:
+            # Plus rien sous la souris : on se tait, sans debrancher.
+            self.hear_timer.stop()
+            self._hear_next = None
+            self.audio.setMuted(True)
+            return
+        if pane is self._heard:
+            self.hear_timer.stop()
+            self._hear_next = None
+            self.audio.setMuted(False)
+            return
+        if at_once:
+            self.hear_timer.stop()
+            self._hear_next = None
+            self._hear(pane)
+            return
+        if pane is not self._hear_next:
+            # Un autre panneau : l'ancien se tait tout de suite, le nouveau
+            # ne sera branche que si la souris s'y pose.
+            self._hear_next = pane
+            self.audio.setMuted(True)
+            self.hear_timer.start()
+
+    def _settle_heard(self) -> None:
+        pane = self._hear_next
+        self._hear_next = None
+        if pane is not None and not self.muted and pane in self.panes:
+            self._hear(pane)
+
+    def _watch(self, at_once: bool = False) -> None:
         window = self.window()
         active = window is not None and window.isActiveWindow()
         cursor = QCursor.pos()
@@ -524,7 +657,7 @@ class SplitWall(QWidget):
             pane.watch(over, self.muted)
             if over:
                 heard = pane
-        self._hear(heard)
+        self._choose_heard(heard, at_once)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -533,7 +666,11 @@ class SplitWall(QWidget):
     def hideEvent(self, event):
         super().hideEvent(event)
         self.watch_timer.stop()
-        self._hear(None)
+        # Se taire suffit : la sortie reste branchee, et sera reprise ou
+        # deplacee au retour sans avoir ete fermee entre-temps.
+        self.hear_timer.stop()
+        self._hear_next = None
+        self.audio.setMuted(True)
         self.stop()
 
     def set_unseen(self, on: bool) -> None:
@@ -568,12 +705,28 @@ class SplitWall(QWidget):
         remplacer les videos qu'on etait en train de regarder."""
         if not self.pool:
             return self.shuffle_all()
+        self.stagger.stop()
+        self._starting = None
         busy = {pane.video_path for pane in self.panes if pane.video_path}
         free = [video for video in self.pool if video not in busy]
         random.shuffle(free)
         self._queue = [(at, free.pop()) for at, pane in enumerate(self.panes)
                        if not pane.video_path and free]
         self._start_one()
+
+    def set_favorite_of(self, lookup) -> None:
+        """Comment savoir si une video est en favori : la fenetre le sait."""
+        self.favorite_of = lookup
+        for pane in self.panes:
+            pane.favorite_of = lookup
+            pane.set_favorite(bool(pane.video_path) and lookup(pane.video_path))
+
+    def set_favorite(self, path: str, on: bool) -> None:
+        """Le favori de cette video a change : les panneaux qui la montrent
+        suivent."""
+        for pane in self.panes:
+            if pane.video_path == path:
+                pane.set_favorite(on)
 
     def set_shape(self, shape) -> None:
         self.shape = shape
@@ -602,6 +755,10 @@ class SplitWall(QWidget):
             pane.set_stay(self.stay)
             pane.peekChosen.connect(self.peekChosen)
             pane.opened.connect(self.opened)
+            pane.favoriteToggled.connect(self.favoriteToggled)
+            pane.favorite_of = self.favorite_of
+            pane.player.mediaStatusChanged.connect(
+                lambda status, p=pane: self._pane_status(p, status))
             pane.set_bare(self.panes[0].bare if self.panes else False)
             self.panes.append(pane)
         self._lay_out()
@@ -713,7 +870,24 @@ class SplitWall(QWidget):
         self.pool = [str(video) for video in videos]
         self.shuffle_all()
 
+    def grow_pool(self, videos: list) -> None:
+        """Le vivier s'est etoffe : les panneaux gardent leur video, seuls les
+        vides se remplissent.
+
+        Relancer tout le mur a chaque sondage qui trouvait de nouvelles
+        verticales remplacait, juste apres l'entree dans le mur, la video
+        qu'on commencait a regarder.
+        """
+        self.pool = [str(video) for video in videos]
+        has = bool(self.pool)
+        self.empty.setVisible(not has)
+        self.row.setVisible(has)
+        self.fill_empty()
+
     def shuffle_all(self) -> None:
+        self.stagger.stop()
+        self._queue = []
+        self._starting = None
         has = bool(self.pool)
         self.empty.setVisible(not has)
         self.row.setVisible(has)
@@ -722,23 +896,40 @@ class SplitWall(QWidget):
                 pane.clear()
             return
         picks = random.sample(self.pool, min(len(self.panes), len(self.pool)))
-        self.shown = list(picks)
         # Un panneau a la fois, pas six d'un coup : six ouvertures simultanees
         # sur le partage, six decodages qui demarrent ensemble, et l'interface
         # ne respire plus. Echelonnes, chacun a la ligne pour lui un instant.
-        for pane in self.panes:
-            pane.clear()
+        # Ceux qui vont recevoir une video sont liberes sans rien decharger
+        # (vacate) ; seul un panneau qui restera vide rend son fichier.
+        for at, pane in enumerate(self.panes):
+            if at < len(picks):
+                pane.vacate()
+            else:
+                pane.clear()
         self._queue = list(enumerate(picks))
         self._start_one()
 
     def _start_one(self) -> None:
-        if not getattr(self, "_queue", None):
+        self._starting = None
+        if not self._queue:
             return
         index, path = self._queue.pop(0)
         if index < len(self.panes) and self.isVisible():
             self.panes[index].play(path)
+            self._starting = self.panes[index]
         if self._queue:
-            QTimer.singleShot(self.STAGGER_MS, self._start_one)
+            self.stagger.start(self.STAGGER_MS)
+
+    def _pane_status(self, pane, status) -> None:
+        """Le panneau lance en dernier a ouvert son fichier : le suivant peut
+        partir, sans attendre le delai prevu pour le pire."""
+        if pane is not self._starting or not self.stagger.isActive():
+            return
+        if status in (QMediaPlayer.MediaStatus.LoadedMedia,
+                      QMediaPlayer.MediaStatus.BufferedMedia):
+            self._starting = None
+            if self.stagger.remainingTime() > STAGGER_MIN_MS:
+                self.stagger.start(STAGGER_MIN_MS)
 
     def play_in(self, index: int, path: str) -> None:
         """Pose cette video dans ce panneau (la suivante du dossier, par exemple)."""
@@ -755,7 +946,9 @@ class SplitWall(QWidget):
         self.panes[index].play(random.choice(choices))
 
     def stop(self) -> None:
+        self.stagger.stop()
         self._queue = []
+        self._starting = None
         self.solo = -1
         for pane in self.panes:
             pane.peek_end()
