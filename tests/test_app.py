@@ -624,6 +624,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     wait_for(app, lambda: not window.scanning and window.mode == MODE_FLAT, 60)
     wait_for(app, lambda: bool(window.current.info.get("duration")), 30)
     window.show_item(0)
+    # La premiere n'est pas toujours celle qu'on attendait plus haut : sur une
+    # machine chargee, sa duree arrive un peu apres.
+    wait_for(app, lambda: bool(window.current.info.get("duration")), 30)
     crumbs = window.item_parent.text()
     check(crumbs == f"{root.name}  ›  Anniversaire",
           f"chaîne complète depuis la racine (obtenu {crumbs!r})")
@@ -728,7 +731,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     print("\n[28] Notation de 0 à 5 étoiles")
     window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
-    window.show_item(first_untouched(window))
+    # Les touches notent la fiche ouverte : sur la planche, ou Echap vient de
+    # ramener, elles ne visent plus que la vignette survolee.
+    window.on_board_open(first_untouched(window))
     target = window.current
     check(window.ratings.get(target.path) == 0, "un élément démarre hors des favoris")
     window.rate_current(4)
@@ -4924,6 +4929,278 @@ def check_wiring(app, window, base, root) -> None:
         window.tunnel_address = ""
 
 
+def check_keys_and_batches(app, window, base) -> None:
+    """Planche et mur : les touches visent ce qu'on survole ; les lots ne
+    quittent pas la planche ; Ctrl+Z vaut pour toute la seance."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QMessageBox as _QMB
+    import videosorter.window as vs_window
+    from videosorter.scan import Item as _Item
+    from videosorter.window import DELETE_LABELS, PAGE_SORT
+
+    print("\n[92] Planche et mur : les touches visent ce qu'on survole")
+    sources = sorted(p for p in base.rglob("*.mp4")
+                     if ".videosorter-corbeille" not in str(p)
+                     and "_appdata" not in str(p))
+    touches = base / "touches"
+    shutil.rmtree(touches, ignore_errors=True)
+    for name in ("t1", "t2", "t3", "t4"):
+        (touches / name).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sources[0], touches / name / f"{name}.mp4")
+    dest = base / "tri" / "touches"
+    window.cfg.set_destinations([{"key": "6", "label": "Touches", "path": str(dest)}])
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(touches, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) == 4, 60)
+    window.toggle_board(True)
+    pump(app, 0.4)
+    board = window.board
+    window.index = 0
+    first = window.current
+
+    class _Cursor:
+        spot = QPoint(-5000, -5000)
+
+        @staticmethod
+        def pos():
+            return _Cursor.spot
+
+    def _over(widget):
+        _Cursor.spot = widget.mapToGlobal(widget.rect().center())
+
+    def _key(key, text="", repeat=False, modifiers=Qt.NoModifier):
+        window.keyPressEvent(QKeyEvent(QEvent.KeyPress, key, modifiers, text, repeat))
+
+    asked = []
+    kept_question = _QMB.question
+    answer = {"value": _QMB.Yes}
+
+    def _question(*args, **kwargs):
+        asked.append(args[2] if len(args) > 2 else "")
+        return answer["value"]
+
+    real_cursor = vs_window.QCursor
+    vs_window.QCursor = _Cursor
+    _QMB.question = staticmethod(_question)
+    try:
+        # -- rien sous la souris : rien ne part, et on le dit ---------------
+        said = []
+        kept_banner = window.show_banner
+        window.show_banner = lambda text, tone="info": said.append(text)
+        try:
+            _key(Qt.Key_Delete)
+            _key(Qt.Key_6, "6")
+            _key(Qt.Key_1, "1")
+        finally:
+            window.show_banner = kept_banner
+        check(not window.transfers.busy and not any(i.status for i in window.items)
+              and window.ratings.get(first.path) == 0,
+              "planche, rien de survolé : Suppr, une destination et 1 ne touchent à rien")
+        check(said and all("Survolez" in text for text in said),
+              f"et le bandeau dit de survoler une vignette ({said[:1]})")
+        _key(Qt.Key_Backspace)
+        check(not window.transfers.busy and first.path.exists(),
+              "Retour arrière ne supprime plus rien")
+
+        # -- la carte survolee, et elle seule --------------------------------
+        target = board.items[1]
+        _over(board.cards[1])
+        _key(Qt.Key_Delete)
+        check(window.browsing and window.viewer.currentWidget() is board
+              and window.stack.currentIndex() == PAGE_SORT,
+              "Suppr sur une vignette : on reste sur la planche, aucune fiche ne s'ouvre")
+        settle(app, window, 30)
+        check(target.status == "deleted" and not target.path.exists()
+              and first.status == "" and first.path.exists(),
+              "c'est la vignette survolée qui part, pas l'élément courant")
+        check(board.cards[1].property("state") == "écarté",
+              "sa carte le montre aussitôt le transfert fini")
+        check(bool(window.history), "la suppression peut s'annuler")
+
+        other = board.items[2]
+        _over(board.cards[2])
+        _key(Qt.Key_Delete, repeat=True)
+        _key(Qt.Key_6, "6", repeat=True)
+        check(not window.transfers.busy and other.status == "",
+              "une touche maintenue n'enchaîne ni suppression ni envoi")
+        _key(Qt.Key_6, "6")
+        settle(app, window, 30)
+        check(other.status == "moved" and (dest / other.path.name).exists()
+              and window.viewer.currentWidget() is board,
+              "une destination envoie la vignette survolée, sans quitter la planche")
+        third = board.items[3]
+        _over(board.cards[3])
+        _key(Qt.Key_1, "1")
+        check(window.ratings.get(third.path) > 0, "1 met la vignette survolée en favori")
+        _key(Qt.Key_0, "0")
+        check(window.ratings.get(third.path) == 0, "0 l'en retire")
+        page = board.page
+        _key(Qt.Key_Right)
+        check(window.browsing and window.viewer.currentWidget() is board
+              and board.page == page,
+              "→ sur la planche ne remplace plus les vignettes par une fiche")
+
+        # -- l'historique vaut pour la seance ---------------------------------
+        window.start_root(base / "root", MODE_FOLDERS)
+        wait_for(app, lambda: not window.scanning, 60)
+        check(len(window.history) >= 2,
+              f"changer de dossier ne vide plus l'historique ({len(window.history)})")
+        window.act_undo()
+        settle(app, window, 30)
+        check((touches / other.path.name).exists() and not (dest / other.path.name).exists(),
+              "Ctrl+Z défait un envoi fait dans un autre dossier")
+        window.act_undo()
+        settle(app, window, 30)
+        check((touches / target.path.name).exists(),
+              "puis la suppression d'avant")
+
+        # -- un lot : une question, et la planche reste -----------------------
+        window.start_root(touches, MODE_FOLDERS)
+        wait_for(app, lambda: not window.scanning and len(window.items) == 4, 60)
+        window.toggle_board(True)
+        pump(app, 0.3)
+        _Cursor.spot = QPoint(-5000, -5000)
+        window.pick_all()
+        asked.clear()
+        answer["value"] = _QMB.No
+        _key(Qt.Key_Delete)
+        check(len(asked) == 1 and "4 élément(s)" in asked[0]
+              and not window.transfers.busy and all(i.path.exists() for i in window.items),
+              f"cocher tout puis Suppr : une seule question, « Non » ne touche à rien "
+              f"({asked[:1]})")
+        check("fermeture" in asked[0],
+              "la question dit ce que deviendra la sélection à la fermeture")
+        answer["value"] = _QMB.Yes
+        asked.clear()
+        before = len(window.history)
+        window.delete_picked()
+        check(len(asked) == 1 and window.viewer.currentWidget() is board
+              and window.browsing,
+              "« Oui » : tout part d'un bloc, sans ouvrir une seule fiche")
+        settle(app, window, 60)
+        check(all(i.status == "deleted" for i in window.items)
+              and len(window.history) == before + 4 and not board.picked_ids,
+              "les quatre sont écartés, chacun annulable, et les coches tombent")
+        for _ in range(4):
+            window.act_undo()
+            settle(app, window, 30)
+        check(all((touches / n).exists() for n in ("t1", "t2", "t3", "t4")),
+              "et Ctrl+Z les ramène un à un")
+    finally:
+        vs_window.QCursor = real_cursor
+        _QMB.question = kept_question
+
+    # -- un groupe de doublons ne part jamais en entier -----------------------
+    a = _Item(path=Path("Q:/d/a.mp4"), kind=MODE_FILES, videos=[], video_count=1,
+              file_count=1)
+    b = _Item(path=Path("Q:/d/b.mp4"), kind=MODE_FILES, videos=[], video_count=1,
+              file_count=1)
+    a.dupe_group = b.dupe_group = 7
+    kept_all = window.all_items
+    window.all_items = [a, b]
+    try:
+        kept, spared = window._spare_last_copies([a, b])
+        check(kept == [b] and spared == 1,
+              "tout un groupe coché : son meilleur exemplaire reste")
+        b.status = "deleted"
+        kept, spared = window._spare_last_copies([a])
+        check(kept == [] and spared == 1, "le dernier exemplaire ne part pas seul non plus")
+    finally:
+        window.all_items = kept_all
+
+    # -- un favori plus profond, jamais compte : la garde demande -------------
+    asked.clear()
+    _QMB.question = staticmethod(_question)
+    answer["value"] = _QMB.No
+    try:
+        deep = _Item(path=Path("Q:/d/profond"), kind=MODE_FOLDERS,
+                     videos=[Path("Q:/d/profond/v.mp4")], video_count=1, file_count=-1)
+        plain = _Item(path=Path("Q:/d/net"), kind=MODE_FOLDERS,
+                      videos=[Path("Q:/d/net/v.mp4")], video_count=1, file_count=1)
+        refused = not window._confirm_folder_delete(deep)
+        plain_ok = window._confirm_folder_delete(plain)
+    finally:
+        _QMB.question = kept_question
+    check(refused and len(asked) == 1 and "pas été compté" in asked[0],
+          "un dossier au contenu non compté ne part pas sans question")
+    check(plain_ok and len(asked) == 1, "un dossier de vidéos seules part sans question")
+    check("Q:" in asked[0] and "fermeture" in asked[0],
+          "la question donne le chemin et ce qui arrivera à la fermeture")
+
+    # -- le bouton rouge dit la verite sur le NAS -----------------------------
+    drive = os.path.splitdrive(str(touches))[0].upper()
+    kept_remote = dict(window._remote_drives)
+    kept_mode = window.cfg["delete_mode"]
+    try:
+        window.cfg["delete_mode"] = "recycle"
+        window._remote_drives[drive] = False
+        local = window._delete_label()
+        window._remote_drives[drive] = True
+        remote = window._delete_label()
+        fate = window._fate_text(touches)
+    finally:
+        window._remote_drives = kept_remote
+        window.cfg["delete_mode"] = kept_mode
+    check(local == DELETE_LABELS["recycle"] and "détruit à la fermeture" in remote,
+          f"sur le NAS, le bouton ne promet plus la corbeille ({remote!r})")
+    check("définitivement" in fate, "ni le bandeau")
+
+    # -- compter s'arrete, sans passer pour le compte de la collection --------
+    state_before = dict(window.cfg["collection"] or {})
+    window._count_stopped = True
+    window._told_count(touches, 3)
+    check((window.cfg["collection"] or {}).get("videos") == state_before.get("videos"),
+          "un comptage arrêté n'est pas retenu comme celui de la collection")
+
+    # -- le mur : le panneau survole, et lui seul -----------------------------
+    # Les videos du jeu de test sont horizontales : le mur les recoit cochees.
+    window.toggle_board(True)
+    pump(app, 0.2)
+    window.pick_all()
+    window.wall_picked()
+    ok = wait_for(app, lambda: any(p.video_path and p.isVisible()
+                                   for p in window.wall.panes), 30)
+    check(ok, "le mur joue")
+    if ok:
+        vs_window.QCursor = _Cursor
+        try:
+            _Cursor.spot = QPoint(-5000, -5000)
+            said = []
+            kept_banner = window.show_banner
+            window.show_banner = lambda text, tone="info": said.append(text)
+            try:
+                _key(Qt.Key_Delete)
+            finally:
+                window.show_banner = kept_banner
+            check(not window.transfers.busy and said and "Survolez" in said[0],
+                  "mur, rien de survolé : Suppr ne touche à rien")
+            pane = next(p for p in window.wall.panes if p.video_path and p.isVisible())
+            video = Path(pane.video_path)
+            _over(pane.stage)
+            _key(Qt.Key_1, "1")
+            check(window.ratings.get(str(video)) > 0 and pane.favorite,
+                  "1 sur le mur : la vidéo du panneau survolé passe en favori")
+            _key(Qt.Key_0, "0")
+            _key(Qt.Key_Delete)
+            settle(app, window, 30)
+            check(not video.exists() and window.tab == TAB_SPLIT
+                  and window.viewer.currentWidget() is window.wall,
+                  "Suppr sur le mur écarte la vidéo survolée, et le mur reste")
+            check(str(video) not in window.wall.pool,
+                  "elle ne revient plus au prochain tirage")
+            _key(Qt.Key_P, "p", modifiers=Qt.ControlModifier)
+            check(window.tab == TAB_SPLIT and window.viewer.currentWidget() is window.wall,
+                  "Ctrl+P ne mène plus du mur à une planche vide")
+            window.act_undo()
+            settle(app, window, 30)
+            check(video.exists(), "et Ctrl+Z la ramène")
+        finally:
+            vs_window.QCursor = real_cursor
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+
+
 def _transfer_for_test(src, dest):
     from videosorter.transfer import Transfer
     Path(dest).mkdir(parents=True, exist_ok=True)
@@ -5137,6 +5414,7 @@ def main() -> int:
     check_new_features(app, window, base, root, flat, tri)
     check_media(app, window, base)
     check_wiring(app, window, base, root)
+    check_keys_and_batches(app, window, base)
 
     window.close()
     pump(app, 0.3)

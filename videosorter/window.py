@@ -266,7 +266,17 @@ class MainWindow(QMainWindow):
         self.pages: dict = {}       # page d'apercus courante par element
         self.sort_mode = ""         # "" | "desc" | "asc" : classement des apercus
         self.criteria: dict = {}    # filtres chiffres de la planche
+        # Tout ce que Ctrl+Z peut defaire, pour toute la seance.
         self.history: list = []
+        # Les elements dont un transfert est en vol, par identifiant : son
+        # retour les retrouve sans parcourir la collection.
+        self._in_flight: dict = {}
+        # Lecteur -> partage reseau ou non : la question revient a chaque fiche.
+        self._remote_drives: dict = {}
+        # Comptage et verification arretes a la demande : leur resultat
+        # partiel ne doit pas passer pour celui de la collection.
+        self._count_stopped = False
+        self._audit_stopped = False
         self.stats = {"moved": 0, "deleted": 0, "skipped": 0}
         self.scan_thread: RefreshThread | None = None
         self.scanning = False
@@ -649,7 +659,9 @@ class MainWindow(QMainWindow):
              self.playlist_picked),
             ("folder-input", "Déplacer…", "Cliquez ensuite un dossier de l'arborescence",
              self.move_picked_hint),
-            ("trash-2", "Supprimer", "Écarte les vidéos cochées", self.delete_picked),
+            ("trash-2", "Supprimer",
+             "Écarte les éléments cochés dans la corbeille de session "
+             "(Ctrl+B) — sur le NAS, détruits à la fermeture", self.delete_picked),
             ("x", "Annuler", "Décoche tout", self.clear_picked),
         ):
             button = QPushButton(text, self.picked_bar)
@@ -1062,7 +1074,8 @@ class MainWindow(QMainWindow):
         self._scan_top = False
         self.board.empty.setText("Rien à afficher ici.")
         self.plans = {}
-        self.history = []
+        # L'historique d'annulation n'est pas remis a zero : il vaut pour la
+        # seance. Les compteurs, eux, ne font que le bilan de ce dossier-ci.
         self.index = 0
         self.stats = {"moved": 0, "deleted": 0, "skipped": 0}
         self.preview.cancel_all()
@@ -1117,7 +1130,7 @@ class MainWindow(QMainWindow):
         self._list_leaf = ""
         self.crumbs.set_path(self._origin_for(self.root), self.root)
         self._apply_selectors()
-        self.commands.rebuild(self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer"))
+        self._rebuild_commands(force=True)
         # En planche, la vue reste la planche : basculer sur la fiche le temps
         # de l'analyse faisait clignoter l'affichage a chaque changement d'onglet.
         self.viewer.setCurrentWidget(
@@ -1350,8 +1363,11 @@ class MainWindow(QMainWindow):
         for entry_path, item in list(self._restored_items()):
             item.status = ""
             item.status_detail = ""
+            self._settle_board(item)
         self.update_counter()
-        if self.current is not None:
+        # Sur la planche, on y reste : redessiner la fiche courante la
+        # remplacait par une video qu'on ne regardait pas.
+        if self.current is not None and not self.browsing:
             self.show_item(self.index)
 
     def _restored_items(self):
@@ -1366,8 +1382,16 @@ class MainWindow(QMainWindow):
                     yield item.item_id, item
 
     def _trash_restored(self, stored: str, target: str) -> None:
-        """Restaure depuis la corbeille : l'etoile revient avec l'element."""
+        """Restaure depuis la corbeille : l'etoile revient avec l'element.
+
+        Et Ctrl+Z oublie cette suppression : l'annuler encore echouait sur un
+        element deja revenu, et masquait l'annulation d'avant.
+        """
         self.ratings.rename(stored, target)
+        gone = os.path.normcase(str(stored))
+        self.history = [entry for entry in self.history
+                        if not (entry.dst is not None
+                                and os.path.normcase(str(entry.dst)) == gone)]
 
     def _trash_purged(self, paths: list) -> None:
         """Detruits pour de bon : leurs favoris n'ont plus d'objet."""
@@ -1497,8 +1521,19 @@ class MainWindow(QMainWindow):
             self.verify_collection()
 
     def verify_collection(self) -> None:
-        """Un clic : compter, puis verifier les vignettes. Les deux chiffres qui tranchent."""
+        """Un clic : compter, puis verifier les vignettes. Les deux chiffres qui tranchent.
+
+        Recliquer pendant l'un ou l'autre arrete : sur tout le NAS, cela dure
+        des minutes, et rien ne permettait d'y renoncer.
+        """
         if self.root is None:
+            return
+        if self.counter is not None or self.audit is not None:
+            self._audit_after_count = False
+            if self.counter is not None:
+                self.count_videos()
+            if self.audit is not None:
+                self.audit_thumbs()
             return
         self._audit_after_count = True
         self.count_videos()
@@ -1518,9 +1553,15 @@ class MainWindow(QMainWindow):
         thread.finished.connect(finished)
 
     def count_videos(self) -> None:
-        """Compte les videos sous la racine, et le dit en clair."""
-        if self.root is None or self.counter is not None:
+        """Compte les videos sous la racine, et le dit en clair. Recliquer arrete."""
+        if self.root is None:
             return
+        if self.counter is not None:
+            self._count_stopped = True
+            self.counter.stop()
+            self.show_banner("Comptage : arrêt demandé…", "quiet")
+            return
+        self._count_stopped = False
         top = self.top_root()
         self.counter = VideoCount(top, self.cfg["skip_hidden"], self)
         self._own_thread(self.counter, "counter")
@@ -1533,6 +1574,14 @@ class MainWindow(QMainWindow):
 
     def _told_count(self, top, total: int) -> None:
         self.counter = None
+        if self._count_stopped:
+            # Un compte interrompu n'est pas celui de la collection.
+            self._count_stopped = False
+            self._audit_after_count = False
+            self._refresh_state()
+            self.show_banner(f"Comptage arrêté : {total} vidéo(s) vues jusque-là.",
+                             "quiet")
+            return
         if self.origin is None or Path(top) == Path(self.origin):
             self._note_state(videos=total, counted_at=self._stamp())
         self.show_banner(
@@ -1548,9 +1597,16 @@ class MainWindow(QMainWindow):
 
         « Est-ce que ca analyse ? » ne se repond pas en regardant une barre : on
         compte les fichiers reellement presents. Rien n'est fabrique ici.
+        Recliquer arrete.
         """
-        if self.root is None or self.audit is not None:
+        if self.root is None:
             return
+        if self.audit is not None:
+            self._audit_stopped = True
+            self.audit.stop()
+            self.show_banner("Vérification : arrêt demandé…", "quiet")
+            return
+        self._audit_stopped = False
         top = self.top_root()
         self.audit = ThumbAudit(top, self.cfg["thumb_width"],
                                 self.cfg["skip_hidden"], self)
@@ -1567,6 +1623,12 @@ class MainWindow(QMainWindow):
 
     def _told_audit(self, seen: int, ready: int) -> None:
         self.audit = None
+        if self._audit_stopped:
+            self._audit_stopped = False
+            self._refresh_state()
+            self.show_banner(f"Vérification arrêtée : {ready} vignette(s) sur "
+                             f"{seen} vidéo(s) vues jusque-là.", "quiet")
+            return
         self._note_state(thumbs=ready, audited=seen, audited_at=self._stamp())
         missing = max(0, seen - ready)
         if not seen:
@@ -1661,7 +1723,7 @@ class MainWindow(QMainWindow):
         extra = 0
         doubtful = 0
         gagne = 0
-        for group in groups:
+        for number, group in enumerate(groups):
             _each, paths = group
             if getattr(group, "sure", True):
                 extra += len(paths) - 1
@@ -1672,9 +1734,13 @@ class MainWindow(QMainWindow):
                 doubtful += 1
             for path in paths:
                 path = _as_path(path)
-                items.append(Item(path=path, kind=MODE_FILES,
-                                  videos=[path], video_count=1,
-                                  file_count=1))
+                item = Item(path=path, kind=MODE_FILES, videos=[path],
+                            video_count=1, file_count=1)
+                # Le groupe de chacun : Ctrl+A puis Supprimer emportait
+                # l'original avec ses copies. Un groupe garde toujours au
+                # moins son meilleur exemplaire (voir _spare_last_copies).
+                item.dupe_group = number
+                items.append(item)
         self.stop_scan()
         self.browsing = True
         self.all_items = items
@@ -1698,7 +1764,8 @@ class MainWindow(QMainWindow):
         self.show_banner(
             " ; ".join(said) + ". Cochez ce dont vous ne voulez plus, puis "
             "« Supprimer » : tout part dans la corbeille de session et revient "
-            "par Ctrl+Z.", "info")
+            "par Ctrl+Z jusqu'à la fermeture. Un groupe garde toujours au "
+            "moins un exemplaire.", "info")
 
     def _only_in_collection(self, groups: list) -> list:
         """Ecarte des groupes ce qui n'est plus dans la collection.
@@ -2211,6 +2278,9 @@ class MainWindow(QMainWindow):
                 new.status_detail = old.status_detail
                 new.info = old.info
                 holder[position] = new
+                if self._in_flight.get(old.item_id) is old:
+                    # Son transfert doit revenir a l'element qu'on affiche.
+                    self._in_flight[old.item_id] = new
                 if old.item_id == current_id and not redraw:
                     redraw = [str(v) for v in old.videos] != [str(v) for v in new.videos]
         if self.browsing:
@@ -3205,7 +3275,7 @@ class MainWindow(QMainWindow):
         Elle etait recreee a chaque video : une quinzaine de widgets detruits
         et reconstruits par fleche, pour afficher exactement la meme chose.
         """
-        label = DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer")
+        label = self._delete_label()
         signature = (repr(self.cfg.destinations), label)
         if force or signature != self._commands_signature:
             self._commands_signature = signature
@@ -3722,8 +3792,17 @@ class MainWindow(QMainWindow):
                 player.stop()
                 player.setSource(QUrl())
             self.single.release()
+            # Un panneau arrete garde son fichier ouvert : le deplacer
+            # echouait alors apres vingt secondes d'essais. On les vide — sauf
+            # si le mur est a l'ecran, qu'on ne veut pas voir s'eteindre.
+            on_screen = (self.tab == TAB_SPLIT
+                         and self.viewer.currentWidget() is self.wall
+                         and self.stack.currentIndex() == PAGE_SORT)
             for pane in self.wall.panes:
-                pane.stop()
+                if pane.video_path and not on_screen:
+                    pane.clear()
+                else:
+                    pane.stop()
             self.grid.video.hide()
             self.board.video.hide()
             self.preview.cancel_all()
@@ -3864,10 +3943,52 @@ class MainWindow(QMainWindow):
         # Le panneau qui la montre la lache, et les ffmpeg qui la lisent sont
         # arretes : sans cela, le deplacement butait sur le fichier ouvert.
         self._release_media(source)
+        self._leave_wall_pool(source)
         self.transfers.submit(Transfer(
             kind="move", src=source, dest=dest_dir, label=label, item_id=""))
         self.show_banner(f"« {source.name} » → {label}", "done")
         return True
+
+    def delete_one(self, path) -> bool:
+        """Ecarte **ce fichier** dans la corbeille de session, depuis le mur.
+
+        Le pendant de `move_one` : Suppr sur le mur visait l'element courant
+        de la liste restee dessous, jamais la video qu'on regardait.
+        """
+        source = Path(path)
+        state = actions.probe(source)
+        if state != "ok":
+            self.show_banner(
+                f"Introuvable : {source.name}" if state == "absent" else
+                f"NAS injoignable : « {source.name} » n'a pas été touché.",
+                "error")
+            return False
+        # Sa fiche « video », si l'onglet Videos l'a deja faite : elle dira
+        # qu'elle est partie, et la corbeille saura sa taille.
+        item = self._flat_cache.get(str(source))
+        if item is not None and item.locked:
+            return False
+        self._release_media(source)
+        self._leave_wall_pool(source)
+        if item is not None:
+            item.status = "pending_delete"
+            item.status_detail = "Corbeille"
+        self._submit(Transfer(kind="move", purpose="delete", src=source,
+                              dest=self.trash.folder_for(source),
+                              label="Corbeille",
+                              item_id=item.item_id if item is not None else ""),
+                     item)
+        self.show_banner(self._deleted_text(item) if item is not None else
+                         f"« {source.name} » → corbeille de session · Ctrl+Z ou "
+                         "Ctrl+B pour la reprendre", "error")
+        return True
+
+    def _leave_wall_pool(self, path) -> None:
+        """Ce qui part ne revient plus sur le mur au prochain tirage."""
+        pool = self.wall.pool
+        text = str(path)
+        if text in pool:
+            pool.remove(text)
 
     def wall_peek(self, index: int, path: str) -> None:
         """Clic droit sur un panneau : ses neuf instants, par-dessus lui."""
@@ -4215,9 +4336,13 @@ class MainWindow(QMainWindow):
                               if str(video).startswith(prefix)]
                     if not inside:
                         continue
+                    # Ses videos sont connues, pas ses autres fichiers : -1
+                    # dit « non compte », et la garde de suppression demande.
+                    # En annoncer autant que de videos le faisait passer pour
+                    # un dossier de videos seules, papiers compris.
                     item = Item(path=Path(key), kind=MODE_FOLDERS,
                                 videos=inside, video_count=len(inside),
-                                file_count=len(inside))
+                                file_count=-1)
                 folders.append(item)
                 known.add(key)
         videos = []
@@ -5264,32 +5389,243 @@ class MainWindow(QMainWindow):
             "Cliquez le dossier de destination dans l'arborescence.", "info")
 
     def delete_picked(self) -> None:
-        for item in list(self.board.picked_items()):
-            position = self._position_of(item)
-            if position >= 0:
-                self.index = position
-                self.act_delete()
-        self.board.clear_picked()
+        """Ecarte les elements coches, sans quitter la planche."""
+        self._delete_items(list(self.board.picked_items()))
 
     def move_picked(self, dest: dict) -> int:
-        """Envoie tous les elements coches vers cette destination."""
-        moved = 0
-        for item in list(self.board.picked_items()):
-            position = self._position_of(item)
-            if position < 0:
-                continue
-            self.index = position
-            before = self.stats["moved"]
-            self.act_move(dest)
-            moved += self.stats["moved"] > before
-        self.board.clear_picked()
-        return moved
+        """Envoie tous les elements coches vers cette destination.
 
-    def _position_of(self, item) -> int:
-        for position, other in enumerate(self.items):
-            if other.item_id == item.item_id:
-                return position
-        return -1
+        Rend le nombre d'envois reellement partis.
+        """
+        return self._move_items(list(self.board.picked_items()), dest)
+
+    def _delete_items(self, items: list) -> int:
+        """Ecarte ces elements dans la corbeille de session, sans avancer.
+
+        Chaque element passait par la touche Suppr : une fiche s'ouvrait pour
+        chacun, la planche disparaissait, et l'on jugeait deux cents fiches
+        pour rien. Ici, tout part d'un bloc, sans rien ouvrir, et un seul
+        bandeau dit ce qui est parti. Au-dela d'un element, une seule
+        question, qui dit ce que l'on s'apprete a ecarter : Ctrl+A puis Suppr
+        videait toute la liste sans un mot.
+        """
+        picked = bool(self.board.picked_ids) and any(
+            item.item_id in self.board.picked_ids for item in items)
+        items = [item for item in items if not item.locked]
+        if not items:
+            if picked:
+                self.board.clear_picked()
+            self.show_banner("Rien à écarter : c'est déjà parti.", "quiet")
+            return 0
+        # Mots-cles et dossiers de tete ne s'ecartent pas : ecartes d'emblee,
+        # ils ne gonflent pas les chiffres de la question.
+        fixed = [item for item in items if not item.movable
+                 or Path(item.path).name.startswith(PARENT_PREFIX)]
+        if fixed and len(fixed) < len(items):
+            gone = {id(item) for item in fixed}
+            items = [item for item in items if id(item) not in gone]
+        else:
+            fixed = []          # tous tels : chacun dira son refus
+        items, spared = self._spare_last_copies(items)
+        if not items:
+            self.show_banner(
+                "C'est le dernier exemplaire de ce groupe de doublons : il reste.",
+                "quiet")
+            return 0
+        if len(items) == 1 and not spared:
+            item = items[0]
+            state, why = self._submit_delete(item)
+            if state == "sent":
+                self._settle_board(item)
+                self.show_banner(self._deleted_text(item), "error")
+                if picked:
+                    self.board.clear_picked()
+                return 1
+            if why:
+                self.show_banner(why, "error")
+            return 0
+        if not self._confirm_many_delete(items, spared):
+            return 0
+        # Un seul aller-retour vers le partage pour tout le lot : cent etats
+        # demandes un par un, c'etait cent attentes sur le fil de l'interface.
+        # Ce qui aurait disparu entre-temps echouera proprement en fond.
+        if actions.probe(items[0].path) == "injoignable":
+            self.show_banner("NAS injoignable : rien n'a été écarté. Réessayez "
+                             "dans un instant.", "error")
+            return 0
+        sent, refused = 0, [f"« {item.name} » ne s'écarte pas d'ici"
+                            for item in fixed]
+        for item in items:
+            state, why = self._submit_delete(item, ask=False, disk=False)
+            if state == "sent":
+                sent += 1
+                self._settle_board(item)
+            else:
+                refused.append(why or item.name)
+        if picked:
+            self.board.clear_picked()
+        self.show_banner(self._batch_text(sent, refused, "écarté(s)")
+                         + " · Ctrl+B pour les reprendre", "error")
+        return sent
+
+    def _move_items(self, items: list, dest: dict) -> int:
+        """Envoie ces elements vers une destination, sans avancer.
+
+        Meme principe que `_delete_items` : aucune fiche ouverte, un bandeau
+        pour le lot. Le bandeau annoncait « 0 element envoye » : il comptait
+        les transferts deja finis, et non ceux qu'on venait de lancer.
+        """
+        picked = bool(self.board.picked_ids) and any(
+            item.item_id in self.board.picked_ids for item in items)
+        items = [item for item in items if not item.locked]
+        dest_dir = Path(dest["path"])
+        label = dest.get("label") or dest_dir.name
+        if not items:
+            if picked:
+                self.board.clear_picked()
+            self.show_banner("Rien à envoyer : c'est déjà parti.", "quiet")
+            return 0
+        if len(items) == 1:
+            item = items[0]
+            state, why = self._submit_move(item, dest)
+            if state == "sent":
+                self._settle_board(item)
+                self.show_banner(f"« {item.name} » → {label}", "done")
+                if picked:
+                    self.board.clear_picked()
+                return 1
+            if why:
+                self.show_banner(why, "error")
+            return 0
+        if actions.probe(items[0].path) == "injoignable":
+            self.show_banner("NAS injoignable : rien n'a été déplacé. Réessayez "
+                             "dans un instant.", "error")
+            return 0
+        sent, refused = 0, []
+        for item in items:
+            state, why = self._submit_move(item, dest, disk=False)
+            if state == "sent":
+                sent += 1
+                self._settle_board(item)
+            else:
+                refused.append(why or item.name)
+        if picked:
+            self.board.clear_picked()
+        self.show_banner(self._batch_text(sent, refused, "envoyé(s)")
+                         + f" vers « {label} »", "done" if sent else "error")
+        return sent
+
+    def _rate_items(self, items: list, stars: int) -> None:
+        """Favori, ou non, pour ces elements — sans ouvrir aucune fiche."""
+        wanted = 1 if int(stars or 0) > 0 else 0
+        items = [item for item in items if not item.is_tag]
+        if not items:
+            return
+        for item in items:
+            if (self.ratings.get(item.path) > 0) != bool(wanted):
+                # set() bascule : rappeler la meme valeur l'effacerait.
+                self.ratings.set(item.path, wanted)
+            position = self._board_position_of(f"board@{item.item_id}")
+            if position >= 0:
+                self.board.set_stars(position, wanted)
+        if len(items) == 1:
+            name = items[0].name
+            self.show_banner(f"★ « {name} » en favori" if wanted
+                             else f"« {name} » retiré des favoris", "quiet")
+        else:
+            self.show_banner(f"★ {len(items)} élément(s) en favori" if wanted
+                             else f"{len(items)} élément(s) retiré(s) des favoris",
+                             "quiet")
+
+    def _rate_paths(self, paths: list, stars: int) -> None:
+        """Favori, ou non, pour des videos du mur, designees par leur chemin."""
+        wanted = 1 if int(stars or 0) > 0 else 0
+        for path in paths:
+            if (self.ratings.get(path) > 0) != bool(wanted):
+                self.ratings.set(path, wanted)
+            self.wall.set_favorite(path, bool(wanted))
+        name = Path(paths[0]).name if paths else ""
+        self.show_banner(f"★ « {name} » en favori" if wanted
+                         else f"« {name} » retiré des favoris", "quiet")
+
+    @staticmethod
+    def _batch_text(sent: int, refused: list, verb: str) -> str:
+        """« 12 element(s) ecarte(s) · 2 refuse(s) : raison », en une ligne."""
+        text = f"{sent} élément(s) {verb}"
+        if refused:
+            text += f" · {len(refused)} refusé(s) : {refused[0]}"
+            if len(refused) > 1:
+                text += "…"
+        return text
+
+    def _settle_board(self, item) -> None:
+        """La carte de cet element prend son nouvel etat, si elle est a l'ecran.
+
+        Cherchee sur la seule page affichee : parcourir toute la liste a
+        chaque transfert termine coutait plus que le transfert lui-meme.
+        """
+        if item is None or not self.browsing:
+            return
+        position = self._board_position_of(f"board@{item.item_id}")
+        if position >= 0:
+            self.board.set_state(position, item.status)
+
+    def _spare_last_copies(self, items: list) -> tuple:
+        """Dans la vue des doublons, un groupe ne part jamais en entier.
+
+        Cocher toute la liste et supprimer emportait l'original avec ses
+        copies. Si tout ce qui reste d'un groupe est vise, on garde son
+        meilleur exemplaire (le premier du groupe : definition, taille, duree).
+        Rend (elements a ecarter, nombre de groupes epargnes).
+        """
+        groups = {getattr(item, "dupe_group", None) for item in items}
+        groups.discard(None)
+        if not groups:
+            return items, 0
+        wanted = {id(item) for item in items}
+        members: dict = {}
+        for item in self.all_items:
+            group = getattr(item, "dupe_group", None)
+            if group in groups and not item.locked:
+                members.setdefault(group, []).append(item)
+        keep = set()
+        for group, present in members.items():
+            if present and all(id(item) in wanted for item in present):
+                keep.add(id(present[0]))
+        kept = [item for item in items if id(item) not in keep]
+        return kept, len(keep)
+
+    def _confirm_many_delete(self, items: list, spared: int = 0) -> bool:
+        """Une seule question pour tout un lot, avec « Non » par defaut.
+
+        Tout ce qu'elle dit est deja en memoire : aucun acces au disque.
+        """
+        folders = [item for item in items if item.kind == MODE_FOLDERS]
+        videos = sum(max(0, item.video_count) for item in items)
+        others = sum(max(0, item.file_count - item.video_count)
+                     for item in folders)
+        unknown = sum(1 for item in folders
+                      if item.file_count < 0 or item.incomplete or item.unreadable)
+        size = sum(max(0, item.size) for item in items)
+        lines = [f"{len(items)} élément(s)"
+                 + (f", dont {len(folders)} dossier(s)" if folders else "")
+                 + f" : {videos} vidéo(s)"
+                 + (f" et {others} autre(s) fichier(s) — documents, images…"
+                    if others else "")
+                 + (f", {human_size(size)}" if size else "") + "."]
+        if unknown:
+            lines.append(f"{unknown} dossier(s) n'ont pas pu être comptés en "
+                         "entier : ils contiennent peut-être autre chose que "
+                         "des vidéos.")
+        if spared:
+            lines.append(f"Le meilleur exemplaire de {spared} groupe(s) de "
+                         "doublons est gardé : un groupe ne part jamais en entier.")
+        lines.append(self._fate_text(items[0].path, plural=True))
+        answer = QMessageBox.question(
+            self, "Écarter la sélection ?",
+            "\n\n".join(lines) + "\n\nContinuer ?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
 
     def on_board_open(self, position: int) -> None:
         """Un clic sur une vignette descend a l'etage du dessous : sa fiche.
@@ -5411,10 +5747,8 @@ class MainWindow(QMainWindow):
     def on_tree_folder(self, path: str) -> None:
         # Une selection en cours prime : c'est elle qu'on vient de designer.
         if self.board.picked_ids and self.tree.action == "send":
-            moved = self.move_picked({"path": path, "label": Path(path).name})
-            self.show_banner(
-                f"{moved} élément(s) envoyé(s) vers « {Path(path).name} »",
-                "info")
+            # Le bandeau dit ce qui est vraiment parti, et ce qui a ete refuse.
+            self.move_picked({"path": path, "label": Path(path).name})
             return
         return self._on_tree_folder(path)
 
@@ -5759,63 +6093,172 @@ class MainWindow(QMainWindow):
                 return item
         return None
 
-    def _enqueue(self, job: Transfer, banner: str, tone: str) -> None:
-        """Lance l'operation en tache de fond et passe tout de suite a la suite."""
+    def _submit(self, job: Transfer, item=None) -> None:
+        """Lance l'operation en tache de fond, et retient a qui elle revient.
+
+        Le retour d'un transfert cherchait son element parmi toute la
+        collection : cent mille comparaisons a chaque transfert termine.
+        """
+        if item is not None and job.item_id:
+            self._in_flight[job.item_id] = item
         self.transfers.submit(job)
-        self.show_banner(banner, tone)
-        self.advance()
+
+    def _fate_text(self, path, plural: bool = False) -> str:
+        """Ce qui arrivera a ce qu'on ecarte, dit sans detour.
+
+        L'interface parlait de corbeille partout, alors que sur le NAS rien
+        n'y va : ce qui reste dans la corbeille de session y est detruit pour
+        de bon a la fermeture — c'est voulu, encore faut-il le savoir.
+        """
+        it = "ils" if plural else "il"
+        mode = self.cfg["delete_mode"]
+        back = f"d'ici là, Ctrl+Z ou Ctrl+B {'les' if plural else 'le'} reprennent."
+        if mode == "local_trash":
+            return (f"À la fermeture, {it} rejoindr{'ont' if plural else 'a'} "
+                    f"le dossier de secours de {APP_NAME} ; {back}")
+        if mode == "permanent" or self._is_remote(path):
+            return (f"À la fermeture de {APP_NAME}, {it} ser{'ont' if plural else 'a'} "
+                    f"détruit{'s' if plural else ''} définitivement ; {back}")
+        return (f"À la fermeture, {it} rejoindr{'ont' if plural else 'a'} la "
+                f"corbeille de Windows ; {back}")
+
+    def _is_remote(self, path) -> bool:
+        """Vrai sur un partage reseau. Retenu par lecteur : la question ne
+        touche pas le reseau, mais elle revient a chaque fiche."""
+        if path is None:
+            return False
+        text = str(path)
+        if text.startswith(("\\\\", "//")):
+            return True
+        drive = os.path.splitdrive(text)[0].upper()
+        if not drive:
+            return media.is_network_path(text)
+        known = self._remote_drives.get(drive)
+        if known is None:
+            known = self._remote_drives[drive] = media.is_network_path(text)
+        return known
+
+    def _delete_label(self) -> str:
+        """Ce que dit le bouton rouge : « a la corbeille » est faux sur le NAS."""
+        mode = self.cfg["delete_mode"]
+        if mode == "recycle" and self._is_remote(self.root):
+            return "Écarter — détruit à la fermeture"
+        return DELETE_LABELS.get(mode, "Supprimer")
+
+    def _deleted_text(self, item) -> str:
+        """Le bandeau d'un element ecarte : ou il est, et ce qu'il deviendra."""
+        text = f"« {item.name} » → corbeille de session · Ctrl+Z ou Ctrl+B pour le reprendre"
+        if self.cfg["delete_mode"] != "local_trash" and (
+                self.cfg["delete_mode"] == "permanent" or self._is_remote(item.path)):
+            text += " — détruit à la fermeture"
+        return text
+
+    def _confirm_folder_delete(self, item) -> bool:
+        """La garde d'un dossier qui n'est pas fait que de videos.
+
+        Un dossier de videos part sur une touche : se raviser, c'est Ctrl+Z.
+        Mais un dossier qui contient aussi des documents, des images ou des
+        programmes ne part pas sans qu'on l'ait lu — c'est ainsi qu'un dossier
+        entier de papiers a ete ecarte une fois. Un dossier qu'on n'a pas pu
+        compter (lu en partie, ou favori plus profond que la collection lue)
+        ne rassure pas davantage : on demande aussi.
+        """
+        if item.kind != MODE_FOLDERS:
+            return True
+        unknown = item.file_count < 0
+        others = 0 if unknown else item.file_count - item.video_count
+        partial = bool(getattr(item, "incomplete", False)
+                       or getattr(item, "unreadable", False))
+        if others <= 0 and not unknown and not partial:
+            return True
+        if others > 0:
+            what = (f"« {item.name} » contient {item.video_count} vidéo(s), mais "
+                    f"aussi {others} autre(s) fichier(s) : documents, images, "
+                    "programmes…")
+        elif unknown:
+            what = (f"Le contenu de « {item.name} » n'a pas été compté : il "
+                    "contient peut-être autre chose que des vidéos.")
+        else:
+            what = (f"« {item.name} » n'a pas pu être lu en entier (NAS) : il "
+                    "contient peut-être autre chose que des vidéos.")
+        where = str(item.path) + (f" — {human_size(item.size)}" if item.size > 0 else "")
+        answer = QMessageBox.question(
+            self, "Supprimer ce dossier ?",
+            f"{what}\n\n{where}\n\nTout le dossier sera écarté. "
+            f"{self._fate_text(item.path)}\n\nContinuer ?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
+
+    def _submit_delete(self, item, ask: bool = True, disk: bool = True) -> tuple:
+        """Ecarte cet element dans la corbeille de session, sans avancer.
+
+        Rend (etat, pourquoi) : « sent » s'il est parti, « absent » s'il n'est
+        plus la, « refused » sinon — pourquoi est vide si l'on a repondu non.
+        Ni bandeau ni avance : c'est a l'appelant de le dire, une fois pour
+        une touche, une fois pour cent coches. `disk` a faux, on ne demande
+        rien au partage : l'appelant l'a interroge une fois pour tout le lot.
+        """
+        if item is None or item.locked:
+            return "refused", ""
+        if not item.movable or Path(item.path).name.startswith(PARENT_PREFIX):
+            return "refused", "Un mot-clé ou un dossier de tête ne se supprime pas d'ici"
+        if disk:
+            state = actions.probe(item.path)
+            if state == "absent":
+                return "absent", f"Introuvable : {item.name}"
+            if state == "injoignable":
+                # Il n'a pas disparu : le NAS ne repond pas. On reste dessus.
+                return "refused", (f"NAS injoignable : « {item.name} » n'a pas "
+                                   "été touché. Réessayez dans un instant.")
+        if ask and not self._confirm_folder_delete(item):
+            return "refused", ""
+        self._release_media(item.path)
+        item.status = "pending_delete"
+        item.status_detail = "Corbeille"
+        self._submit(Transfer(kind="move", purpose="delete", src=item.path,
+                              dest=self.trash.folder_for(item.path),
+                              label="Corbeille", item_id=item.item_id), item)
+        return "sent", ""
+
+    def _submit_move(self, item, dest: dict, disk: bool = True) -> tuple:
+        """Envoie cet element vers une destination, sans avancer.
+
+        Rend (etat, pourquoi), comme `_submit_delete`.
+        """
+        if item is None or item.locked:
+            return "refused", ""
+        dest_dir = Path(dest["path"])
+        label = dest.get("label") or dest_dir.name
+        problem = self._move_objection(item, dest_dir, disk)
+        if problem:
+            return ("absent" if problem.startswith("Introuvable") else "refused",
+                    problem)
+        self._release_media(item.path)
+        item.status = "pending_move"
+        item.status_detail = label
+        self._submit(Transfer(kind="move", src=item.path, dest=dest_dir,
+                              label=label, item_id=item.item_id), item)
+        return "sent", ""
 
     def act_delete(self) -> None:
         """Écarte l'élément sans rien détruire : il part dans la corbeille de session."""
         item = self.current
         if item is None or item.locked:
             return self.advance()
-        if not item.movable or Path(item.path).name.startswith(PARENT_PREFIX):
+        kept, _spared = self._spare_last_copies([item])
+        if not kept:
             self.show_banner(
-                "Un mot-clé ou un dossier de tête ne se supprime pas d'ici",
-                "error",
-            )
+                "C'est le dernier exemplaire de ce groupe de doublons : il reste.",
+                "quiet")
             return
-        state = actions.probe(item.path)
-        if state == "absent":
-            self.show_banner(f"Introuvable : {item.name}", "error")
+        state, why = self._submit_delete(item)
+        if state == "sent":
+            self.show_banner(self._deleted_text(item), "error")
             return self.advance()
-        if state == "injoignable":
-            # Il n'a pas disparu : le NAS ne repond pas. On reste dessus.
-            self.show_banner(f"NAS injoignable : « {item.name} » n'a pas été "
-                             "touché. Réessayez dans un instant.", "error")
-            return
-        others = (item.file_count - item.video_count
-                  if item.kind == MODE_FOLDERS else 0)
-        # Un dossier lu en partie (sous-dossier illisible pendant une coupure)
-        # peut cacher ce que ses comptes ne disent pas : on demande aussi.
-        unsure = item.kind == MODE_FOLDERS and (
-            getattr(item, "incomplete", False) or getattr(item, "unreadable", False))
-        if others > 0 or unsure:
-            # Un dossier qui contient autre chose que des videos — documents,
-            # images, programmes — ne part pas sur une seule touche : c'est
-            # ainsi qu'un dossier entier de papiers a ete ecarte une fois.
-            what = (f"« {item.name} » contient {item.video_count} vidéo(s), mais "
-                    f"aussi {others} autre(s) fichier(s) : documents, images, "
-                    "programmes…" if others > 0 else
-                    f"« {item.name} » n'a pas pu être lu en entier (NAS) : il "
-                    "contient peut-être autre chose que des vidéos.")
-            answer = QMessageBox.question(
-                self, "Supprimer ce dossier ?",
-                what + "\n\nTout le dossier sera supprimé. Continuer ?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if answer != QMessageBox.Yes:
-                return
-        self._release_media(item.path)
-        item.status = "pending_delete"
-        item.status_detail = "Corbeille"
-        self._enqueue(
-            Transfer(kind="move", purpose="delete", src=item.path,
-                     dest=self.trash.folder_for(item.path),
-                     label="Corbeille", item_id=item.item_id),
-            f"« {item.name} » → corbeille  ·  Ctrl+Z ou Ctrl+B pour la rouvrir",
-            "error",
-        )
+        if why:
+            self.show_banner(why, "error")
+        if state == "absent":
+            self.advance()
 
     def act_move(self, dest: dict) -> None:
         item = self.current
@@ -5823,21 +6266,20 @@ class MainWindow(QMainWindow):
             return self.advance()
         dest_dir = Path(dest["path"])
         label = dest.get("label") or dest_dir.name
-        problem = self._move_objection(item, dest_dir)
-        if problem:
-            self.show_banner(problem, "error")
-            return
-        self._release_media(item.path)
-        item.status = "pending_move"
-        item.status_detail = label
-        self._enqueue(
-            Transfer(kind="move", src=item.path, dest=dest_dir,
-                     label=label, item_id=item.item_id),
-            f"« {item.name} » → {label}", "done",
-        )
+        state, why = self._submit_move(item, dest)
+        if state == "sent":
+            self.show_banner(f"« {item.name} » → {label}", "done")
+            return self.advance()
+        if why:
+            self.show_banner(why, "error")
 
-    def _move_objection(self, item, dest_dir: Path) -> str:
-        """Verifie d'avance ce qui condamnerait le transfert, pour ne pas avancer."""
+    def _move_objection(self, item, dest_dir: Path, disk: bool = True) -> str:
+        """Verifie d'avance ce qui condamnerait le transfert, pour ne pas avancer.
+
+        Sans `disk`, seulement ce qui se voit dans les chemins : pour un lot,
+        chaque question au partage etait une attente sur le fil de
+        l'interface, et le transfert refuse de toute facon ce qui cloche.
+        """
         if item.is_tag:
             return (f"« {item.name} » est un mot-clé, pas un dossier : entrez "
                     "dedans (Ctrl+↓) pour traiter les vidéos qu'il réunit.")
@@ -5846,6 +6288,17 @@ class MainWindow(QMainWindow):
                     "(Ctrl+↓) pour les traiter une par une.")
         if Path(item.path).name.startswith(PARENT_PREFIX):
             return f"« {item.name} » est un dossier de tête : il ne se déplace pas."
+        here = os.path.normcase(str(item.path)).rstrip("\\/")
+        there = os.path.normcase(str(dest_dir)).rstrip("\\/")
+        if os.path.normcase(str(Path(item.path).parent)).rstrip("\\/") == there:
+            # Deja dans ce dossier : l'y « envoyer » le renommait en « (2) ».
+            return f"« {item.name} » est déjà dans « {Path(dest_dir).name} »."
+        if there == here:
+            return "C'est déjà ce dossier."
+        if there.startswith(here + os.sep):
+            return "Impossible : la destination est dans le dossier à déplacer."
+        if not disk:
+            return ""
         state = actions.probe(item.path)
         if state == "absent":
             return f"Introuvable : {item.name}"
@@ -5892,16 +6345,25 @@ class MainWindow(QMainWindow):
                 "#3a3226",
             )
             return
-        self._release_media()
+        # Seuls les lecteurs qui montrent l'element se vident : tout decharger
+        # vidait aussi le mur qu'on regardait.
+        self._release_media(entry.dst or entry.src)
         self.history.pop()
         item = self._item_by_path(entry.src)
         if item is not None:
             item.status = "pending_undo"
-        self.transfers.submit(Transfer(
+        self._submit(Transfer(
             kind="undo", src=entry.dst or entry.src, entry=entry,
             label=entry.label, item_id=item.item_id if item else "",
-        ))
-        self.show_banner(f"Restauration de « {Path(entry.src).name} »…", "info")
+        ), item)
+        name = Path(entry.src).name
+        if item is None:
+            # L'historique vit toute la seance : ce qu'on annule peut venir
+            # d'un autre dossier, qu'on nomme alors.
+            self.show_banner(f"Restauration de « {name} » dans "
+                             f"« {Path(entry.src).parent.name} »…", "info")
+        else:
+            self.show_banner(f"Restauration de « {name} »…", "info")
 
     def _item_by_path(self, path: Path):
         for item in self.all_items:
@@ -5912,15 +6374,33 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Retour des transferts
     # ------------------------------------------------------------------
+    # Ce que Ctrl+Z peut encore defaire : toute la seance, et non plus le seul
+    # dossier ouvert — changer de dossier effacait tout, et un deplacement
+    # fait par erreur ne s'annulait plus.
+    HISTORY_MAX = 200
+
     def on_transfer_finished(self, job: Transfer) -> None:
-        item = self._item_by_id(job.item_id) if job.item_id else None
+        item = None
+        if job.item_id:
+            item = self._in_flight.pop(job.item_id, None)
+            if item is None:
+                item = self._item_by_id(job.item_id)
 
         if job.state == "failed":
             if item is not None:
                 item.status = ""
                 item.status_detail = ""
+            if job.kind == "undo" and job.entry is not None:
+                # L'annulation n'a pas abouti : l'element est toujours la ou on
+                # l'avait mis, et Ctrl+Z doit pouvoir reessayer.
+                if item is not None:
+                    item.status = ("deleted" if job.entry.action == "delete"
+                                   else "moved")
+                    item.status_detail = job.entry.label
+                self.history.append(job.entry)
             self.show_banner(f"Échec sur « {job.name} » : {job.error}", "error")
             self.update_counter()
+            self._settle_board(item)
             return
 
         from .dupes_memory import NOT_DUPES
@@ -5983,19 +6463,20 @@ class MainWindow(QMainWindow):
                 f"Annulé : « {Path(entry.src).name} » est revenu, sous le nom "
                 f"« {back.name} » : sa place avait été reprise", "info"
             )
-            if item is not None and self.current is item:
+            # Sur la planche, la carte reprend son etat ; seule une fiche
+            # ouverte sur lui se redessine — rouvrir la fiche depuis la
+            # planche la faisait disparaitre.
+            if item is not None and self.current is item and not self.browsing:
                 self.show_item(self.index)
 
+        if job.kind != "undo":
+            del self.history[:-self.HISTORY_MAX]
         if job.warning:
             # Tout est arrive, mais l'ancienne place n'a pas pu etre videe en
             # entier : c'est fait, avec une reserve qu'il faut dire.
             self.show_banner(f"« {job.name} » : {job.warning}", "error")
         self.update_counter()
-        if self.browsing and item is not None:
-            for position, listed in enumerate(self.items):
-                if listed is item:
-                    self.board.set_state(position, item.status)
-                    break
+        self._settle_board(item)
 
     def _tell_hidden_files(self, job: Transfer, item) -> None:
         """Un dossier ecarte emportait plus que ses videos : le dire tant qu'un
@@ -6014,12 +6495,9 @@ class MainWindow(QMainWindow):
             expected = max(0, item.file_count - item.video_count)
         if expected:
             return          # la question a ete posee avant d'ecarter
-        where = ("sur le NAS il sera détruit à la fermeture"
-                 if media.is_network_path(job.result or job.src)
-                 else "à la fermeture il rejoindra la corbeille de Windows")
         self.show_banner(
-            f"« {job.name} » contenait aussi {others} autre(s) fichier(s) — "
-            f"Ctrl+Z pour le récupérer ; {where}.", "error")
+            f"« {job.name} » contenait aussi {others} autre(s) fichier(s). "
+            f"{self._fate_text(job.src)}", "error")
 
     def _follow_move(self, old, new) -> None:
         """La collection en memoire suit un deplacement reussi.
@@ -6313,9 +6791,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() == dialog.DialogCode.Accepted:
             self.cfg.set_destinations(dialog.result_destinations())
             self.cfg.save()
-            self.commands.rebuild(
-                self.cfg.destinations, DELETE_LABELS.get(self.cfg["delete_mode"], "Supprimer")
-            )
+            self._rebuild_commands(force=True)
         self.setFocus()
 
     def open_web_search(self) -> None:
@@ -6379,6 +6855,10 @@ class MainWindow(QMainWindow):
             if key == Qt.Key_B:
                 return self.open_trash()
             if key == Qt.Key_P:
+                # Le mur n'a pas de fiche a lui : basculer y menait a une
+                # planche « Dossiers » vide.
+                if self.tab == TAB_SPLIT:
+                    return
                 return self.toggle_board()
             if key == Qt.Key_H:
                 return self.pick_random()
@@ -6400,14 +6880,11 @@ class MainWindow(QMainWindow):
             if not event.isAutoRepeat():
                 self.peek_show()
             return
-        if key in (Qt.Key_Delete, Qt.Key_Backspace):
-            return self.act_delete()
-        if key == Qt.Key_Space:
-            return self.act_skip()
-        if key == Qt.Key_Right:
-            return self.show_item(self.index + 1)
-        if key == Qt.Key_Left:
-            return self.show_item(self.index - 1)
+        if key == Qt.Key_Backspace:
+            # Retour arriere ne supprime plus rien. Sous Windows, c'est le
+            # geste de « revenir » : on le faisait pour remonter, et c'est un
+            # dossier entier qui partait a la corbeille, detruit a la fermeture.
+            return
         if key == Qt.Key_Escape:
             if self.wall_full:
                 return self.toggle_wall_fullscreen(False)
@@ -6438,6 +6915,21 @@ class MainWindow(QMainWindow):
             if self.viewer.currentWidget() is self.single:
                 self.single.toggle_pause()
             return
+        if self.browsing or self.tab == TAB_SPLIT:
+            return self._key_on_board(event)
+
+        # La fiche : l'element courant est celui qu'on regarde.
+        if key == Qt.Key_Delete:
+            # Une touche maintenue n'enchaine pas les suppressions.
+            if not event.isAutoRepeat():
+                self.act_delete()
+            return
+        if key == Qt.Key_Space:
+            return self.act_skip()
+        if key == Qt.Key_Right:
+            return self.show_item(self.index + 1)
+        if key == Qt.Key_Left:
+            return self.show_item(self.index - 1)
         if key == Qt.Key_F:
             return self.play_focused()
 
@@ -6447,8 +6939,131 @@ class MainWindow(QMainWindow):
         if text:
             dest = self.cfg.destination_for_key(text)
             if dest:
-                return self.act_move(dest)
+                if not event.isAutoRepeat():
+                    self.act_move(dest)
+                return
         super().keyPressEvent(event)
+
+    def _key_on_board(self, event) -> None:
+        """Planche et mur : les touches de tri visent ce qu'on survole.
+
+        L'element « courant » n'y est pas a l'ecran : c'est la derniere fiche
+        ouverte, le dossier dont on vient de remonter, ou la liste restee sous
+        le mur. Suppr, une lettre ou un chiffre l'ecartaient, le rangeaient ou
+        le mettaient en favori sans qu'on l'ait vu -- c'est ainsi qu'un
+        dossier entier est parti du NAS. On vise donc la vignette ou le
+        panneau sous la souris, ou les elements coches ; a defaut, rien, et on
+        le dit.
+        """
+        key = event.key()
+        wall = self.tab == TAB_SPLIT
+        if key in (Qt.Key_Left, Qt.Key_Right):
+            # Sur la planche, les fleches tournent les pages : elles ouvraient
+            # une fiche sans entete, par-dessus les vignettes.
+            if not wall:
+                self.change_page(1 if key == Qt.Key_Right else -1)
+            return
+        if key == Qt.Key_F:
+            if wall:
+                return self._open_wall_hovered()
+            return self.play_focused()
+        text = event.text().lower().strip()
+        stars = int(text) if text in ("0", "1", "2", "3", "4", "5") else None
+        dest = (self.cfg.destination_for_key(text)
+                if text and stars is None else None)
+        delete = key == Qt.Key_Delete
+        if not delete and stars is None and not dest:
+            # Espace et le reste : rien a decider ici.
+            return super().keyPressEvent(event)
+        if event.isAutoRepeat():
+            # Une touche maintenue n'enchaine ni suppressions ni envois.
+            return
+        if wall:
+            return self._wall_key(delete, stars, dest)
+        targets = self._board_targets()
+        if not targets:
+            self.show_banner(
+                "Survolez une vignette, ou cochez-en : sur la planche, les "
+                "touches visent ce qui est sous la souris.", "quiet")
+            return
+        if stars is not None:
+            return self._rate_items(targets, stars)
+        if delete:
+            return self._delete_items(targets)
+        self._move_items(targets, dest)
+
+    def _board_hovered(self) -> int:
+        """Position, dans la planche, de la carte sous la souris — ou -1.
+
+        Relue a l'instant de la touche plutot que prise au dernier sondage :
+        une souris partie de la carte ne doit plus la designer.
+        """
+        board = self.board
+        if not board.isVisible() or self.viewer.currentWidget() is not board:
+            return -1
+        slot = board._card_under(QCursor.pos())
+        if not 0 <= slot < len(board.cards):
+            return -1
+        position = board.cards[slot].index
+        return position if 0 <= position < len(board.items) else -1
+
+    def _board_targets(self) -> list:
+        """Ce que vise une touche sur la planche.
+
+        La carte survolee ; toute la selection si cette carte en fait partie,
+        ou si rien n'est survole. Vide sinon : on ne devine pas.
+        """
+        board = self.board
+        position = self._board_hovered()
+        picked = board.picked_ids
+        if position >= 0:
+            item = board.items[position]
+            if picked and item.item_id in picked:
+                return board.picked_items()
+            return [item]
+        return board.picked_items() if picked else []
+
+    def _wall_hovered(self):
+        """(rang, chemin) du panneau du mur sous la souris, s'il joue — ou None."""
+        if self.viewer.currentWidget() is not self.wall:
+            return None
+        cursor = QCursor.pos()
+        for index, pane in enumerate(self.wall.panes):
+            if not pane.video_path or not pane.isVisible():
+                continue
+            stage = pane.stage
+            corner = stage.mapToGlobal(QPoint(0, 0))
+            if QRect(corner, stage.size()).contains(cursor):
+                return index, pane.video_path
+        return None
+
+    def _wall_key(self, delete: bool, stars, dest) -> None:
+        """Une touche de tri sur le mur : pour la video du panneau survole."""
+        found = self._wall_hovered()
+        if found is None:
+            self.show_banner(
+                "Survolez un panneau : sur le mur, les touches visent la vidéo "
+                "sous la souris.", "quiet")
+            return
+        index, path = found
+        if stars is not None:
+            return self._rate_paths([path], stars)
+        # Le panneau se remplit d'une autre video une fois celle-ci partie.
+        if delete:
+            if self.delete_one(path):
+                self.wall.refill_one(index)
+            return
+        if self.move_one(path, dest):
+            self.wall.refill_one(index)
+
+    def _open_wall_hovered(self) -> None:
+        """F sur le mur : la fiche de la video survolee, comme son ⤢."""
+        found = self._wall_hovered()
+        if found is None:
+            self.show_banner("Survolez un panneau, ou double-cliquez dessus",
+                             "quiet")
+            return
+        self.open_video_path(found[1])
 
     # ------------------------------------------------------------------
     # Barre de commandes a la souris
@@ -6580,6 +7195,10 @@ class MainWindow(QMainWindow):
 
     def _stop_background(self) -> None:
         """Demande a chaque fil de fond de s'arreter, sans en attendre aucun."""
+        # Un comptage coupe par la fermeture ne doit pas s'enregistrer comme
+        # le compte de la collection.
+        self._count_stopped = self.counter is not None
+        self._audit_stopped = self.audit is not None
         if self.backfill is not None:
             self.backfill.stop()
         for thread in self.findChildren(QThread):

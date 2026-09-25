@@ -14,15 +14,18 @@ from PySide6.QtWidgets import (
 # (section, [(touche, ce qu'elle fait)])
 SHORTCUTS = [
     ("Trier", [
-        ("0 à 5", "noter l'élément courant"),
+        ("0 à 5", "1 à 5 : en favori ; 0 : retiré des favoris"),
         ("6, 7, 8… puis A, Z, E…", "l'envoyer vers la destination de cette touche"),
         ("Espace", "passer au suivant sans rien décider"),
         ("Suppr", "l'écarter dans la corbeille de session"),
+        ("Planche et mur", "Suppr, les destinations et 0 à 5 visent la vignette "
+                           "ou le panneau sous la souris, ou les éléments cochés ; "
+                           "sinon, rien"),
         ("Ctrl+Z", "annuler la dernière décision"),
         ("Ctrl+B", "ouvrir la corbeille de session"),
     ]),
     ("Se déplacer", [
-        ("← →", "élément précédent, suivant"),
+        ("← →", "élément précédent, suivant ; sur la planche, page précédente, suivante"),
         ("Molette", "avancer ou reculer dans la vidéo"),
         ("Ctrl+↓", "entrer dans le dossier affiché"),
         ("Échap", "quitter le cinéma, puis la fiche, puis le dossier"),
