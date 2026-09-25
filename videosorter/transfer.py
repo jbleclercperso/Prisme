@@ -70,6 +70,10 @@ class _Runner(QRunnable):
     def run(self) -> None:
         job = self.transfer
         job.state = "running"
+        # L'interface n'attend plus que les ffmpeg lachent le fichier : elle les
+        # arrete et passe a la suite. C'est ici, en tache de fond, qu'on attend
+        # qu'il soit libre — sous Windows, un fichier ouvert ne se deplace pas.
+        _wait_free(job.src)
         try:
             if job.kind == "move":
                 job.result = actions.retry(
@@ -79,6 +83,8 @@ class _Runner(QRunnable):
                 job.reversible = True
                 if job.purpose == "delete":
                     _count_others(job)
+                else:
+                    _carry_thumbs(job.src, job.result)
             elif job.kind == "delete":
                 job.result, job.reversible = actions.retry(
                     actions.delete, job.src, job.mode,
@@ -91,6 +97,8 @@ class _Runner(QRunnable):
                     actions.undo, job.entry,
                     attempts=RETRY_ATTEMPTS, delay=RETRY_DELAY,
                 )
+                if getattr(job.entry, "dst", None):
+                    _carry_thumbs(job.entry.dst, job.result)
             job.state = "done"
         except actions.PartialMove as exc:
             # Tout est arrive ; seule la source n'a pas pu etre videe. Refaire
@@ -99,6 +107,8 @@ class _Runner(QRunnable):
             job.reversible = True
             job.state = "done"
             job.warning = str(exc)
+            if job.kind == "move" and job.purpose != "delete":
+                _carry_thumbs(job.src, job.result)
         except ActionError as exc:
             job.state = "failed"
             job.error = str(exc)
@@ -109,10 +119,50 @@ class _Runner(QRunnable):
             job.state = "failed"
             job.error = f"{type(exc).__name__} : {actions.describe(exc)}"
         finally:
+            _unblock(job.src)
             try:
                 self.signals.done.emit(job)
             except RuntimeError:
                 pass            # l'application se ferme : plus personne n'ecoute
+
+
+def _wait_free(path) -> None:
+    """Attend, deux secondes au plus, que plus aucun ffmpeg ne lise ce chemin.
+
+    Au-dela, le transfert essaie quand meme : il reessaie de toute facon.
+    """
+    try:
+        from . import media
+        media.wait_free(path, 2.0)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def _unblock(path) -> None:
+    """Le transfert est fini : les lectures de ce chemin peuvent reprendre."""
+    try:
+        from . import media
+        media.unblock(path)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def _carry_thumbs(old, new) -> None:
+    """Fait suivre vignettes, sondage et empreinte a une video rangee.
+
+    Ici, dans le fil du transfert : pour un dossier, cela parcourt les
+    empreintes connues, quelques dizaines de millisecondes qui n'ont rien a
+    faire sur le fil de l'interface. Jamais pour la corbeille.
+    """
+    if old is None or new is None:
+        return
+    try:
+        from . import media
+        media.relocate_thumbs(old, new)
+    except Exception:                                   # noqa: BLE001
+        # La memoire des images ne doit jamais faire echouer un deplacement
+        # qui, lui, a reussi.
+        pass
 
 
 def _count_others(job: Transfer) -> None:

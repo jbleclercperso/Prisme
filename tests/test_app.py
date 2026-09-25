@@ -784,10 +784,16 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     ok = wait_for(app, lambda: any(c._pixmap for c in window.board.cards), 120)
     check(ok, "les images des cartes arrivent")
 
-    # Noter depuis une carte.
+    # Le favori d'un element se reporte sur sa carte. Les notes de 1 a 5 et
+    # leur chaine de signaux (rateRequested, on_board_rate) ont disparu.
     window.ratings.set(window.items[0].path, 0)
-    window.on_board_rate(0, 3)
-    check(window.ratings.get(window.items[0].path) == 3, "on note depuis une carte")
+    window.board.set_stars(0, window.ratings.set(window.items[0].path, 1))
+    check(window.ratings.get(window.items[0].path) == 1
+          and window.board.cards[0].stars_value > 0,
+          "le favori d'un élément se voit sur sa carte")
+    check(not hasattr(window, "on_board_rate") and not hasattr(window, "discard_at"),
+          "plus de note ni de ✕ branchés sur la planche : ces gestes n'existent plus")
+    window.ratings.set(window.items[0].path, 0)
     # La carte ne porte plus d'etoiles : elles doublaient la hauteur du texte
     # sous chaque vignette. La note se relit sur la fiche.
     check(not hasattr(window.board.cards[0], "stars"),
@@ -1797,13 +1803,15 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     before = window.stats["deleted"]
     position = 0
     target = window.items[position].name
-    window.discard_at(position)
+    # Le ✕ des cartes n'existe plus : on coche, puis « Supprimer ».
+    window.board.picked_ids.add(window.items[position].item_id)
+    window.delete_picked()
     # Le transfert part en tache de fond : on le laisse demarrer, puis l'on
     # attend qu'il aboutisse plutot que de parier sur un delai.
     pump(app, 1.0)
     ok = wait_for(app, lambda: window.stats["deleted"] == before + 1, 30)
     settle(app, window, 15)
-    check(ok, f"un clic sur « ✕ » écarte la vignette ({target})")
+    check(ok, f"une vignette cochée puis « Supprimer » est écartée ({target})")
     window.act_undo()
     ok = wait_for(app, lambda: window.stats["deleted"] == before, 30)
     settle(app, window, 15)
@@ -3550,7 +3558,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.3)
     first_card = window.board.cards[0]
     window.ratings.set(window.items[0].path, 0)
-    window.on_board_rate(0, 5) if hasattr(window, "on_board_rate") else None
+    window.board.set_stars(0, window.ratings.set(window.items[0].path, 1))
     pump(app, 0.2)
     check(first_card.rating.text() == "★" and not first_card.rating.isHidden(),
           f"une carte notée montre sa note ({first_card.rating.text()!r})")
@@ -3878,7 +3886,13 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(fresh.tab == TAB_FOLDERS and not fresh.cfg["only_unseen"]
           and not fresh.cfg["folder_max"] and not fresh.cfg["orientations"],
           "au lancement : l'onglet Dossiers, sans filtre oublié d'une autre fois")
+    from videosorter import media as _media_close
     fresh.close()
+    check(_media_close.CLOSING and not fresh.isVisible(),
+          "fermer masque la fenêtre d'abord, et plus aucun ffmpeg ne part ensuite")
+    # En vrai, un seul Prisme par processus : fermer cette fenetre d'essai ne
+    # doit pas couper les outils de celle qui continue les tests.
+    _media_close.CLOSING = False
     fresh.deleteLater()
 
     from videosorter.board import BoardView as _BV
@@ -4122,6 +4136,20 @@ def check_data_safety(app, window, base, root) -> None:
           f"racine injoignable : la liste reste celle du dernier passage ({len(before)})")
     check(INDEX.listing(root, _scan.listing_key(MODE_FOLDERS, window.cfg["expand_parents"]))
           == listing, "et l'index n'est pas réécrit à vide")
+    said = window.banner.text()
+    check("NAS injoignable" in said and "Analyse terminée" not in said
+          and window.retry_timer.isActive(),
+          f"la fenêtre le dit, sans « Analyse terminée », et réessaiera seule ({said[:60]!r})")
+    retry_in = window.retry_timer.remainingTime()
+    window.retry_timer.stop()
+    window._retry_root()
+    check(window.scanning and 0 < retry_in <= 5000,
+          f"le nouvel essai relit la racine, sans rien vider ({retry_in} ms)")
+    wait_for(app, lambda: not window.scanning, 30)
+    pump(app, 0.2)
+    check(not window.retry_timer.isActive()
+          and [i.item_id for i in window.all_items] == before,
+          "la racine revenue, les essais s'arrêtent et la liste est intacte")
     partial = work / "partiel"
     (partial / "sous").mkdir(parents=True)
     (partial / "v.mp4").write_bytes(b"x")
@@ -4718,6 +4746,191 @@ def check_board_wall(app, window, base, root) -> None:
           "le calcul des mots fréquents rend son fil et sa copie de la liste")
 
 
+def check_wiring(app, window, base, root) -> None:
+    """Ce que les groupes avaient prepare, branche dans la fenetre."""
+    import types as _types
+    from videosorter import media as M
+    from videosorter import tunnel as _tun
+    from videosorter.config import TRASH_FOLDER_NAME
+    from videosorter.dupes import SignatureGroupScan
+    from videosorter.header import TAB_FAVS
+    from videosorter.query import matches_text
+    from videosorter.scan import Item as _Item
+
+    print("\n[91] Branchements : lecteurs, planche, collection, fermeture")
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 60)
+    window.toggle_board(True)
+    pump(app, 0.3)
+
+    # -- ne vider que le lecteur qui montre la cible ------------------------
+    calls = []
+    real_release = window.single.release
+    window.single.release = lambda target=None: calls.append(target)
+    active = window.single.decks[window.single._active]
+    kept_path = active.path
+    try:
+        active.path = str(Path("Q:/lot0/montree/x.mp4"))
+        window._release_media(Path("Q:/lot0/ailleurs"))
+        untouched = list(calls)
+        window._release_media(Path("Q:/lot0/montree"))
+        touched = list(calls)
+    finally:
+        window.single.release = real_release
+        active.path = kept_path
+    check(untouched == [] and touched == [Path("Q:/lot0/montree")],
+          f"avant un tri, seul le lecteur qui montre la cible est vidé ({touched})")
+
+    # -- la planche annonce sa page : les images des autres pages s'arretent -
+    asked = []
+    real_cancel = window.preview.cancel_prefix
+    window.preview.cancel_prefix = lambda prefix, keep=(), kill=True: (
+        asked.append((prefix, set(keep))) or 0)
+    try:
+        window.refresh_board()
+    finally:
+        window.preview.cancel_prefix = real_cancel
+    lo, hi = window.board._page_bounds()
+    page = {f"board@{i.item_id}" for i in window.board.items[lo:hi]}
+    check(asked and asked[-1] == ("board@", page),
+          f"une autre liste à l'écran annule les images qui n'y sont pas ({len(asked)})")
+    check(window._board_position_of("board@nulle-part") == -1,
+          "une image pour une carte absente de la page n'est plus cherchée")
+
+    # -- l'arborescence dit ce que fera le clic -----------------------------
+    check(window.tree.browsing == (window.browsing and window.tab != TAB_SPLIT),
+          "le titre de l'arborescence suit la vue")
+    row = window._row_one
+    check(row.indexOf(window.tag_chips) > row.indexOf(window.crumbs),
+          "les familles de mots-clés suivent le fil d'Ariane : ↑ ne saute plus")
+
+    # -- les filtres suivent ce que montre la liste -------------------------
+    leaf = next(i for i in window.items if i.kind == MODE_FOLDERS
+                and not i.subdir_count and i.video_count)
+    window.jump_to(str(leaf.path))
+    wait_for(app, lambda: not window.scanning, 60)
+    pump(app, 0.2)
+    check(window.mode != MODE_FOLDERS and window.controls._mode == "videos"
+          and window.controls.folder_min.isHidden(),
+          f"dans un dossier de vidéos, pas de bornes « ≥ vidéos » ({window.controls._mode})")
+    window.go_home()
+    wait_for(app, lambda: not window.scanning, 60)
+
+    # -- la recherche sur noms replies donne ce que donnait l'ancienne ------
+    window.set_tab(TAB_VIDEOS)
+    pump(app, 0.3)
+    everything = list(window._sortable_items())
+    window.criteria = dict(window.criteria or {}, include="clip")
+    found = window._filtered()
+    expected = [i for i in everything if matches_text(i.name, "clip")]
+    window.criteria = dict(window.criteria, include="")
+    check(found == expected and found,
+          f"la recherche sur les noms repliés trouve la même chose ({len(found)})")
+
+    # -- la collection suit un deplacement, avant toute relecture -----------
+    kept_plain = window._plain_items
+    folder_a = _Item(path=Path("Q:/col/A"), kind=MODE_FOLDERS,
+                     videos=[Path("Q:/col/A/v.mp4"), Path("Q:/col/A/w.mp4")],
+                     video_count=2, file_count=2)
+    folder_b = _Item(path=Path("Q:/col/B"), kind=MODE_FOLDERS,
+                     videos=[Path("Q:/col/B/z.mp4")], video_count=1, file_count=1)
+    window._plain_items = [folder_a, folder_b]
+    try:
+        window._follow_move(Path("Q:/col/A/v.mp4"), Path("Q:/col/B/Action/v.mp4"))
+        moved_ok = ([str(v) for v in folder_a.videos] == [str(Path("Q:/col/A/w.mp4"))]
+                    and folder_a.video_count == 1
+                    and str(Path("Q:/col/B/Action/v.mp4")) in map(str, folder_b.videos)
+                    and folder_b.video_count == 2)
+    finally:
+        window._plain_items = kept_plain
+    check(moved_ok, "une vidéo rangée quitte son dossier et rejoint l'autre, "
+                    "sans attendre la relecture")
+
+    # -- les favoris ne montrent pas la corbeille ---------------------------
+    ghost = str(root / TRASH_FOLDER_NAME / "20200101-000000" / "perdu.mp4")
+    window.ratings.data[ghost] = 1
+    try:
+        window.set_tab(TAB_FAVS)
+        pump(app, 0.3)
+        shown = {str(i.path) for i in window.items}
+    finally:
+        window.ratings.data.pop(ghost, None)
+    check(ghost not in shown, "une étoile partie en corbeille ne revient pas dans Favoris")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.3)
+
+    # -- doublons d'apres les empreintes : dans un fil ----------------------
+    depart = time.perf_counter()
+    window.duplicates_from_sigs()
+    lance = time.perf_counter() - depart
+    check(isinstance(window.dupes, SignatureGroupScan) and lance < 0.5,
+          f"« doublons d'après les empreintes » ne fige plus la fenêtre ({lance:.2f} s)")
+    wait_for(app, lambda: window.dupes is None, 60)
+    pump(app, 0.2)
+    window.go_home()
+    wait_for(app, lambda: not window.scanning, 60)
+
+    # -- un transfert libere le chemin qu'il a bloque -----------------------
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+    target = next(i for i in window.items if i.name == "Melange")
+    window.index = window.items.index(target)
+    window._release_media(target.path)
+    blocked = M._key(target.path) in M._BLOCKED
+    window.transfers.submit(_transfer_for_test(target.path, base / "tri" / "lot0"))
+    settle(app, window, 30)
+    check(blocked and M._key(target.path) not in M._BLOCKED,
+          "le chemin bloqué avant un tri se rouvre une fois le transfert fini")
+    if (base / "tri" / "lot0" / "Melange").exists():
+        shutil.move(str(base / "tri" / "lot0" / "Melange"), str(root / "Melange"))
+
+    # -- Tailscale lent : l'adresse fixe s'ouvre et se ferme sans figer ----
+    kept = (_tun.find_fixed, _tun.open_fixed, _tun.close_fixed)
+    kept_server, kept_kind = window.share_server, window.cfg["tunnel_kind"]
+
+    def _slow_open(port):
+        time.sleep(0.5)
+        return "https://essai.tail0.ts.net", "Adresse fixe ouverte."
+
+    def _slow_close():
+        time.sleep(0.5)
+        return _tun.FIXED_CLOSED
+
+    _tun.find_fixed = lambda: "tailscale.exe"
+    _tun.open_fixed, _tun.close_fixed = _slow_open, _slow_close
+    window.share_server = _types.SimpleNamespace(port=1, stop=lambda: None)
+    window.cfg["tunnel_kind"] = "tailscale"
+    try:
+        depart = time.perf_counter()
+        started = window.start_tunnel()
+        lance = time.perf_counter() - depart
+        check(started and lance < 0.3,
+              f"ouvrir l'adresse fixe ne fige plus la fenêtre ({lance:.2f} s)")
+        check(wait_for(app, lambda: window.tunnel_address, 10),
+              f"et l'adresse arrive d'elle-même ({window.tunnel_address!r})")
+        depart = time.perf_counter()
+        window.stop_tunnel()
+        lance = time.perf_counter() - depart
+        check(lance < 0.3 and window.tunnel_address,
+              f"la fermer non plus ; l'adresse reste dite tant que rien ne confirme "
+              f"({lance:.2f} s)")
+        check(wait_for(app, lambda: not window.tunnel_address, 10),
+              "puis s'efface une fois la fermeture confirmée")
+    finally:
+        _tun.find_fixed, _tun.open_fixed, _tun.close_fixed = kept
+        window.share_server = kept_server
+        window.cfg["tunnel_kind"] = kept_kind
+        window.tunnel_address = ""
+
+
+def _transfer_for_test(src, dest):
+    from videosorter.transfer import Transfer
+    Path(dest).mkdir(parents=True, exist_ok=True)
+    return Transfer(kind="move", src=Path(src), dest=Path(dest), label="lot0",
+                    item_id="")
+
+
 def main() -> int:
     base = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
         os.environ.get("TEMP", "."), "vs-fixture"
@@ -4923,6 +5136,7 @@ def main() -> int:
 
     check_new_features(app, window, base, root, flat, tri)
     check_media(app, window, base)
+    check_wiring(app, window, base, root)
 
     window.close()
     pump(app, 0.3)
