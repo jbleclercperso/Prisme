@@ -26,8 +26,9 @@ import json
 import os
 
 from .config import APP_DIR, VIDEO_EXTS
-from .media import build_preview_plan, extract_thumb, thumb_path
-from .scan import walk_videos
+from .media import (build_preview_plan, cached_thumb, extract_thumb,
+                    wait_foreground)
+from .scan import _is_hidden, walk_videos
 
 # Quatre extractions de front, quand l'affichage en utilise huit. Ce parcours
 # n'est pas presse : ce qu'on regarde doit passer devant lui.
@@ -79,12 +80,13 @@ class ThumbBackfill(QThread):
         return not self._go.is_set()
 
     # -- le travail d'une video -----------------------------------------
-    def _one(self, video) -> str:
+    def _one(self, video) -> str | None:
         """Dit ce qu'il est advenu de cette video : faite, deja la, ou ratee.
 
         Une extraction qui echoue ne doit surtout pas se compter comme une
         vignette faite : le parcours annoncerait un travail accompli qui ne
-        l'est pas, et la planche attendrait toujours.
+        l'est pas, et la planche attendrait toujours. Rien (None) quand le
+        parcours s'arrete avant d'avoir pu la faire.
         """
         plan = build_preview_plan([video], 1, 0, True, True)
         if not plan:
@@ -92,12 +94,17 @@ class ThumbBackfill(QThread):
         path = Path(plan[0][0])
         ts = plan[0][1]
         try:
-            target = thumb_path(path, ts, self.width)
-            if target.exists() and target.stat().st_size > 0:
+            if cached_thumb(path, ts, self.width) is not None:
                 return self.KEPT
         except OSError:
             pass
-        return self.MADE if extract_thumb(path, ts, self.width) else self.FAILED
+        # Ce qu'on regarde passe devant : quatre extractions de plus sur le
+        # partage divisaient par deux la vitesse de la page affichee.
+        wait_foreground(lambda: self._stop)
+        if self._stop:
+            return None
+        made = extract_thumb(path, ts, self.width, keyframe=True)
+        return self.MADE if made else self.FAILED
 
     def _log(self, line: str) -> None:
         try:
@@ -243,12 +250,20 @@ class ThumbAudit(QThread):
             for entry in entries:
                 if self._stop:
                     break
+                # Le meme tri que la preparation (`walk_videos`) : sans lui,
+                # l'audit comptait la corbeille de session, les dossiers caches
+                # et masques, et annoncait des vignettes « manquantes » que la
+                # preparation ne ferait jamais. Les attributs viennent de
+                # l'enumeration : aucune lecture reseau de plus.
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        stack.append(entry.path)
+                        if not (self.skip_hidden and _is_hidden(entry)):
+                            stack.append(entry.path)
                         continue
                     dot = entry.name.rfind(".")
                     if dot <= 0 or entry.name[dot:].lower() not in VIDEO_EXTS:
+                        continue
+                    if self.skip_hidden and _is_hidden(entry):
                         continue
                     stat = entry.stat(follow_symlinks=False)
                     remember(entry.path, stat.st_size, stat.st_mtime)
@@ -258,8 +273,9 @@ class ThumbAudit(QThread):
                 video = Path(entry.path)
                 try:
                     plan = build_preview_plan([video], 1, 0, True, True)
-                    target = thumb_path(video, plan[0][1], self.width)
-                    if target.exists() and target.stat().st_size > 0:
+                    # Une vignette nommee a l'ancienne compte aussi : elle est
+                    # renommee au passage, pas refaite.
+                    if cached_thumb(video, plan[0][1], self.width) is not None:
                         ready += 1
                 except OSError:
                     pass
@@ -294,12 +310,19 @@ class TitleScan(QThread):
     def _one(self, video) -> int:
         """1 si un titre a ete trouve, 0 sinon, -1 si l'on n'a rien pu lire."""
         from .index import INDEX
-        from .media import PROBE_LIMITS, Tools, _run, title_from
+        from .media import PROBE_LIMITS, Tools, _Reading, _run, title_from
         from .stamps import stamp_of
         if self._stop or not Tools.ffprobe:
             return -1
-        code, out = _run([Tools.ffprobe, "-v", "error"] + PROBE_LIMITS + [
-            "-print_format", "json", "-show_entries", "format_tags", str(video)])
+        wait_foreground(lambda: self._stop)
+        if self._stop:
+            return -1
+        # Signale la lecture : ranger cette video arrete le ffprobe au lieu
+        # de l'attendre.
+        with _Reading(video):
+            code, out = _run([Tools.ffprobe, "-v", "error"] + PROBE_LIMITS + [
+                "-print_format", "json", "-show_entries", "format_tags",
+                str(video)])
         if code != 0 or not out:
             return -1
         try:
@@ -360,7 +383,15 @@ class SceneScan(QThread):
         from .stamps import stamp_of
         if self._stop:
             return 0
+        wait_foreground(lambda: self._stop)
+        if self._stop:
+            return 0
         times = scene_times(Path(video))
+        if times is None:
+            # Delai depasse, partage absent, ffmpeg arrete : rien a conclure.
+            # Enregistrer une liste vide l'aurait privee de plans pour
+            # toujours ; elle sera reprise au prochain releve.
+            return 0
         INDEX.put_scenes(video, stamp_of(str(video)) or "", times)
         return 1 if times else 0
 
@@ -402,6 +433,9 @@ class InfoScan(QThread):
         super().__init__(parent)
         self.videos = list(videos)
         self._stop = False
+        # Cede la place aux images demandees a l'ecran. Le mur, qui attend
+        # ces sondages pour se remplir, peut s'en dispenser.
+        self.yields = True
 
     def stop(self) -> None:
         self._stop = True
@@ -410,18 +444,27 @@ class InfoScan(QThread):
         from .media import probe
         if self._stop:
             return 0
+        if self.yields:
+            wait_foreground(lambda: self._stop)
+        if self._stop:
+            return 0
         try:
             return 1 if (probe(Path(video)) or {}).get("width") else 0
         except OSError:
             return 0
 
     def run(self) -> None:
-        if not self.videos:
-            return self.done.emit(0)
-        count = 0
-        with ThreadPoolExecutor(max_workers=self.WORKERS) as pool:
-            for outcome in pool.map(self._one, self.videos):
-                count += outcome
-                if self._stop:
-                    break
-        self.done.emit(count)
+        try:
+            if not self.videos:
+                return self.done.emit(0)
+            count = 0
+            with ThreadPoolExecutor(max_workers=self.WORKERS) as pool:
+                for outcome in pool.map(self._one, self.videos):
+                    count += outcome
+                    if self._stop:
+                        break
+            self.done.emit(count)
+        finally:
+            # Rien ne detruit ce fil une fois fini : sa liste, elle, peut
+            # partir.
+            self.videos = []
