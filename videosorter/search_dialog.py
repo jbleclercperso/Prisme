@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, QThread, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
@@ -26,6 +26,22 @@ RESOLUTION_CHOICES = [
 COL_THUMB, COL_TITLE, COL_DURATION, COL_RES, COL_SOURCE, COL_LINK = range(6)
 
 SERPAPI_KEY_URL = "https://serpapi.com/users/sign_up"
+
+# Au-dela, ce n'est plus une vignette : on coupe plutot que de tout lire.
+MAX_THUMB_BYTES = 4 * 1024 * 1024
+
+
+def web_address(url: str) -> QUrl | None:
+    """L'adresse si elle mene au web (http, https), None sinon.
+
+    Dernier rempart, au moment de charger ou d'ouvrir : un « file://hote/… »
+    ferait ouvrir un partage de fichiers etranger, et presenter l'empreinte
+    du compte Windows a qui le tient.
+    """
+    address = QUrl(str(url or ""))
+    if address.scheme().lower() not in ("http", "https") or not address.host():
+        return None
+    return address
 
 
 class _SearchWorker(QObject):
@@ -145,6 +161,8 @@ class WebSearchDialog(QDialog):
         key_row = QHBoxLayout()
         key_row.addWidget(QLabel("Cle API SerpAPI :", self))
         self.api_key = QLineEdit(self)
+        # Masquee sauf pendant la saisie : une capture d'ecran ne l'emporte pas.
+        self.api_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
         self.api_key.setPlaceholderText("colle ici ta cle SerpAPI (gratuite, 250 recherches/mois)")
         key_row.addWidget(self.api_key, 1)
         howto = QLabel(f'<a href="{SERPAPI_KEY_URL}">Obtenir une cle gratuite</a>', self)
@@ -310,14 +328,31 @@ class WebSearchDialog(QDialog):
             self._fetch_thumbnail(row, video.thumbnail_url)
 
     def _fetch_thumbnail(self, row: int, url: str) -> None:
-        reply = self._net.get(QNetworkRequest(QUrl(url)))
+        address = web_address(url)
+        if address is None:
+            return
+        request = QNetworkRequest(address)
+        # Une redirection ne mene que vers http ou https, jamais vers un
+        # partage de fichiers.
+        request.setAttribute(QNetworkRequest.RedirectPolicyAttribute,
+                             QNetworkRequest.NoLessSafeRedirectPolicy)
+        reply = self._net.get(request)
         self._thumb_replies[reply] = row
+        reply.downloadProgress.connect(
+            lambda got, _total: self._cap_thumbnail(reply, got))
         reply.finished.connect(lambda: self._on_thumbnail(reply))
+
+    @staticmethod
+    def _cap_thumbnail(reply, got: int) -> None:
+        if got > MAX_THUMB_BYTES:
+            reply.abort()
 
     def _on_thumbnail(self, reply) -> None:
         row = self._thumb_replies.pop(reply, None)
         reply.deleteLater()
         if row is None or row >= self.table.rowCount():
+            return
+        if reply.error() != QNetworkReply.NoError:
             return
         pixmap = QPixmap()
         if pixmap.loadFromData(bytes(reply.readAll())):
@@ -331,8 +366,9 @@ class WebSearchDialog(QDialog):
             self._open_url(item.data(Qt.UserRole))
 
     def _open_url(self, url: str) -> None:
-        if url:
-            QDesktopServices.openUrl(QUrl(url))
+        address = web_address(url)
+        if address is not None:
+            QDesktopServices.openUrl(address)
 
     def _stop_thread(self) -> None:
         if self._worker:

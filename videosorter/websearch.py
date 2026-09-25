@@ -193,6 +193,22 @@ def _meta(soup: BeautifulSoup, prop: str) -> str:
     return (tag.get("content") or "").strip() if tag else ""
 
 
+def web_url(base: str, raw) -> str:
+    """Une adresse de la page, rendue absolue — ou rien si elle ne mene pas au web.
+
+    `urljoin` garde tel quel un « file://hote/partage/x.jpg » ecrit par la
+    page : charger cette vignette, ou ouvrir ce lien, faisait presenter par
+    Windows l'empreinte du compte a un serveur etranger. Seuls http et https
+    sortent d'ici.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    url = urljoin(base, text)
+    parsed = urlparse(url)
+    return url if parsed.scheme in ("http", "https") and parsed.netloc else ""
+
+
 def _to_int(value) -> int | None:
     try:
         return int(float(value))
@@ -245,7 +261,7 @@ def extract_meta_videos(html_text: str, page_url: str) -> list[VideoResult]:
                 title=title,
                 page_url=page_url,
                 source_domain=domain,
-                thumbnail_url=urljoin(page_url, thumb) if thumb else "",
+                thumbnail_url=web_url(page_url, thumb),
                 duration_s=parse_iso8601_duration(str(obj.get("duration") or "")),
                 height=_to_int(obj.get("height")),
                 snippet=str(obj.get("description") or "")[:240],
@@ -262,7 +278,7 @@ def extract_meta_videos(html_text: str, page_url: str) -> list[VideoResult]:
             title=og_title,
             page_url=page_url,
             source_domain=domain,
-            thumbnail_url=urljoin(page_url, og_image) if og_image else "",
+            thumbnail_url=web_url(page_url, og_image),
             height=_to_int(_meta(soup, "og:video:height")),
             snippet=_meta(soup, "og:description")[:240],
         ))
@@ -278,8 +294,9 @@ def find_direct_video_links(html_text: str, page_url: str) -> list[VideoResult]:
     seen: set[str] = set()
 
     for a in soup.find_all("a", href=True):
-        href = urljoin(page_url, a["href"])
-        if Path(urlparse(href).path).suffix.lower() not in VIDEO_EXTS or href in seen:
+        href = web_url(page_url, a["href"])
+        if not href or Path(urlparse(href).path).suffix.lower() not in VIDEO_EXTS \
+                or href in seen:
             continue
         seen.add(href)
         title = (a.get_text() or "").strip() or Path(urlparse(href).path).name
@@ -290,18 +307,15 @@ def find_direct_video_links(html_text: str, page_url: str) -> list[VideoResult]:
         if not src:
             source_tag = video.find("source")
             src = (source_tag.get("src") if source_tag else "") or ""
-        if not src:
-            continue
-        href = urljoin(page_url, src)
-        if href in seen:
+        href = web_url(page_url, src)
+        if not href or href in seen:
             continue
         seen.add(href)
-        poster = video.get("poster") or ""
         results.append(VideoResult(
             title=video.get("title") or Path(urlparse(href).path).name,
             page_url=href,
             source_domain=domain,
-            thumbnail_url=urljoin(page_url, poster) if poster else "",
+            thumbnail_url=web_url(page_url, video.get("poster")),
         ))
     return results
 
@@ -494,6 +508,19 @@ class SearchBackendError(RuntimeError):
     """Cle absente ou invalide, ou quota depasse : a afficher tel quel."""
 
 
+def without_key(text: str, api_key: str = "") -> str:
+    """Le message, sans la cle.
+
+    Les erreurs de `requests` recopient l'adresse entiere, parametres
+    compris : la cle SerpAPI s'affichait dans le journal de la recherche, et
+    donc dans la premiere capture d'ecran venue.
+    """
+    text = re.sub(r"(api_key=)[^&\s'\")]+", r"\1***", str(text))
+    if api_key:
+        text = text.replace(api_key, "***")
+    return text
+
+
 @dataclass
 class SeedResult:
     url: str
@@ -546,7 +573,8 @@ def serpapi_search(
                 timeout=REQUEST_TIMEOUT,
             )
         except requests.RequestException as exc:
-            raise SearchBackendError(f"Recherche impossible : {exc}") from exc
+            raise SearchBackendError(
+                "Recherche impossible : " + without_key(exc, api_key)) from None
         if resp.status_code == 401:
             raise SearchBackendError("Cle API SerpAPI refusee (401) : verifiez qu'elle est correcte.")
         if resp.status_code == 429:
@@ -556,13 +584,16 @@ def serpapi_search(
         data = resp.json()
         error = data.get("error")
         if error:
-            raise SearchBackendError(f"SerpAPI : {error}")
+            raise SearchBackendError("SerpAPI : " + without_key(error, api_key))
         pages = data.get("organic_results") or []
         if not pages:
             break
         for page in pages:
+            link = web_url("", page.get("link", ""))
+            if not link:
+                continue
             seeds.append(SeedResult(
-                url=page.get("link", ""),
+                url=link,
                 title=page.get("title", ""),
                 snippet=page.get("snippet", ""),
             ))
