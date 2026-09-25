@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
+import time
 from pathlib import Path
 
 APP_NAME = "Prisme"
@@ -106,6 +108,9 @@ def adopt_old_cache() -> str:
 
 # Au lancement seulement, jamais dans le bac a sable des tests.
 ADOPTED = "" if SANDBOX else adopt_old_cache()
+# Le dossier de cette machine, avant tout partage : c'est la que vit ce qui
+# ne doit jamais partir sur le reseau (reglages, favoris, verrou, journaux).
+_HOME = APP_DIR
 CONFIG_PATH = APP_DIR / "config.json"
 def _chosen_cache() -> tuple:
     """Le cache designe ailleurs, s'il l'a ete.
@@ -161,17 +166,27 @@ if SHARED_DIR is not None:
 # meme temps par le reseau la fragiliseraient. Il reste donc chez chacun,
 # sauf demande expresse.
 THUMB_DIR = APP_DIR / "thumbs"
-# Un cache pose a cote du programme voyage entier : l'index l'accompagne.
-# Un cache designe sur un partage, lui, est peut-etre lu par deux machines a
-# la fois — l'index reste alors chez chacune.
-INDEX_PATH = (_LOCAL / APP_NAME / "index.db"
-              if SHARED_DIR is not None and not PORTABLE
-              else APP_DIR / "index.db")
+# Un cache pose a cote du programme voyage entier : tout l'accompagne. Un
+# cache designe sur un partage, lui, est peut-etre lu par deux machines a la
+# fois, et peut dormir au lancement : l'index, les favoris, le verrou et le
+# journal des visionnages restent alors chez chacune. Les favoris y etaient
+# partis -- deux PC s'ecrasaient leurs etoiles, et un NAS endormi au
+# lancement faisait repartir de zero, puis la premiere etoile ecrasait tout.
+PRIVATE_DIR = APP_DIR if (SHARED_DIR is None or PORTABLE) else _HOME
+INDEX_PATH = PRIVATE_DIR / "index.db"
+LOCK_PATH = PRIVATE_DIR / "prisme.lock"
+CRASH_LOG = PRIVATE_DIR / "plantage.log"
+RATINGS_PATH = PRIVATE_DIR / "ratings.json"
+# Ou vivaient les favoris avant : repris une fois, puis laisses tels quels.
+SHARED_RATINGS_PATH = (SHARED_DIR / "ratings.json"
+                       if SHARED_DIR is not None and not PORTABLE else None)
 # Anciens caches JSON, repris puis effaces par l'index au premier lancement.
 PROBE_CACHE_PATH = APP_DIR / "probe-cache.json"
 SCAN_CACHE_PATH = APP_DIR / "scan-cache.json"
-RATINGS_PATH = APP_DIR / "ratings.json"
+# Sur le partage quand il y en a un : ecarter y reste un simple renommage.
 LOCAL_TRASH = APP_DIR / "_TRASH"
+# Le dossier de session, pose sous la racine triee (voir trash.py).
+TRASH_FOLDER_NAME = ".videosorter-corbeille"
 
 VIDEO_EXTS = {
     ".mp4", ".m4v", ".mov", ".mkv", ".avi", ".wmv", ".flv", ".webm",
@@ -180,12 +195,14 @@ VIDEO_EXTS = {
 }
 
 # Ordre d'attribution automatique des touches : les chiffres d'abord, puis les
-# lettres dans l'ordre du clavier AZERTY. Toutes les lettres sont disponibles,
-# les commandes de l'application etant sur Ctrl ou sur des touches de navigation.
-# 0 a 5 sont la notation : une main sur les chiffres note, l'autre range.
-# Les destinations prennent donc la suite, a partir de 6.
-KEY_ORDER = "6789azertyuiopqsdfghjklmwxcvbn"
-RESERVED_KEYS = {"0", "1", "2", "3", "4", "5"}
+# lettres dans l'ordre du clavier AZERTY. Les commandes de l'application sont
+# sur Ctrl ou sur des touches de navigation, sauf une : « f » ouvre la fiche
+# survolee. Elle etait pourtant donnee a la dix-huitieme destination, qui ne
+# rangeait donc jamais rien, sans un mot : elle est retiree de l'ordre et
+# reservee. 0 a 5 sont les favoris : une main sur les chiffres marque,
+# l'autre range. Les destinations prennent donc la suite, a partir de 6.
+KEY_ORDER = "6789azertyuiopqsdghjklmwxcvbn"
+RESERVED_KEYS = {"0", "1", "2", "3", "4", "5", "f"}
 
 DEFAULTS = {
     "root": "",
@@ -263,30 +280,68 @@ DEFAULTS = {
 
 
 class Config:
-    """Petit wrapper JSON, tolerant aux fichiers absents ou corrompus."""
+    """Petit wrapper JSON, tolerant aux fichiers absents ou corrompus.
+
+    Tolerant ne veut pas dire oublieux : un fichier illisible etait remplace
+    en silence par les reglages par defaut, et l'ecriture suivante effacait
+    destinations, mots-cles, recherches et mot de passe du partage. Il est
+    desormais mis de cote, la copie de secours reprend sa place, et `problem`
+    le dit.
+    """
 
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else CONFIG_PATH
         self._timer = None
         self.data = json.loads(json.dumps(DEFAULTS))
+        # Ce qu'il faudrait dire a l'utilisateur, s'il y a lieu.
+        self.problem = ""
+        # Vrai quand le fichier existe mais n'a pas pu etre lu : on ne
+        # l'ecrase pas avec des reglages qui n'en sont pas.
+        self.read_only = False
         self.load()
 
+    @property
+    def backup_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".bak")
+
     def load(self) -> None:
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        text = _read_text(self.path)
+        if text is None:
+            return                      # premier lancement : les defauts
+        if isinstance(text, OSError):
+            self.read_only = True
+            self.problem = (f"Réglages illisibles pour l'instant ({text}) : "
+                            "ils ne seront pas réécrits pendant cette séance.")
             return
-        if isinstance(raw, dict):
-            for key, value in raw.items():
-                if key in DEFAULTS:
-                    self.data[key] = value
+        raw = _parse_object(text)
+        if raw is None:
+            aside = _set_aside(self.path)
+            text = _read_text(self.backup_path)
+            raw = _parse_object(text) if isinstance(text, str) else None
+            where = f" (mis de côté sous « {aside.name} »)" if aside else ""
+            self.problem = ("Le fichier de réglages était abîmé" + where + (
+                " : la copie de secours a été reprise." if raw is not None
+                else " : les réglages repartent de zéro."))
+            if aside is None:
+                # Impossible de l'ecarter : on ne l'ecrase pas non plus.
+                self.read_only = True
+            if raw is None:
+                return
+        else:
+            # Une copie par lancement, pas a chaque ecriture : c'est d'elle
+            # qu'on repartira si le fichier s'abimait.
+            _copy_quietly(self.path, self.backup_path)
+        for key, value in raw.items():
+            if key in DEFAULTS:
+                self.data[key] = value
         self._migrate_reserved_keys()
 
     def _migrate_reserved_keys(self) -> None:
-        """Deplace les destinations posees sur une touche devenue la notation.
+        """Deplace les destinations posees sur une touche devenue reservee.
 
-        Les configurations ecrites avant que 0 a 5 servent a noter gardaient ces
-        touches : le raccourci ne se serait plus jamais declenche, sans rien dire.
+        Les configurations ecrites avant que 0 a 5 servent aux favoris, ou
+        avant que « f » ouvre la fiche, gardaient ces touches : le raccourci
+        ne se serait plus jamais declenche, sans rien dire.
         """
         destinations = self.data.get("destinations") or []
         taken = {d.get("key") for d in destinations if d.get("key") not in RESERVED_KEYS}
@@ -295,7 +350,7 @@ class Config:
             if dest.get("key") not in RESERVED_KEYS:
                 continue
             for candidate in KEY_ORDER:
-                if candidate not in taken:
+                if candidate not in taken and candidate not in RESERVED_KEYS:
                     dest["key"] = candidate
                     taken.add(candidate)
                     moved = True
@@ -323,12 +378,22 @@ class Config:
         self._timer.start()
 
     def save(self) -> None:
+        """Ecrit sur le disque pour de bon, ou ne touche a rien.
+
+        Ecriture a cote puis remplacement : une coupure en plein milieu laisse
+        l'ancien fichier intact, et le vidage force garantit que le nouveau
+        est vraiment sur le disque avant de prendre sa place. Une erreur ne
+        remonte plus dans l'interface : elle est notee, et la sauvegarde
+        suivante reessaiera.
+        """
         if self._timer is not None:
             self._timer.stop()
-        APP_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self.path)
+        if self.read_only:
+            return
+        problem = _write_atomic(
+            self.path, json.dumps(self.data, indent=2, ensure_ascii=False))
+        if problem:
+            self.problem = f"Réglages non enregistrés : {problem}"
 
     def __getitem__(self, key):
         return self.data.get(key, DEFAULTS.get(key))
@@ -341,7 +406,11 @@ class Config:
 
     # -- racines recentes ------------------------------------------------
     def push_recent_root(self, root: str) -> None:
-        recents = [r for r in self.data.get("recent_roots", []) if r != root]
+        # Windows ne distingue ni la casse ni les separateurs : « x:/Films »
+        # et « X:\Films » sont le meme dossier, pas deux lignes des recents.
+        same = _same_path_key(root)
+        recents = [r for r in self.data.get("recent_roots", [])
+                   if _same_path_key(r) != same]
         recents.insert(0, root)
         self.data["recent_roots"] = recents[:8]
         self.data["root"] = root
@@ -366,3 +435,81 @@ class Config:
             if key not in used and key not in RESERVED_KEYS:
                 return key
         return ""
+
+
+def _same_path_key(text: str) -> str:
+    if not text:
+        return ""
+    return os.path.normcase(os.path.normpath(str(text))).rstrip("\\/")
+
+
+# -- fichiers de reglages et de favoris -------------------------------------
+def _read_text(path: Path):
+    """Le texte du fichier, None s'il n'existe pas, ou l'erreur qui l'a empeche.
+
+    Un verrou (antivirus, sauvegarde) se relache souvent en un instant : on
+    reessaie avant de conclure que le fichier est illisible. Un contenu qui
+    n'est pas du texte rend "" : c'est un fichier abime, pas absent.
+    """
+    for attempt in range(3):
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except UnicodeDecodeError:
+            return ""
+        except OSError as exc:
+            if attempt == 2:
+                return exc
+            time.sleep(0.1 * (attempt + 1))
+    return None
+
+
+def _parse_object(text: str):
+    """Le dictionnaire JSON de ce texte, ou None s'il n'en est pas un."""
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _set_aside(path: Path) -> Path | None:
+    """Met un fichier abime de cote, sans jamais l'effacer."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    aside = path.with_name(f"{path.stem}.abime-{stamp}{path.suffix}")
+    try:
+        path.replace(aside)
+        return aside
+    except OSError:
+        return None
+
+
+def _copy_quietly(source: Path, target: Path) -> None:
+    try:
+        shutil.copy2(source, target)
+    except OSError:
+        pass
+
+
+def _write_atomic(path: Path, text: str) -> str:
+    """Ecrit a cote, force sur le disque, puis remplace. Rend l'erreur, ou "".
+
+    Sans le vidage force, une coupure de courant juste apres le remplacement
+    pouvait laisser un fichier vide a la place du bon.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, path)
+        return ""
+    except OSError as exc:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return str(exc)

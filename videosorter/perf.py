@@ -1,21 +1,31 @@
 """Le chien de garde : mesure les gels de l'interface, et dit ce qui les precede.
 
 « C'est lent » ne se corrige pas ; « l'interface s'est figee 4,2 s juste
-apres wall.play » se corrige. Un battement toutes les 250 ms : s'il arrive
-en retard de plus de 800 ms, c'est que le fil d'interface etait occupe — on
-note combien de temps, et la derniere action marquee avant.
+apres wall.play » se corrige. Un battement toutes les 50 ms : s'il arrive en
+retard, c'est que le fil d'interface etait occupe -- on note combien de
+temps, et la derniere action marquee avant.
+
+Deux niveaux. Un « a-coup » (a partir de 0,15 s) se sent sans bloquer ; un
+« gel » (a partir de 0,5 s) arrete tout. L'ancien battement, toutes les
+250 ms avec un seuil de 0,8 s, ne voyait aucun des a-coups de 0,1 a 0,5 s
+qu'on ressent pourtant en naviguant -- impossible de les classer.
 """
 from __future__ import annotations
 
 import time
 from datetime import datetime
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer
 
-from .config import APP_DIR
+from .config import PRIVATE_DIR
 
-LOG = APP_DIR / "gel.log"
-STALL = 0.8       # secondes de retard a partir desquelles on parle de gel
+LOG = PRIVATE_DIR / "gel.log"
+BEAT = 0.05       # secondes entre deux battements
+HICCUP = 0.15     # retard a partir duquel on parle d'a-coup
+STALL = 0.5       # retard a partir duquel on parle de gel
+# Au-dela, les a-coups ne sont plus ecrits : une seance qui en accumule des
+# milliers a deja dit ce qu'elle avait a dire, et le journal doit rester lisible.
+MAX_HICCUP_LINES = 500
 
 
 class Watchdog(QObject):
@@ -24,10 +34,14 @@ class Watchdog(QObject):
         self.last_action = "démarrage"
         self.last_at = time.monotonic()
         self._beat = time.monotonic()
-        self.stalls = 0
+        self.stalls = 0          # gels
+        self.hiccups = 0         # a-coups
         self.worst = 0.0
         self.timer = QTimer(self)
-        self.timer.setInterval(250)
+        # Precis : un minuteur « grossier » peut deriver de 5 %, ce qui a
+        # 50 ms ferait deja croire a un a-coup.
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.setInterval(int(BEAT * 1000))
         self.timer.timeout.connect(self._tick)
 
     def start(self, root: str = "") -> None:
@@ -45,7 +59,7 @@ class Watchdog(QObject):
     @staticmethod
     def _say(line: str) -> None:
         try:
-            APP_DIR.mkdir(parents=True, exist_ok=True)
+            LOG.parent.mkdir(parents=True, exist_ok=True)
             fresh = not LOG.exists() or LOG.stat().st_size == 0
             # Un BOM a la creation : le Bloc-notes rend alors « figée », et
             # non « figÃ©e ».
@@ -61,13 +75,20 @@ class Watchdog(QObject):
 
     def _tick(self) -> None:
         now = time.monotonic()
-        late = now - self._beat - 0.25
+        late = now - self._beat - BEAT
         self._beat = now
+        if late < HICCUP:
+            return
+        since = now - self.last_at
         if late < STALL:
+            self.hiccups += 1
+            if self.hiccups <= MAX_HICCUP_LINES:
+                self._say(f"{datetime.now():%d/%m %H:%M:%S}  à-coup {late:.2f} s"
+                          f"  — dernière action : {self.last_action}"
+                          f" (il y a {since:.1f} s)")
             return
         self.stalls += 1
         self.worst = max(self.worst, late)
-        since = now - self.last_at
         self._say(f"{datetime.now():%d/%m %H:%M:%S}  interface figée {late:.1f} s"
                   f"  — dernière action : {self.last_action}"
                   f" (il y a {since:.1f} s)")

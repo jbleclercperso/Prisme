@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from functools import cached_property
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,81 @@ from PySide6.QtCore import QThread, Signal
 
 from .config import VIDEO_EXTS
 from .stamps import remember as remember_stamp
+
+
+# ---------------------------------------------------------------------------
+# Des chemins sans repasser par pathlib
+#
+# `Path(texte)` ne coute presque rien, mais le premier `str()` redecoupe et
+# recompose tout le chemin : pour les cent mille videos de la racine, une a
+# trois secondes sur le fil de l'interface, a chaque ouverture. Les chemins
+# que rendent l'enumeration du disque et l'index sont deja sous leur forme
+# definitive : on les confie tels quels a l'objet, qui n'aura plus rien a
+# recalculer pour les afficher, les comparer ou les hacher.
+# ---------------------------------------------------------------------------
+_PATH_CLASS = type(Path())
+_SEP = os.sep
+_ALT = os.altsep
+
+
+def _plain(text: str) -> bool:
+    """Vrai si pathlib rendrait ce texte exactement tel quel."""
+    if not text or text.endswith(_SEP) or text.startswith(_SEP + _SEP):
+        return False                    # racine, chemin reseau : on laisse faire
+    if _ALT and _ALT in text:
+        return False
+    if _SEP + _SEP in text or _SEP + "." + _SEP in text:
+        return False
+    return not (text.endswith(_SEP + ".") or text.startswith("." + _SEP))
+
+
+def _made_whole(text: str) -> Path:
+    path = object.__new__(_PATH_CLASS)
+    path._raw_paths = [text]
+    path._str = text
+    return path
+
+
+def _fast_works() -> bool:
+    """Verifie, une fois, que la fabrication directe donne le meme objet.
+
+    Elle s'appuie sur la facon dont pathlib range un chemin : une autre
+    version de Python pourrait la changer. On retombe alors sur `Path()`,
+    plus lent mais toujours juste.
+    """
+    sample = "C:\\Dossier\\sous\\clip.mp4" if _SEP == "\\" else "/Dossier/sous/clip.mp4"
+    try:
+        made, real = _made_whole(sample), Path(sample)
+        return (str(made) == str(real) and made == real
+                and hash(made) == hash(real) and made.name == real.name
+                and made.parent == real.parent and made.parts == real.parts
+                and made.suffix == real.suffix)
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
+_FAST = _fast_works()
+
+
+def fast_path(text: str) -> Path:
+    """`Path(text)`, sans le cout du premier `str()` quand le texte est deja net."""
+    if _FAST and _plain(text):
+        return _made_whole(text)
+    return Path(text)
+
+
+# L'index, retenu une fois : `from .index import INDEX` a chaque appel passait
+# par le crochet d'import de PySide6, et `known_media` est appele cent mille
+# fois par tri.
+_INDEX = None
+
+
+def _index():
+    global _INDEX
+    if _INDEX is None:
+        from .index import INDEX
+        _INDEX = INDEX
+    return _INDEX
 
 MODE_FOLDERS = "folders"   # les sous-dossiers, un par un
 MODE_FILES = "files"       # les videos posees directement dans la racine
@@ -27,6 +103,9 @@ LOOSE_LABEL = "(sans dossier)"
 MAX_VIDEOS_PER_ITEM = 10_000_000
 # Ce que les versions plafonnees ont laisse dans l'index.
 OLD_CAP = 400
+# L'empreinte d'un element lu a moitie : elle ne correspond a aucune date, il
+# sera donc relu au passage suivant au lieu d'etre repris tel quel.
+INCOMPLETE_SIG = "incomplet"
 
 
 @dataclass
@@ -52,6 +131,13 @@ class Item:
     # Vrai pour un dossier virtuel batit sur un mot-cle : il n'existe pas sur
     # le disque, on le parcourt mais on ne le deplace pas.
     is_tag: bool = False
+    # Un sous-dossier n'a pas pu etre lu : les comptes sont en dessous de la
+    # verite. Ils ne doivent ni rassurer la garde de suppression, ni rester
+    # en l'etat dans l'index -- on relira.
+    incomplete: bool = False
+    # Le dossier lui-meme n'a pas pu etre lu (coupure, NAS endormi) : on ne
+    # sait rien de neuf, et l'on garde ce qu'on savait.
+    unreadable: bool = False
 
     @property
     def name(self) -> str:
@@ -104,12 +190,13 @@ def known_media(item) -> tuple:
     regardées pour un aperçu. Les filtres chiffrés s'appuient donc sur ce qu'on
     sait, et laissent passer ce dont on ne sait rien plutôt que de le masquer.
     """
-    from .index import INDEX
+    probes = _index().probes.get
     total = 0.0
     height = 0
     known = 0
     for video in item.videos:
-        info = INDEX.probe(video)
+        found = probes(str(video))
+        info = found[1] if found is not None else None
         if not info:
             continue
         known += 1
@@ -272,6 +359,12 @@ def scan_folder(folder: Path) -> Item:
     se sert de ces données au lieu d'interroger le disque une seconde fois. Les
     chemins restent des chaînes tant que possible, `pathlib` coûtant cher quand
     on l'invoque des dizaines de milliers de fois.
+
+    Une lecture qui échoue n'est plus avalée en silence : un sous-dossier
+    illisible marque l'élément `incomplete` (ses comptes sont trop bas), le
+    dossier lui-même illisible le marque `unreadable`. Sans cela, une coupure
+    pendant l'analyse enregistrait des dossiers pleins à zéro vidéo, pour
+    toujours, et la garde de suppression croyait un dossier « 100 % vidéo ».
     """
     item = Item(path=folder, kind=MODE_FOLDERS)
     try:
@@ -286,12 +379,19 @@ def scan_folder(folder: Path) -> Item:
     videos: list = []
 
     stack = [str(folder)]
+    first = True
     while stack:
         current = stack.pop()
         try:
             entries = list(os.scandir(current))
         except OSError:
+            if first:
+                item.unreadable = True
+            else:
+                item.incomplete = True
+            first = False
             continue
+        first = False
         for entry in entries:
             try:
                 if entry.is_dir(follow_symlinks=False):
@@ -301,6 +401,7 @@ def scan_folder(folder: Path) -> Item:
                 file_count += 1
                 size += entry.stat(follow_symlinks=False).st_size
             except OSError:
+                item.incomplete = True
                 continue
             dot = entry.name.rfind(".")
             if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
@@ -320,7 +421,7 @@ def scan_folder(folder: Path) -> Item:
     item.video_count = video_count
     item.subdir_count = subdir_count
     videos.sort(key=str.lower)
-    item.videos = [Path(path) for path in videos]
+    item.videos = [fast_path(path) for path in videos]
     return item
 
 
@@ -350,16 +451,22 @@ def file_signature(item) -> str:
 
 
 def scan_loose(folder: Path, skip_hidden: bool = True) -> Item:
-    """Entrée représentant les seules vidéos en vrac d'un rayonnage."""
-    videos = loose_videos(folder, skip_hidden)
+    """Entrée représentant les seules vidéos en vrac d'un rayonnage.
+
+    Les tailles viennent de l'énumération elle-même : un `stat()` par vidéo
+    coûtait un aller-retour réseau chacune.
+    """
+    try:
+        found = _loose_entries(folder, skip_hidden)
+        unreadable = False
+    except OSError:
+        found, unreadable = [], True
+    videos = [fast_path(path) for path, _size in found]
     item = Item(path=folder, kind=MODE_FOLDERS, videos=videos,
                 video_count=len(videos), file_count=len(videos))
     item.loose_only = True
-    for video in videos:
-        try:
-            item.size += video.stat().st_size
-        except OSError:
-            pass
+    item.unreadable = unreadable
+    item.size = sum(size for _path, size in found)
     try:
         item.mtime = folder.stat().st_mtime
     except OSError:
@@ -409,8 +516,17 @@ def walk_videos(root: Path, skip_hidden: bool = True):
                 yield Path(entry.path)
 
 
+class RootUnreadable(OSError):
+    """La racine elle-meme n'a pas pu etre lue : rien ne dit qu'elle est vide.
+
+    Rendre une liste vide, comme autrefois, revenait a annoncer « 0 element » :
+    un seul hoquet reseau vidait la planche, la composition de la racine en
+    index et le compteur de la collection.
+    """
+
+
 def list_all_videos(root: Path, skip_hidden: bool = True, limit: int = 50000,
-                    stamps: dict | None = None) -> list:
+                    stamps: dict | None = None, strict: bool = False) -> list:
     """Toutes les vidéos de l'arborescence, à plat, quel que soit leur dossier.
 
     C'est la vue qu'on veut pour chercher par nom dans toute une collection :
@@ -419,14 +535,20 @@ def list_all_videos(root: Path, skip_hidden: bool = True, limit: int = 50000,
     `stamps`, s'il est fourni, recueille au passage le (taille, date) de chaque
     vidéo : l'énumération les rapporte déjà, les redemander ensuite ferait une
     lecture réseau par fichier.
+
+    `strict` : une racine illisible lève `RootUnreadable` au lieu de passer
+    pour vide.
     """
     found = []
-    stack = [str(root)]
+    top = str(root)
+    stack = [top]
     while stack and len(found) < limit:
         current = stack.pop()
         try:
             entries = list(os.scandir(current))
-        except OSError:
+        except OSError as exc:
+            if strict and current is top:
+                raise RootUnreadable(f"{root} : {exc}") from exc
             continue
         for entry in entries:
             try:
@@ -450,7 +572,7 @@ def list_all_videos(root: Path, skip_hidden: bool = True, limit: int = 50000,
                 if len(found) >= limit:
                     break
     found.sort(key=str.lower)
-    return [Path(path) for path in found]
+    return [fast_path(path) for path in found]
 
 
 def is_parent_folder(path) -> bool:
@@ -459,82 +581,122 @@ def is_parent_folder(path) -> bool:
     return name.startswith(PARENT_PREFIX)
 
 
+def _loose_entries(folder: Path, skip_hidden: bool = True) -> list:
+    """(chemin, taille) des vidéos posées directement dans ce dossier.
+
+    Lève OSError si le dossier lui-même ne se lit pas : c'est à l'appelant de
+    dire s'il vaut mieux « rien » ou « on ne sait pas ».
+    """
+    found = []
+    for entry in os.scandir(folder):
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        if skip_hidden and _is_hidden(entry):
+            continue
+        dot = entry.name.rfind(".")
+        if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
+            try:
+                st = entry.stat(follow_symlinks=False)
+                size = st.st_size
+                remember_stamp(entry.path, st.st_size, st.st_mtime)
+            except OSError:
+                size = 0
+            found.append((entry.path, size))
+    found.sort(key=lambda pair: pair[0].lower())
+    return found
+
+
 def loose_videos(folder: Path, skip_hidden: bool = True) -> list:
     """Vidéos posées directement dans ce dossier, sans sous-dossier."""
-    found = []
     try:
-        for entry in os.scandir(folder):
+        return [fast_path(path) for path, _size in _loose_entries(folder, skip_hidden)]
+    except OSError:
+        return []
+
+
+def _read_shelf(path: Path, skip_hidden: bool):
+    """(sous-dossiers et leurs dates, vidéos en vrac ?) d'un rayonnage, ou None.
+
+    Une seule enumeration : les videos en vrac, les sous-dossiers et leurs
+    dates se lisent du meme passage. En demander plusieurs multipliait le
+    temps d'ouverture sur un partage reseau, ou chaque lecture est un
+    aller-retour de plusieurs dizaines de millisecondes.
+    """
+    children = []
+    has_loose = False
+    try:
+        for entry in os.scandir(path):
             try:
-                if entry.is_dir(follow_symlinks=False):
-                    continue
+                is_dir = entry.is_dir(follow_symlinks=False)
             except OSError:
                 continue
             if skip_hidden and _is_hidden(entry):
                 continue
-            dot = entry.name.rfind(".")
-            if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
-                found.append(Path(entry.path))
+            if is_dir:
+                children.append((entry.name, _stamp(entry)))
+            elif not has_loose:
+                dot = entry.name.rfind(".")
+                if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
+                    has_loose = True
     except OSError:
-        pass
-    found.sort(key=lambda path: str(path).lower())
-    return found
+        return None
+    children.sort(key=lambda pair: pair[0].lower())
+    return children, has_loose
 
 
 def expand_parents(entries: list, skip_hidden: bool = True,
-                   stamps: dict | None = None, cache=None) -> list:
+                   stamps: dict | None = None, cache=None,
+                   unreadable: list | None = None) -> list:
     """Remplace chaque rayonnage par son contenu, en gardant l'ordre.
 
     Les dossiers qu'il contient prennent sa place dans la liste ; les vidéos
     posées directement dedans sont signalées par le dossier lui-même, qui reste
     en tête sous un libellé explicite au lieu de disparaître avec elles.
+
+    Chaque rayonnage est relu à chaque fois, tous de front. Se fier à sa date
+    pour reprendre la composition notée -- et les dates de ses enfants --
+    laissait passer ce qui change plus bas : une vidéo ajoutée dans
+    « +Rayon/Enfant » ne touche pas la date de « +Rayon », et l'enfant restait
+    indéfiniment à son ancien compte. Relus en parallèle, dix rayonnages coûtent
+    à peu près un seul aller-retour.
+
+    La composition notée ne sert plus qu'au secours : un rayonnage qui ne
+    répond pas garde ses enfants connus au lieu de les voir disparaître. S'il
+    n'en a pas, il est ajouté à `unreadable` : la liste est incomplète.
     """
+    shelves = [path for path in entries if is_parent_folder(path)]
+    read: dict = {}
+    if len(shelves) == 1:
+        read[shelves[0]] = _read_shelf(shelves[0], skip_hidden)
+    elif shelves:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(8, len(shelves))) as pool:
+            for path, found in zip(shelves, pool.map(
+                    lambda shelf: _read_shelf(shelf, skip_hidden), shelves)):
+                read[path] = found
+
     expanded = []
     for path in entries:
         if not is_parent_folder(path):
             expanded.append(path)
             continue
-
+        found = read.get(path)
         own = (stamps or {}).get(str(path), 0)
-        known = cache.expansion(path, own) if cache is not None else None
-        if known is not None:
-            # Le rayonnage n'a pas bouge : sa composition est connue, inutile de
-            # redemander au reseau ce qu'on a deja note.
-            if known["loose"]:
-                expanded.append(path)
-            for name, stamp in known["children"]:
-                child = path / name
-                expanded.append(child)
-                if stamps is not None:
-                    stamps[str(child)] = stamp
-            continue
-
-        # Une seule enumeration : les videos en vrac, les sous-dossiers et leurs
-        # dates se lisent du meme passage. En demander plusieurs multipliait le
-        # temps d'ouverture sur un partage reseau, ou chaque lecture est un
-        # aller-retour de plusieurs dizaines de millisecondes.
-        children = []
-        has_loose = False
-        readable = True
-        try:
-            for entry in os.scandir(path):
-                try:
-                    is_dir = entry.is_dir(follow_symlinks=False)
-                except OSError:
-                    continue
-                if skip_hidden and _is_hidden(entry):
-                    continue
-                if is_dir:
-                    children.append((entry.name, _stamp(entry)))
-                elif not has_loose:
-                    dot = entry.name.rfind(".")
-                    if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
-                        has_loose = True
-        except OSError:
-            children = []
-            readable = False
-        children.sort(key=lambda pair: pair[0].lower())
-        if cache is not None and readable and own:
-            cache.put_expansion(path, own, children, has_loose)
+        if found is None:
+            known = (cache.expansion(path, own, any_stamp=True)
+                     if cache is not None else None)
+            if known is None:
+                if unreadable is not None:
+                    unreadable.append(path)
+                continue
+            children, has_loose = known["children"], known["loose"]
+        else:
+            children, has_loose = found
+            if cache is not None:
+                cache.put_expansion(path, own, children, has_loose)
         if has_loose:
             expanded.append(path)
         for name, stamp in children:
@@ -547,39 +709,52 @@ def expand_parents(entries: list, skip_hidden: bool = True,
 
 def list_entries(root: Path, mode: str, skip_hidden: bool = True,
                  expand_parent_folders: bool = False,
-                 stamps: dict | None = None, cache=None) -> list:
+                 stamps: dict | None = None, cache=None,
+                 strict: bool = False, unreadable: list | None = None) -> list:
     """Liste, sans les analyser, les chemins de premier niveau à traiter.
 
     `stamps`, s'il est fourni, se remplit des dates de modification relevées au
     passage. Elles ne coûtent rien ici et évitent plus tard une lecture réseau
     par dossier pour savoir s'il a bougé.
+
+    `strict` : une racine illisible lève `RootUnreadable` au lieu de rendre une
+    liste vide ; `unreadable` recueille les rayonnages qui n'ont pas répondu.
     """
     if mode == MODE_FLAT:
-        return list_all_videos(root, skip_hidden, stamps=stamps)
+        return list_all_videos(root, skip_hidden, stamps=stamps, strict=strict)
     entries = []
     try:
-        for entry in sorted(os.scandir(root), key=lambda e: e.name.lower()):
+        listing = sorted(os.scandir(root), key=lambda e: e.name.lower())
+    except OSError as exc:
+        if strict:
+            raise RootUnreadable(f"{root} : {exc}") from exc
+        listing = []
+    for entry in listing:
+        try:
             if skip_hidden and _is_hidden(entry):
                 continue
             if mode == MODE_FOLDERS and entry.is_dir(follow_symlinks=False):
-                entries.append(Path(entry.path))
+                entries.append(fast_path(entry.path))
                 if stamps is not None:
                     stamps[entry.path] = _stamp(entry)
             elif mode == MODE_FILES and entry.is_file():
                 dot = entry.name.rfind(".")
                 if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
-                    entries.append(Path(entry.path))
+                    entries.append(fast_path(entry.path))
                     if stamps is not None:
                         try:
                             st = entry.stat(follow_symlinks=False)
                             stamps[entry.path] = (st.st_size, st.st_mtime)
                         except OSError:
                             pass
-    except OSError:
-        pass
+        except OSError as exc:
+            if strict:
+                raise RootUnreadable(f"{root} : {exc}") from exc
+            continue
     if mode == MODE_FOLDERS:
         if expand_parent_folders:
-            entries = expand_parents(entries, skip_hidden, stamps, cache)
+            entries = expand_parents(entries, skip_hidden, stamps, cache,
+                                     unreadable)
         else:
             # Un dossier de tete est une destination, pas quelque chose a trier :
             # c'est la qu'on range les autres. Le laisser dans la liste revenait
@@ -588,6 +763,51 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
     return entries
 
 
+def canon_root(path) -> Path:
+    """Une seule ecriture pour un meme dossier racine.
+
+    Les cles de l'index, des favoris et des vignettes sont les chemins tels
+    quels : une racine choisie par « Réseau » (\\\\serveur\\partage) plutot que
+    par sa lettre (X:) faisait tout « perdre », et relire la collection. On
+    rend la lettre quand le partage est monte, et une forme normalisee sinon.
+    Rien n'est lu sur le partage : seule la table des lecteurs montes l'est.
+    """
+    text = os.path.normpath(str(path))
+    if sys.platform == "win32" and text.startswith("\\\\"):
+        mapped = _drive_for_unc(text)
+        if mapped:
+            text = mapped
+    if len(text) == 2 and text[1] == ":":
+        text += "\\"
+    return Path(text)
+
+
+def _drive_for_unc(text: str) -> str:
+    """X:\\... pour un \\\\serveur\\partage\\... monte sous une lettre, sinon ""."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        connection = ctypes.WinDLL("mpr").WNetGetConnectionW
+    except (OSError, AttributeError):
+        return ""
+    low = text.casefold()
+    for index in range(26):
+        if not mask & (1 << index):
+            continue
+        letter = chr(ord("A") + index)
+        buffer = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(1024)
+        # 1201 : lecteur deconnecte pour l'instant, mais toujours monte.
+        if connection(f"{letter}:", buffer, ctypes.byref(size)) not in (0, 1201):
+            continue
+        remote = buffer.value.rstrip("\\")
+        if not remote:
+            continue
+        folded = remote.casefold()
+        if low == folded or low.startswith(folded + "\\"):
+            return f"{letter}:" + (text[len(remote):] or "\\")
+    return ""
 
 
 def signature(folder: Path, stamp: int | None = None) -> str:
@@ -663,6 +883,10 @@ class RefreshThread(QThread):
     # ajoutes [Item], remplaces [Item], retires [item_id]
     patch = Signal(list, list, list)
     finished_scan = Signal(str, int)       # mode, total
+    # La racine n'a pas repondu (NAS endormi, coupure) : rien n'a ete efface,
+    # la liste affichee est celle du dernier passage. Emis juste avant
+    # `finished_scan`, qui annonce alors le total deja connu.
+    unreachable = Signal(str)
 
     # Les elements partent par paquets : une mise a jour d'interface par
     # element coutait plus cher que l'analyse elle-meme sur un gros dossier.
@@ -688,6 +912,12 @@ class RefreshThread(QThread):
         self.known_ids = list(known_ids or [])
         self.reused = 0        # elements laisses tels quels
         self.rescanned = 0     # elements qu il a fallu reparcourir
+        # Elements lus a moitie (sous-dossier illisible) ou pas du tout : leurs
+        # comptes ne sont pas surs, l'index les relira au passage suivant.
+        self.incomplete = 0
+        # Pourquoi la racine n'a pas pu etre lue, quand c'est le cas : la
+        # fenetre le dit au lieu d'annoncer « Analyse terminee ».
+        self.failure = ""
         self._stop = False
 
     def stop(self) -> None:
@@ -729,16 +959,45 @@ class RefreshThread(QThread):
             stamps = {} if _stamps_are_trustworthy(self.root) else None
         else:
             stamps = {}
-        paths = list_entries(self.root, mode, self.skip_hidden,
-                             self.expand_parents, stamps,
-                             None if self.force or not self.use_cache else INDEX)
+        cache = None if self.force or not self.use_cache else INDEX
+        unreadable: list = []
+        try:
+            paths = list_entries(self.root, mode, self.skip_hidden,
+                                 self.expand_parents, stamps, cache,
+                                 strict=True, unreadable=unreadable)
+            ids = [item_id_for(path, mode, self.expand_parents) for path in paths]
+            present = set(ids)
+            gone = [key for key in self.known_ids if key not in present]
+            if (len(gone) > max(20, len(self.known_ids) // 2)
+                    and not self._stop):
+                # La moitie de la collection qui s'evanouit d'un coup ressemble
+                # plus a une lecture tronquee qu'a un grand menage : on relit
+                # une fois, et l'on garde la lecture la plus complete.
+                again: list = []
+                second = list_entries(self.root, mode, self.skip_hidden,
+                                      self.expand_parents, stamps, cache,
+                                      strict=True, unreadable=again)
+                if len(second) > len(paths):
+                    paths, unreadable = second, again
+                    ids = [item_id_for(path, mode, self.expand_parents)
+                           for path in paths]
+                    present = set(ids)
+                    gone = [key for key in self.known_ids if key not in present]
+        except RootUnreadable as exc:
+            self._unreachable(mode, exc, INDEX)
+            return
         if self._stop:
             INDEX.commit(force=True)
             return
 
-        ids = [item_id_for(path, mode, self.expand_parents) for path in paths]
         total = len(paths)
-        if self.use_cache:
+        if unreadable:
+            # Un rayonnage qui n'a pas repondu n'est pas vide : ses enfants
+            # restent a l'ecran, et la composition de la racine n'est pas
+            # reecrite avec ce trou.
+            holes = tuple(str(path) + os.sep for path in unreadable)
+            gone = [key for key in gone if not key.startswith(holes)]
+        elif self.use_cache:
             # La composition de la racine est notee tout de suite, avant meme de
             # verifier quoi que ce soit. Attendre la fin aurait reproduit le
             # defaut qu'on corrige : un premier inventaire interrompu aurait
@@ -749,20 +1008,17 @@ class RefreshThread(QThread):
         # Ce que la liste affichee porte encore alors que le disque ne le porte
         # plus : on le retire avant meme de verifier le reste. Un dossier disparu
         # n'a pas a rester une minute a l'ecran.
-        present = set(ids)
-        gone = [key for key in self.known_ids if key not in present]
         if gone:
             self.patch.emit([], [], gone)
         shown = set(self.known_ids) - set(gone)
 
-        known_sigs = {} if self.force or not self.use_cache else INDEX.signatures(ids)
+        known_sigs = {} if cache is None else INDEX.signatures(ids)
         if known_sigs and mode == MODE_FOLDERS:
             # Un dossier retenu du temps du plafond — quatre cents videos
-            # sur davantage — se relit une fois, en entier.
-            cached = INDEX.folders([key for key in ids if key in known_sigs])
-            for key, item in cached.items():
-                if len(item.videos) < item.video_count and len(item.videos) >= OLD_CAP:
-                    known_sigs.pop(key, None)
+            # sur davantage — se relit une fois, en entier. Compte en SQL, et
+            # plus du tout une fois qu'il n'en reste aucun.
+            for key in INDEX.capped_ids(OLD_CAP):
+                known_sigs.pop(key, None)
 
         # Premier tri, sans rien lire : qui peut rester en l'etat, qui doit etre
         # reparcouru. C'est ici que se joue la fluidite d'un relancement — sur
@@ -848,10 +1104,27 @@ class RefreshThread(QThread):
                     key, sig = entry[1], entry[2]
                     done += 1
                     self.rescanned += 1
+                    if item.unreadable:
+                        # Le dossier n'a pas repondu : on ne sait rien de neuf.
+                        # On garde la ligne de l'index et ce qui est affiche,
+                        # plutot que d'enregistrer « zero video » pour toujours.
+                        self.incomplete += 1
+                        if key not in shown:
+                            old = INDEX.folders([key]).get(key)
+                            added.append(old or item)
+                            shown.add(key)
+                        continue
                     if self.use_cache:
-                        stored = sig or (signature(Path(item.path))
-                                         if mode == MODE_FOLDERS
-                                         else file_signature(item))
+                        if item.incomplete:
+                            # Comptes trop bas : notes pour l'affichage, mais
+                            # sous une empreinte qui ne correspondra jamais, pour
+                            # qu'il soit relu en entier la fois suivante.
+                            self.incomplete += 1
+                            stored = INCOMPLETE_SIG
+                        else:
+                            stored = sig or (signature(Path(item.path))
+                                             if mode == MODE_FOLDERS
+                                             else file_signature(item))
                         INDEX.put_folder(item, stored)
                     if key in shown:
                         replaced.append(item)
@@ -889,3 +1162,20 @@ class RefreshThread(QThread):
         INDEX.commit(force=True)
         self.progress.emit(total, total, "")
         self.finished_scan.emit(mode, total)
+
+    def _unreachable(self, mode: str, exc: Exception, index) -> None:
+        """La racine n'a pas repondu : ne rien effacer, et le dire.
+
+        Autrefois une racine illisible passait pour vide : la composition en
+        index etait reecrite a vide, tout l'affiche etait retire, et la
+        fenetre annoncait « 0 element » -- puis, relancee sans NAS, basculait
+        en vue a plat et relisait tout le partage. Ici, rien ne bouge : ni
+        l'index, ni la liste affichee. La fin est annoncee avec le total deja
+        connu, pour que la fenetre quitte l'etat « analyse en cours ».
+        """
+        self.failure = str(exc)
+        index.commit(force=True)
+        self.unreachable.emit(self.failure)
+        known = len(self.known_ids)
+        self.progress.emit(known, known, "")
+        self.finished_scan.emit(mode, known)

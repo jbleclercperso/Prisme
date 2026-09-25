@@ -161,10 +161,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     from videosorter.config import KEY_ORDER
     check(KEY_ORDER.startswith("6789azertyuiop"),
           "les destinations commencent à 6, puis suivent l'ordre AZERTY")
-    check(len(KEY_ORDER) == 30,
-          f"30 destinations possibles (obtenu {len(KEY_ORDER)})")
+    check(len(KEY_ORDER) == 29,
+          f"29 destinations possibles (obtenu {len(KEY_ORDER)})")
     check(not set(KEY_ORDER) & set("012345"),
           "les chiffres 0 à 5 restent à la notation")
+    check("f" not in KEY_ORDER,
+          "« f » ouvre la fiche survolée : aucune destination ne la reçoit")
     many = [
         {"key": KEY_ORDER[i], "label": f"dest{i}", "path": str(tri / f"d{i}")}
         for i in range(20)
@@ -1051,13 +1053,14 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         {"key": "1", "label": "A", "path": "C:/a"},
         {"key": "3", "label": "B", "path": "C:/b"},
         {"key": "9", "label": "C", "path": "C:/c"},
+        {"key": "f", "label": "D", "path": "C:/d"},
     ]}), encoding="utf-8")
     migrated = VSConfig(path=old)
     keys = [d["key"] for d in migrated.destinations]
     check(not set(keys) & RESERVED_KEYS,
-          f"plus aucune destination sur une touche de notation ({keys})")
+          f"plus aucune destination sur une touche réservée ({keys})")
     check(keys[2] == "9", "celles deja valides ne bougent pas")
-    check(len(set(keys)) == 3, "et restent distinctes")
+    check(len(set(keys)) == 4 and all(keys), "et restent distinctes")
 
     print("\n[43] La planche ne batit qu'une page de cartes")
     from videosorter.board import PAGE_SIZE
@@ -3456,6 +3459,306 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     with _media._Reading(Path("X:/lot/a.mp4")):
         check(_media.reading_under(Path("X:/lot")) and not _media.reading_under(Path("X:/autre")),
               "on sait quel fichier les fils de fond lisent : on n'attend que lui")
+
+    check_data_safety(app, window, base, root)
+
+
+def check_data_safety(app, window, base, root) -> None:
+    """Index, favoris, réglages, corbeille : ce qui ne doit jamais se perdre."""
+    import sqlite3 as _sq
+    import threading as _th
+    import videosorter.actions as _act
+    import videosorter.scan as _scan
+    from videosorter.index import INDEX, Index as _Index
+    from videosorter.scan import Item as _Item
+
+    # La fenêtre de [84] a refermé l'index en se fermant : on le rouvre.
+    INDEX.reopen(base / "_appdata" / "index.db")
+    work = base / "donnees"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+
+    print("\n[85] L'index ne se jette plus pour une erreur passagère")
+    spot = work / "f3" / "index.db"
+    idx = _Index(spot)
+    idx.put_listing(Path("X:/essai"), "k", ["a", "b"])
+    idx.put_folder(_Item(path=Path("C:/r/d"), kind=MODE_FOLDERS, video_count=1,
+                         videos=[Path("C:/r/d/v.mp4")]), "s")
+    idx.commit(force=True)
+
+    class _Flaky:
+        def __init__(self, real):
+            self.real = real
+
+        def commit(self):
+            raise _sq.OperationalError("disk I/O error")
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+    real_db = idx.db
+    idx.db = _Flaky(real_db)
+    idx.put_listing(Path("X:/autre"), "k", ["c"])
+    idx.commit(force=True)
+    idx.db = real_db
+    check(not idx.rebuilt and not list(spot.parent.glob("index.db.abime-*"))
+          and idx.listing(Path("X:/essai"), "k") == ["a", "b"],
+          "une erreur d'écriture passagère ne refait pas l'index")
+    idx.check_now()
+    idx.close()
+    spot.write_bytes(b"ceci n'est pas une base" * 100)
+    for extra in ("-wal", "-shm"):
+        Path(str(spot) + extra).unlink(missing_ok=True)
+    back = _Index(spot)
+    check(back.restored and back.listing(Path("X:/essai"), "k") == ["a", "b"],
+          "vraiment abîmé : repris de la copie du jour, en fond, et non vidé")
+    back.close()
+
+    print("\n[86] Ce qu'on sait d'une vidéo la suit quand on la range")
+    old = str(work / "A trier" / "clip")
+    new = str(work / "Rangees" / "clip")
+    video = old + "\\v.mp4"
+    INDEX.put_probe(video, "1|2", {"duration": 5.0, "width": 10, "height": 20,
+                                   "codec": "h264", "ok": True})
+    INDEX.put_title(video, "1|2", "Un titre")
+    INDEX.put_scenes(video, "1|2", [1.5, 3.0])
+    INDEX.put_sig(video, "1|2", [1, 2, 3], 9)
+    INDEX.mark_seen(old)
+    INDEX.relocate(old, new)
+    moved = new + "\\v.mp4"
+    check(INDEX.probe(moved) and INDEX.title_of(moved) == "Un titre"
+          and INDEX.scenes_of(moved) == [1.5, 3.0] and INDEX.sig_of(moved) == [1, 2, 3]
+          and INDEX.is_seen(new),
+          "sondage, titre, plans, empreinte et « déjà vu » suivent le dossier")
+    check(not INDEX.probe(video) and not INDEX.sig_of(video) and not INDEX.is_seen(old),
+          "et rien ne reste à l'ancien chemin, pris pour un doublon")
+    INDEX.forget_tree(new)
+    check(not INDEX.probe(moved) and not INDEX.has_scenes(moved),
+          "une vidéo détruite n'a plus de lignes en base")
+    INDEX.put_sig(str(work / ".videosorter-corbeille" / "x" / "z.mp4"), "s", [7, 8], 1)
+    stop = [False]
+    errors = []
+
+    def _writer():
+        i = 0
+        while not stop[0]:
+            INDEX.put_sig(str(work / "sonde" / f"{i}.mp4"), "s", [i, i + 1], 1)
+            i += 1
+
+    writers = [_th.Thread(target=_writer) for _ in range(3)]
+    for thread in writers:
+        thread.start()
+    try:
+        for _ in range(10):
+            sigs = INDEX.all_sigs()
+    except Exception as exc:                           # noqa: BLE001
+        errors.append(exc)
+        sigs = []
+    stop[0] = True
+    for thread in writers:
+        thread.join()
+    check(not errors, f"« doublons d'après les empreintes » pendant un sondage ({errors[:1]})")
+    check(not any(".videosorter-corbeille" in p for p, _v, _s in sigs),
+          "une vidéo en corbeille n'est pas proposée comme doublon")
+    INDEX.forget_tree(work)
+
+    print("\n[87] L'index d'une racine connue n'est jamais élagué")
+    import videosorter.index as _vi
+    keys = [str(work / "big" / f"D{i:03d}") for i in range(40)]
+    for key in keys:
+        INDEX.put_folder(_Item(path=Path(key), kind=MODE_FOLDERS, video_count=1,
+                               videos=[Path(key) / "v.mp4"]), "s")
+    INDEX.put_listing(work / "big", MODE_FOLDERS, keys[:25])
+    INDEX.commit(force=True)
+    saved_max = _vi.MAX_FOLDERS
+    _vi.MAX_FOLDERS = 5
+    try:
+        INDEX.prune()
+    finally:
+        _vi.MAX_FOLDERS = saved_max
+    check(len(INDEX.folders(keys[:25])) == 25,
+          "au-delà du plafond, ce qu'affiche une racine reste")
+    known = INDEX.folders(keys[:3])
+    first = known[keys[0]].videos[0]
+    check(first == Path(keys[0]) / "v.mp4" and str(first) == keys[0] + "\\v.mp4"
+          and first.name == "v.mp4",
+          "les chemins rendus par l'index valent ceux de pathlib")
+    INDEX.drop_listing(work / "big")
+
+    print("\n[88] Une coupure réseau n'efface pas la collection")
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning, 60)
+    before = [i.item_id for i in window.all_items]
+    listing = INDEX.listing(root, _scan.listing_key(MODE_FOLDERS, window.cfg["expand_parents"]))
+    real_scandir = _scan.os.scandir
+
+    def _root_fails(target="."):
+        if Path(str(target)) == Path(root):
+            raise OSError(22, "Le nom réseau spécifié n'est plus disponible")
+        return real_scandir(target)
+
+    _scan.os.scandir = _root_fails
+    try:
+        window.start_root(root, MODE_FOLDERS)
+        reader = window.scan_thread
+        wait_for(app, lambda: not window.scanning, 30)
+        pump(app, 0.3)
+    finally:
+        _scan.os.scandir = real_scandir
+    check(reader is not None and reader.failure
+          and [i.item_id for i in window.all_items] == before,
+          f"racine injoignable : la liste reste celle du dernier passage ({len(before)})")
+    check(INDEX.listing(root, _scan.listing_key(MODE_FOLDERS, window.cfg["expand_parents"]))
+          == listing, "et l'index n'est pas réécrit à vide")
+    partial = work / "partiel"
+    (partial / "sous").mkdir(parents=True)
+    (partial / "v.mp4").write_bytes(b"x")
+    (partial / "sous" / "doc.pdf").write_bytes(b"x")
+
+    def _sub_fails(target="."):
+        if Path(str(target)).name == "sous":
+            raise OSError(22, "coupure")
+        return real_scandir(target)
+
+    _scan.os.scandir = _sub_fails
+    try:
+        seen = _scan.scan_folder(partial)
+    finally:
+        _scan.os.scandir = real_scandir
+    check(seen.incomplete and seen.file_count == 1,
+          "un sous-dossier illisible rend l'élément « incomplet », pas « 100 % vidéo »")
+    shelf = work / "rayon"
+    (shelf / "+R" / "Enfant").mkdir(parents=True)
+    _scan.list_entries(shelf, MODE_FOLDERS, True, True, {}, INDEX)
+    (shelf / "+R" / "Neuf").mkdir()
+    names = [p.name for p in _scan.list_entries(shelf, MODE_FOLDERS, True, True, {}, INDEX)]
+    check("Neuf" in names, "un rayonnage « + » est relu à chaque passage")
+
+    print("\n[89] Déplacer, supprimer, restaurer : jusqu'au bout, et le dire")
+    from videosorter.transfer import Transfer as _T, TransferQueue as _TQ
+    queue = _TQ()
+    done = []
+    queue.finished.connect(done.append)
+    real_move = _act.move_to
+    _act.move_to = lambda *_a: (_ for _ in ()).throw(ValueError("inattendu"))
+    try:
+        queue.submit(_T(kind="move", src=work / "rien", dest=work / "ici"))
+        wait_for(app, lambda: not queue.busy, 10)
+    finally:
+        _act.move_to = real_move
+    check(not queue.busy and done and done[0].state == "failed",
+          "une erreur imprévue libère la file des transferts")
+    try:
+        _act.move_to(work / "nulle-part", work / "ici")
+        why = None
+    except _act.ActionError as exc:
+        why = exc
+    check(why is not None and not why.retry and str(why).startswith("Introuvable"),
+          "« introuvable » ne se réessaie pas douze fois")
+    locked = work / "verrou"
+    locked.mkdir()
+    for i in range(4):
+        (locked / f"f{i}.txt").write_text("x")
+    handle = open(locked / "f1.txt")
+    try:
+        try:
+            _act.delete(locked, "permanent")
+            message = ""
+        except _act.ActionError as exc:
+            message = str(exc)
+    finally:
+        handle.close()
+    check(sorted(p.name for p in locked.iterdir()) == ["f1.txt"]
+          and "3 fichier(s) supprimé(s)" in message,
+          f"un fichier verrouillé n'arrête pas la suppression, et le message le dit")
+    album = work / "vol_a" / "Album"
+    album.mkdir(parents=True)
+    for i in range(3):
+        (album / f"p{i}.mp4").write_bytes(b"y" * (i + 1))
+    real_rename = _act.os.rename
+    calls = []
+
+    def _cross(a, b):
+        calls.append(a)
+        if len(calls) == 1:
+            raise OSError(18, "Invalid cross-device link")
+        return real_rename(a, b)
+
+    _act.os.rename = _cross
+    try:
+        landed = _act.move_to(album, work / "vol_b")
+    finally:
+        _act.os.rename = real_rename
+    check(landed == work / "vol_b" / "Album" and len(list(landed.iterdir())) == 3
+          and not album.exists() and not list((work / "vol_b").glob("*.prisme-partiel")),
+          "d'un volume à l'autre : copie sous un nom provisoire, vérifiée, puis renommée")
+
+    from videosorter.trash import MANIFEST, SessionTrash
+    troot = work / "troot"
+    (troot / "Dossier").mkdir(parents=True)
+    (troot / "Dossier" / "v.mp4").write_bytes(b"z")
+    session = SessionTrash()
+    session.set_base(troot)
+    stored = _act.move_to(troot / "Dossier", session.folder_for(troot / "Dossier"))
+    entry = session.record(troot / "Dossier", stored, 1)
+    session._drain()
+    later = SessionTrash()
+    later.stamp = "20990101-000000"
+    check((stored.parent / MANIFEST).exists()
+          and [e.origin for e in later.leftovers(troot)] == [troot / "Dossier"],
+          "après un arrêt net, la séance suivante retrouve la corbeille et son origine")
+    real_relocate = _act._relocate
+    _act._relocate = lambda *_a: (_ for _ in ()).throw(OSError(5, "Accès refusé"))
+    try:
+        try:
+            session.restore(entry)
+            refused = ""
+        except _act.ActionError as exc:
+            refused = str(exc)
+    finally:
+        _act._relocate = real_relocate
+    check(refused.startswith("Restauration impossible") and entry in session.entries,
+          "« Tout restaurer » : une erreur disque devient un message, l'élément reste")
+    session.restore(entry)
+    (troot / "E").mkdir()
+    (troot / "E" / "a.mp4").write_bytes(b"a")
+    stored = _act.move_to(troot / "E", session.folder_for(troot / "E"))
+    session.record(troot / "E", stored, 1)
+    session.flush_in_background("permanent").join(20)
+    check(session.flush_result == (1, "") and not stored.exists()
+          and not (troot / ".videosorter-corbeille").exists(),
+          "la vidange peut tourner hors du fil de l'interface, et range derrière elle")
+
+    print("\n[90] Favoris et réglages ne repartent jamais de zéro en silence")
+    from videosorter.config import Config as _Cfg
+    from videosorter.ratings import Ratings as _R
+    rpath = work / "fav" / "ratings.json"
+    stars = _R(path=rpath)
+    stars.set("C:\\A\\Anniv", 1)
+    stars.set("C:\\A\\Anniv\\clip.mp4", 1)
+    stars.set("C:\\A\\Anniv2\\x.mp4", 1)
+    stars.rename("C:\\A\\Anniv", "C:\\B\\Anniv")
+    check(stars.get("C:\\B\\Anniv\\clip.mp4") and stars.get("C:\\A\\Anniv2\\x.mp4"),
+          "un dossier déplacé emporte les étoiles de ses vidéos, pas celles du voisin")
+    stars.flush()
+    _R(path=rpath)                          # la copie de secours du lancement
+    rpath.write_text("{abîmé", encoding="utf-8")
+    again = _R(path=rpath)
+    check(again.get("C:\\B\\Anniv\\clip.mp4") and again.problem
+          and list(rpath.parent.glob("ratings.abime-*.json")),
+          "un fichier de favoris abîmé est mis de côté, la copie reprend")
+    cpath = work / "cfg" / "config.json"
+    conf = _Cfg(path=cpath)
+    conf["tags"] = ["un", "deux"]
+    conf.save()
+    _Cfg(path=cpath)
+    cpath.write_text("{abîmé", encoding="utf-8")
+    check(_Cfg(path=cpath)["tags"] == ["un", "deux"],
+          "des réglages abîmés sont repris de la copie de secours")
+
+    from videosorter import perf as _perf
+    check(_perf.HICCUP < 0.2 <= _perf.STALL < 0.8,
+          "le chien de garde relève aussi les à-coups de quelques dixièmes")
 
 
 def main() -> int:
