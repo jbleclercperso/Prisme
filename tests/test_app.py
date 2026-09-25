@@ -2510,8 +2510,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     window.toggle_board(True)
     window.apply_filter("clpi", "")
-    pump(app, 0.3)
+    pump(app, 0.1)
+    check(not window._loose,
+          "l'à-peu-près attend que la frappe se pose : rien pendant qu'on tape")
     if _fuzzy_ok():
+        wait_for(app, lambda: window._loose, 3)
         check(window._loose and len(window.items) >= 1,
               f"rien d'exact : l'écran se remplit d'approchants ({len(window.items)})")
         check("à peu près" in " ".join(window._active_filters()),
@@ -5201,6 +5204,239 @@ def check_keys_and_batches(app, window, base) -> None:
     pump(app, 0.2)
 
 
+def check_fluidity(app, window, base, root) -> None:
+    """Rien de refait pour rien : listes gardees, gestes sans aller-retour
+    au disque, resultats qui attendent qu'on les demande."""
+    import types as _types
+    from videosorter import media as M
+    from videosorter.index import INDEX
+    from videosorter.scan import Item as _Item
+    from videosorter.stamps import stamp_of
+
+    print("\n[93] Fluidité : ce qui est déjà su ne se refait pas")
+    window.set_tab(TAB_FOLDERS)
+    window.start_root(root, MODE_FOLDERS)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
+    window.toggle_board(True)
+    pump(app, 0.3)
+
+    # -- la liste triable : gardee pendant une analyse, completee par la fin -
+    first = window._sortable_items()
+    kept_scan = window.scanning
+    window.scanning = True
+    check(window._sortable_items() is first,
+          "pendant une analyse, la liste triable n'est plus refaite à chaque appel")
+    fake = _Item(path=root / "zz_fluide", kind=MODE_FOLDERS,
+                 videos=[root / "zz_fluide" / "a.mp4"], video_count=1,
+                 file_count=1)
+    window.all_items.append(fake)
+    grown = window._sortable_items()
+    check(grown[-1] is fake and all(a is b for a, b in zip(grown, first))
+          and len(grown) == len(first) + 1,
+          "une liste qui s'allonge se complète par la fin")
+    del window.all_items[-1]
+    window._touch()
+    window.scanning = kept_scan
+    check(all(item is not fake for item in window._sortable_items()),
+          "tout autre changement la refait")
+
+    # -- un paquet de l'analyse : un seul recompte ----------------------------
+    counted = []
+    real_counts = window._show_counts
+    window._show_counts = lambda: (counted.append(1), real_counts())
+    try:
+        window._patching = True
+        window.board.pageChanged.emit(1, 1, 1)
+        window._patching = False
+    finally:
+        window._show_counts = real_counts
+    check(not counted, "les cartes ajoutées par un paquet ne recomptent pas une à une")
+
+    # -- l'onglet Vidéos retrouve sa liste, dans le même ordre ---------------
+    window.set_tab(TAB_VIDEOS)
+    wait_for(app, lambda: not window.scanning, 30)
+    pump(app, 0.3)
+    flat = window.all_items
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+    window.set_tab(TAB_VIDEOS)
+    pump(app, 0.2)
+    check(window.all_items is flat and bool(flat),
+          "l'onglet Vidéos retrouve sa liste sans la refaire")
+    order = [item.item_id for item in window.items]
+    kept_top = window._scan_top
+    window._scan_top = True
+    window.on_scan_finished(MODE_FOLDERS, len(window._plain_items))
+    wait_for(app, lambda: window._flat_job is None, 10)
+    pump(app, 0.3)
+    window._scan_top = kept_top
+    check([item.item_id for item in window.items] == order,
+          "une analyse qui finit sans rien changer ne rebat pas les vidéos")
+    shown = window.board.items
+    check(len(shown) == len(window.items)
+          and all(a is b for a, b in zip(shown, window.items)),
+          "la planche et la liste restent la même, carte pour carte")
+
+    # -- remonter a la racine par le fil : la liste en memoire ---------------
+    video = next((item for item in window.items if item.videos), None)
+    if video is not None:
+        folder = Path(video.path).parent
+        window.jump_to(str(folder))
+        wait_for(app, lambda: not window.scanning, 30)
+        pump(app, 0.2)
+        window.jump_to(str(root))
+        pump(app, 0.2)
+        flat_now = window._flat_list[1] if window._flat_list else None
+        check(window.root == root and window.all_items is flat_now
+              and not window.scanning,
+              "cliquer la racine dans le fil rend la liste des vidéos, sans "
+              "relire tout le disque")
+
+    # -- les voisines d'une video : de memoire, et a jour ---------------------
+    folder = next((it for it in window._plain_items
+                   if it.kind == MODE_FOLDERS and len(it.videos) >= 2), None)
+    if folder is not None:
+        one = str(folder.videos[0])
+        here = str(Path(one).parent)
+        known = window._known_folder_videos(here)
+        from videosorter.config import VIDEO_EXTS as _EXTS
+        on_disk = sorted((str(p) for p in Path(here).iterdir()
+                          if p.is_file() and p.suffix.lower() in _EXTS),
+                         key=str.lower)
+        check(known == on_disk,
+              f"les voisines d'une vidéo viennent de la mémoire ({len(known or [])})")
+        window._folder_videos(one)
+        window._touch(sortable=False)
+        window._folder_videos(one)
+        check(window._siblings_gen == window._collection_gen,
+              "et se refont quand la collection bouge")
+
+    # -- l'image d'une carte ne change pas quand la video est sondee ---------
+    sample = next((Path(v) for it in window._plain_items for v in it.videos), None)
+    if sample is not None:
+        before = M.build_preview_plan([sample], 1, 0, True, True)[0][1]
+        INDEX.put_probe(sample, stamp_of(sample),
+                        {"duration": 600.0, "width": 640, "height": 360,
+                         "codec": "h264", "ok": True})
+        after = M.build_preview_plan([sample], 1, 0, False, True)[0][1]
+        tasks = window._harvest_tasks(
+            [_Item(path=sample, kind=MODE_FILES, videos=[sample],
+                   video_count=1, file_count=1)])
+        check(before == after == tasks[0][2] == M.card_moment(sample),
+              "planche, récolte et préparation prennent la même image, sondée ou non")
+
+    # -- la recolte ne repart pas de zero pour la meme liste ------------------
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+    old = window.preview.harvester
+    window._harvest_key = None
+    window.start_harvest()
+    wait_for(app, lambda: window.preview.harvester is not old, 5)
+    harvester = window.preview.harvester
+    window.start_harvest()
+    pump(app, 0.3)
+    check(harvester is not None and window.preview.harvester is harvester,
+          "revenir sur la même liste ne relance pas la récolte")
+
+    # -- le mur : jamais remplace par la planche ------------------------------
+    window.set_tab(TAB_SPLIT)
+    pump(app, 0.3)
+    window._board_dirty = True
+    window._flush_board()
+    window.refresh_board()
+    check(window.viewer.currentWidget() is window.wall,
+          "un paquet de l'analyse ne remplace plus le mur par la planche")
+    pool, _unsure = window.vertical_pool()
+    every = {str(v) for v in window._videos_from_items()}
+    check(set(pool) <= every,
+          "le vivier du mur ne vient que de la collection, voile compris")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+
+    # -- doublons : proposes, jamais imposes ----------------------------------
+    listed = window.all_items
+    pair = [str(v) for v in window._videos_from_items()[:2]]
+    if len(pair) == 2:
+        window.dupes = None
+        window._dupes_stopped = False
+        window._dupes_from_sigs = False
+        window._dupes_by_image = False
+        window.on_dupes_found([(1000, pair)])
+        check(window.all_items is listed and window._pending_dupes is not None,
+              "le résultat des doublons n'arrache plus à ce qu'on regarde")
+        check(window.dupes_result_action.isVisible()
+              and window._banner_action is not None,
+              "il attend un clic : sur le bandeau, ou dans « ⋯ › Doublons »")
+        window.show_found_dupes()
+        check(window._transient == "dupes" and len(window.items) == 2
+              and not window.dupes_result_action.isVisible(),
+              "un clic l'affiche")
+        window.sort_mode = "random"
+        window.apply_sort()
+        groups = [getattr(item, "dupe_group", -1) for item in window.items]
+        check(groups == sorted(groups), "un tri ne disperse pas les groupes")
+        check(not window.at_home(), "recliquer l'onglet rendra la collection")
+        window.set_tab(TAB_FOLDERS)
+        pump(app, 0.2)
+        check(not window._transient and window.all_items is window._plain_items,
+              "et la rend")
+    # Une autre recherche demandee pendant qu'une tourne : elle suivra.
+    stopped = []
+    window.dupes = _types.SimpleNamespace(stop=lambda: stopped.append(1))
+    window._dupes_from_sigs = False
+    window._dupes_by_image = False
+    window.find_duplicates(by_image=True)
+    check(stopped and window._dupes_next == "image",
+          "l'autre recherche arrête celle en cours puis part d'elle-même")
+    window.dupes = None
+    window._dupes_stopped = False
+    window._dupes_next = None
+
+    # -- le partage : ouvert et refait hors du fil de l'interface -------------
+    from videosorter import web as _web
+    kept_cfg = {key: window.cfg[key] for key in (
+        "share", "share_salt", "share_digest", "tunnel_auto", "tunnel_kind",
+        "share_port")}
+    try:
+        window.cfg["tunnel_auto"] = False
+        window.cfg["tunnel_kind"] = "cloudflare"
+        window.cfg["share"] = True
+        window.cfg["share_port"] = 0
+        window.cfg["share_salt"], window.cfg["share_digest"] = \
+            _web.hash_password("un mot de passe convenable")
+        depart = time.perf_counter()
+        opened = window.start_share()
+        lance = time.perf_counter() - depart
+        check(opened and window.share_server is None and window._share_opening,
+              f"le partage s'ouvre dans un fil ({lance:.2f} s)")
+        wait_for(app, lambda: window.share_server is not None, 20)
+        check(window.share_server is not None, "et finit par ouvrir")
+        window.start_share(rebuild=False)
+        check(not window._share_building,
+              "une analyse qui n'a rien changé ne refait pas son catalogue")
+    finally:
+        window.stop_share()
+        for key, value in kept_cfg.items():
+            window.cfg[key] = value
+
+    # -- les minuteurs se taisent quand rien ne joue --------------------------
+    window.toggle_board(True)
+    pump(app, 0.4)
+    check(not window.aside_watch.isActive(),
+          "sur la planche, le guet des bandeaux ne bat plus")
+    window.showMinimized()
+    pump(app, 0.3)
+    if window.isMinimized():
+        check(not window.activity_timer.isActive(),
+              "fenêtre réduite : les minuteurs se taisent")
+        window.showNormal()
+        pump(app, 0.3)
+        check(window.activity_timer.isActive(), "et reprennent au retour")
+    else:
+        window.showNormal()
+        pump(app, 0.2)
+
+
 def _transfer_for_test(src, dest):
     from videosorter.transfer import Transfer
     Path(dest).mkdir(parents=True, exist_ok=True)
@@ -5415,6 +5651,7 @@ def main() -> int:
     check_media(app, window, base)
     check_wiring(app, window, base, root)
     check_keys_and_batches(app, window, base)
+    check_fluidity(app, window, base, root)
 
     window.close()
     pump(app, 0.3)

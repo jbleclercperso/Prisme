@@ -803,6 +803,7 @@ def _moments_for(video: str, info: dict | None) -> set:
     if scenes:
         for count in (1, 5, 9):
             found.update(pick_moments(scenes, duration, count))
+    found.add(card_moment(video))
     return found
 
 
@@ -965,6 +966,23 @@ def pick_moments(times: list, duration: float, count: int) -> list:
     return [usable[min(len(usable) - 1, int(i * step))] for i in range(count)]
 
 
+def card_moment(video) -> float:
+    """L'instant de l'image d'une carte : le meme, que la video soit sondee ou non.
+
+    Trois formules cohabitaient -- la planche, la recolte, la preparation --
+    et celle de la planche changeait des que la video etait sondee (20 % ou
+    50 % de sa duree) : chaque carte s'extrayait deux fois, et la preparation
+    d'avance fabriquait des images que la planche ne demandait plus. Seuls
+    les plans reperes (« Repérer les plans », un choix explicite) deplacent
+    l'image, une fois pour toutes. La duree n'y entre pas : elle arrive apres.
+    """
+    if INDEX.has_scenes(video):
+        moments = pick_moments(INDEX.scenes_of(video), 0.0, 1)
+        if moments:
+            return moments[0]
+    return BLIND_START
+
+
 def build_preview_plan(videos: list, count: int, page: int = 0,
                        one_per_video: bool = True, blind: bool = False) -> list:
     """Construit une page d'aperçus.
@@ -981,6 +999,17 @@ def build_preview_plan(videos: list, count: int, page: int = 0,
     """
     if not videos:
         return []
+
+    if blind and count == 1:
+        # Une carte : son instant ne depend que de la video (`card_moment`),
+        # pour que planche, recolte et preparation tombent sur la meme image.
+        chunk = videos[page:page + 1] if one_per_video else videos[:1]
+        if not chunk:
+            return []
+        video = chunk[0]
+        info = INDEX.probe(video) or {}
+        return [(str(video), card_moment(video), info.get("duration") or 0.0,
+                 info.get("height") or 0)]
 
     if one_per_video:
         chunk = videos[page * count:(page + 1) * count]

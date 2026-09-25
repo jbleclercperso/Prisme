@@ -44,7 +44,10 @@ from .split import DEFAULT_PANES, SplitWall
 from .access import JOURNAL
 from .perf import LOG as STALL_LOG, WATCH, mark
 from .quiet import QUIET_TITLE, QuietPage
-from .share_dialog import ShareDialog
+# Le dialogue du partage et la recherche sur le web s'importent a leur
+# premiere ouverture : la seconde tirait requests, bs4 et robotparser au
+# lancement -- pres d'une seconde avant la fenetre, plusieurs a froid --
+# pour une fonction qu'on ouvre rarement.
 from .query import (
     available as fuzzy_available, matches as matches_parsed, parse as parse_query,
     tester as query_tester,
@@ -66,7 +69,6 @@ from .scan import (
     human_resolution, human_size, known_media, list_entries,
 )
 from .index import INDEX
-from .search_dialog import WebSearchDialog
 from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
@@ -209,7 +211,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.cfg = cfg
         self.setWindowTitle(APP_NAME)
-        self.setWindowIcon(app_icon())
+        # L'application porte deja l'icone (main.py) : la fenetre en herite.
+        # La redessiner ici coutait un second rendu au lancement.
+        if QApplication.windowIcon().isNull():
+            self.setWindowIcon(app_icon())
         self._fit_to_screen(cfg["window"].get("w", 1400),
                             cfg["window"].get("h", 900))
         self.setStyleSheet(STYLESHEET + HEADER_STYLE)
@@ -326,7 +331,7 @@ class MainWindow(QMainWindow):
         self._decisions = 0
         self.session_timer = QTimer(self)
         self.session_timer.setInterval(30000)
-        self.session_timer.timeout.connect(self._show_counts)
+        self.session_timer.timeout.connect(self._session_tick)
         self.session_timer.start()
         # Cinq secondes sur un element, et il compte comme vu.
         self.seen_timer = QTimer(self)
@@ -341,6 +346,62 @@ class MainWindow(QMainWindow):
         self.peek_thumbs: dict = {}
         self._resume_hop = False
         self._flat_cache: dict = {}
+        # Les versions de la collection. Chaque liste qu'on en tire (videos a
+        # plat, mots-cles, vivier du mur, tirage au hasard, voisines d'une
+        # video) se garde tant que la collection ne bouge pas : les refaire a
+        # chaque onglet coutait de une demi-seconde a quatre secondes sur cent
+        # mille videos. `_collection_gen` bouge a chaque changement ;
+        # `_rebuild_gen` seulement quand la liste ne fait pas que s'allonger.
+        self._collection_gen = 0
+        self._rebuild_gen = 0
+        self._sortable_memo: dict = {}
+        self._collection_src = None
+        self._collection_serial = 0
+        self._videos_memo = None       # (cle, videos) de `_videos_from_items`
+        self._flat_list = None         # (cle, liste a plat de l'onglet Videos)
+        self._flat_job = None          # cle de la preparation en cours
+        self._flat_show = False        # la poser a l'ecran une fois prete
+        self._mine_tags = None         # (cle, mots-cles « Mes mots »)
+        self._mine_key = None          # cle du calcul en cours
+        self._tags_banner = False      # dire le compte une fois les mots faits
+        self._pool_memo = None         # (cle, vivier, inconnues) du mur
+        self._wall_batch: list = []    # le lot en cours de sondage pour le mur
+        self._random_memo = None       # (cle, dossiers, poids cumules)
+        self._siblings_gen = -1
+        # La recolte : ce qu'elle a deja sur le metier, pour ne pas la
+        # relancer de zero a chaque onglet.
+        self._harvest_key = None
+        self._harvest_src = None
+        self._harvest_complete = None
+        self._harvest_token = 0
+        # Vrai le temps d'appliquer un paquet de l'analyse : la planche
+        # signale chaque carte ajoutee, on ne recompte qu'une fois a la fin.
+        self._patching = False
+        # Une liste de passage (les doublons) : aucun rappel ne l'ecrase, et
+        # recliquer l'onglet rend la collection.
+        self._transient = ""
+        self._pending_dupes = None
+        self._dupes_next = None
+        self._banner_action = None
+        # Le partage : son catalogue se refait hors du fil de l'interface.
+        self._share_stamp = None
+        self._share_opening = False
+        self._share_building = False
+        self._share_again = False
+        self._share_token = 0
+        self._share_announce = False
+        self._closing = False
+        self._timers_paused = False
+        # La recherche qui se precise : on filtre ce qui est deja a l'ecran.
+        self._narrow_items = None
+        self._narrow_source = None
+        self._narrow_context = None
+        self._narrow_query = ""
+        # L'a-peu-pres attend que la frappe se pose.
+        self.loose_timer = QTimer(self)
+        self.loose_timer.setSingleShot(True)
+        self.loose_timer.setInterval(450)
+        self.loose_timer.timeout.connect(self._loose_later)
         self.transfers.finished.connect(self.on_transfer_finished)
         self.transfers.changed.connect(self.on_transfers_changed)
 
@@ -585,6 +646,14 @@ class MainWindow(QMainWindow):
         self.searches_menu = searches.addMenu(icon("bookmark"),
                                               "Recherches enregistrées")
         self.searches_menu.aboutToShow.connect(self._fill_searches_menu)
+        # Le resultat d'une recherche de doublons attend qu'on le demande :
+        # il ne remplace plus d'office ce qu'on regarde. Le bandeau passe,
+        # cette entree reste tant qu'il n'a pas ete affiche.
+        doubles = next(a.menu() for a in self.overflow.actions()
+                       if a.menu() is not None and a.text() == "Doublons")
+        self.dupes_result_action = doubles.addAction(
+            "Afficher les doublons trouvés", self.show_found_dupes)
+        self.dupes_result_action.setVisible(False)
         self.more_button.setMenu(self.overflow)
         self._name_backfill_action()
         self._name_veil_action()
@@ -755,6 +824,9 @@ class MainWindow(QMainWindow):
         self.banner.setObjectName("statusBanner")
         self.banner.setWordWrap(True)
         self.banner.hide()
+        # Certains bandeaux proposent un geste (« afficher les doublons ») :
+        # un clic dessus le fait.
+        self.banner.installEventFilter(self)
 
         # Le panneau d'arborescence occupe la gauche, le lecteur le reste.
         # Planche, lecteur de droite : un separateur qu'on tire a la souris,
@@ -897,8 +969,14 @@ class MainWindow(QMainWindow):
         # widget video natif ne rend pas les evenements de survol.
         self.aside_watch = QTimer(self)
         self.aside_watch.setInterval(120)
-        self.aside_watch.timeout.connect(self._watch_bars)
+        self.aside_watch.timeout.connect(self._watch_bars_tick)
         self.aside_watch.start()
+        # Il ne bat que tant qu'une image joue a l'ecran : huit reveils par
+        # seconde pour une planche ou une fenetre reduite, le processeur ne
+        # dormait jamais. Il se rendort de lui-meme (`_watch_bars`) et se
+        # reveille quand ce qu'on voit change.
+        self.viewer.currentChanged.connect(self._wake_watch)
+        self.stack.currentChanged.connect(self._wake_watch)
         self.aside.hide()
         self.aside_index = -1
         self.aside_playlist: list = []
@@ -1028,10 +1106,16 @@ class MainWindow(QMainWindow):
     def start_root(self, root: Path | None, mode: str = "",
                    reset_levels: bool = True, restore_id: str = "",
                    new_origin: bool = False,
-                   force: bool = False) -> None:
+                   force: bool = False, state: str = "") -> None:
+        """Ouvre ce dossier : ce que l'index en sait d'abord, puis la relecture.
+
+        `state` : l'appelant vient de regarder si le dossier est la (« ok »,
+        « injoignable ») -- inutile de redemander au NAS, chaque question y
+        coute un aller-retour.
+        """
         if root is None:
             return
-        state = _folder_state(root)
+        state = state or _folder_state(root)
         if state == "absent":
             QMessageBox.warning(self, "Dossier introuvable", f"{root} n'existe plus.")
             return
@@ -1071,6 +1155,8 @@ class MainWindow(QMainWindow):
         self.mode = mode or self.mode_for_content()
         self.all_items = []
         self.items = []
+        # Une liste de passage (doublons) ne survit pas a un autre dossier.
+        self._transient = ""
         self._scan_top = False
         self.board.empty.setText("Rien à afficher ici.")
         self.plans = {}
@@ -1130,7 +1216,10 @@ class MainWindow(QMainWindow):
         self._list_leaf = ""
         self.crumbs.set_path(self._origin_for(self.root), self.root)
         self._apply_selectors()
-        self._rebuild_commands(force=True)
+        # Seulement si les touches ont change (destinations, ou libelle du
+        # bouton rouge entre disque local et NAS) : une quinzaine de boutons
+        # detruits et recrees a chaque dossier ouvert, pour les memes.
+        self._rebuild_commands()
         # En planche, la vue reste la planche : basculer sur la fiche le temps
         # de l'analyse faisait clignoter l'affichage a chaque changement d'onglet.
         self.viewer.setCurrentWidget(
@@ -1304,6 +1393,11 @@ class MainWindow(QMainWindow):
             self._add_tag_items()
         elif self.tab == TAB_FAVS and self._scan_top:
             self.show_favorites()
+        if self._scan_top:
+            # La collection est la, telle que l'index la connait : la liste de
+            # l'onglet Videos se prepare en fond, avant qu'on la demande --
+            # un instant apres, que l'ecran qui s'ouvre passe d'abord.
+            QTimer.singleShot(1500, self._prepare_flat)
 
     def stop_scan(self) -> None:
         """Abandonne la relecture en cours, et la fait taire immediatement.
@@ -1360,10 +1454,14 @@ class MainWindow(QMainWindow):
         dialog.exec()
         self.setFocus()
         # Un élément restauré redevient triable.
-        for entry_path, item in list(self._restored_items()):
+        restored = list(self._restored_items())
+        for entry_path, item in restored:
             item.status = ""
             item.status_detail = ""
             self._settle_board(item)
+        if restored:
+            # Ses videos reviennent dans les listes tirees de la collection.
+            self._touch(sortable=False)
         self.update_counter()
         # Sur la planche, on y reste : redessiner la fiche courante la
         # remplacait par une video qu'on ne regardait pas.
@@ -1641,6 +1739,10 @@ class MainWindow(QMainWindow):
                "Tout est prêt : l'affichage ne fabrique plus rien."),
             "info" if missing else "done")
 
+    # Les trois recherches de doublons, et ce qu'on en dit.
+    DUPES_KINDS = {"size": "même taille", "image": "même image",
+                   "sigs": "d'après les empreintes"}
+
     def find_duplicates(self, by_image: bool = False) -> None:
         """Rassemble les vidéos de taille rigoureusement identique.
 
@@ -1650,7 +1752,7 @@ class MainWindow(QMainWindow):
         par la corbeille de session — donc réversible.
         """
         if self.dupes is not None:
-            self._stop_dupes()
+            self._stop_dupes("image" if by_image else "size")
             return
         if self.root is None:
             return
@@ -1678,12 +1780,38 @@ class MainWindow(QMainWindow):
         self.progress.show()
         self.show_banner(banner, "info")
 
-    def _stop_dupes(self) -> None:
+    def _dupes_kind(self) -> str:
+        """La recherche en cours : « size », « image » ou « sigs »."""
+        if getattr(self, "_dupes_from_sigs", False):
+            return "sigs"
+        return "image" if getattr(self, "_dupes_by_image", False) else "size"
+
+    def _stop_dupes(self, wanted: str = "") -> None:
         """Recliquer arrete : la recherche rendra une liste vide, qu'il ne
-        faut pas annoncer comme « aucun doublon »."""
+        faut pas annoncer comme « aucun doublon ».
+
+        Une autre recherche demandee pendant ce temps arrete celle qui tourne,
+        puis part d'elle-meme : l'autre entree du menu arretait la recherche
+        en cours sans rien lancer, et sans rien dire.
+        """
         self._dupes_stopped = True
         self.dupes.stop()
+        running = self._dupes_kind()
+        if wanted and wanted != running:
+            self._dupes_next = wanted
+            self.show_banner(
+                f"La recherche « {self.DUPES_KINDS[running]} » s'arrête ; "
+                f"celle « {self.DUPES_KINDS[wanted]} » part dès qu'elle a "
+                "rendu la main.", "quiet")
+            return
+        self._dupes_next = None
         self.show_banner("Recherche de doublons : arrêt demandé…", "quiet")
+
+    def _launch_dupes(self, kind: str) -> None:
+        if kind == "sigs":
+            self.duplicates_from_sigs()
+        else:
+            self.find_duplicates(by_image=kind == "image")
 
     def on_dupes_progress(self, seen: int) -> None:
         if self.scanning:
@@ -1692,12 +1820,24 @@ class MainWindow(QMainWindow):
         self.progress.show()
 
     def on_dupes_found(self, groups: list) -> None:
+        """Le resultat d'une recherche : propose, jamais impose.
+
+        Il arrive des minutes apres le lancement, sur tout le NAS. Il
+        remplacait d'office ce qu'on regardait -- une video, le mur, une
+        autre page -- et coupait au passage la relecture de la collection.
+        Il attend desormais qu'on le demande : un bandeau qu'on clique, ou
+        « ⋯ › Doublons ».
+        """
         scan = self.dupes
         self.dupes = None
-        self.progress.hide()
+        if not self.scanning:
+            self.progress.hide()
         self.progress.setFormat("%v / %m analysés")
         if getattr(self, "_dupes_stopped", False):
             self._dupes_stopped = False
+            following, self._dupes_next = self._dupes_next, None
+            if following:
+                return self._launch_dupes(following)
             self.show_banner("Recherche de doublons arrêtée.", "quiet")
             return
         from_sigs = getattr(self, "_dupes_from_sigs", False)
@@ -1709,21 +1849,27 @@ class MainWindow(QMainWindow):
             return
         if from_sigs:
             groups = self._only_in_collection(groups)
+        by_image = getattr(self, "_dupes_by_image", False)
         if not groups:
             self.show_banner(
                 "Aucun doublon trouvé." + (
                     " Par image, seules les vidéos qui ont déjà leur vignette "
                     "sont comparées : « État des vignettes » dit combien."
-                    if getattr(self, "_dupes_by_image", False) else ""),
+                    if by_image else ""),
                 "info")
             return
-        # Les membres d'un meme groupe se suivent : c'est ce qui permet de les
-        # comparer d'un coup d'oeil au lieu de les chercher dans la liste.
-        items = []
-        extra = 0
-        doubtful = 0
-        gagne = 0
-        for number, group in enumerate(groups):
+        self._pending_dupes = (groups, by_image)
+        self._name_dupes_action(len(groups))
+        self.show_banner(
+            self._dupes_summary(groups, by_image) + ". Cliquez ici pour les "
+            "afficher — ou plus tard par « ⋯ › Doublons ».", "done",
+            action=self.show_found_dupes, seconds=15)
+
+    @staticmethod
+    def _dupes_summary(groups: list, by_image: bool) -> str:
+        """« 12 groupe(s) de doublons — 15 fichier(s) en trop, jusqu'a… »."""
+        extra = doubtful = gagne = 0
+        for group in groups:
             _each, paths = group
             if getattr(group, "sure", True):
                 extra += len(paths) - 1
@@ -1732,6 +1878,50 @@ class MainWindow(QMainWindow):
                 # Trop peu pour trancher (une seule image, duree inconnue) :
                 # a comparer, pas « en trop ».
                 doubtful += 1
+        how = "qui se ressemblent" if by_image else "de doublons"
+        sure = len(groups) - doubtful
+        said = []
+        if sure:
+            said.append(f"{sure} groupe(s) {how} — {extra} fichier(s) en trop, "
+                        f"jusqu'à {human_size(gagne)} à récupérer")
+        if doubtful:
+            said.append(f"{doubtful} groupe(s) à comparer, trop peu sûrs pour "
+                        "dire ce qui est en trop")
+        return " ; ".join(said)
+
+    def _name_dupes_action(self, count: int = 0) -> None:
+        """L'entree « Afficher les doublons trouvés » n'existe que s'il y en a."""
+        action = getattr(self, "dupes_result_action", None)
+        if action is None:
+            return
+        action.setText(f"Afficher les doublons trouvés ({count} groupe(s))")
+        action.setVisible(bool(count))
+
+    def show_found_dupes(self) -> None:
+        """Montre le dernier resultat de doublons, comme une planche ordinaire.
+
+        Une liste de passage : la relecture de la collection continue en
+        dessous sans la toucher, les groupes restent groupes quel que soit
+        le tri ou le filtre, et recliquer l'onglet rend la collection.
+        """
+        pending, self._pending_dupes = self._pending_dupes, None
+        self._name_dupes_action(0)
+        if not pending:
+            self.show_banner("Aucun résultat de doublons en attente.", "quiet")
+            return
+        groups, by_image = pending
+        if self.root is None:
+            return
+        if self.tab == TAB_SPLIT:
+            if self.wall_full:
+                self.toggle_wall_fullscreen(False)
+            self.set_tab(TAB_FOLDERS)
+        self.close_aside()
+        # Les membres d'un meme groupe se suivent : c'est ce qui permet de les
+        # comparer d'un coup d'oeil au lieu de les chercher dans la liste.
+        items = []
+        for number, group in enumerate(groups):
+            _each, paths = group
             for path in paths:
                 path = _as_path(path)
                 item = Item(path=path, kind=MODE_FILES, videos=[path],
@@ -1741,31 +1931,27 @@ class MainWindow(QMainWindow):
                 # moins son meilleur exemplaire (voir _spare_last_copies).
                 item.dupe_group = number
                 items.append(item)
-        self.stop_scan()
+        # La relecture de la racine continue : elle tient la collection a
+        # jour en dessous, sans rien melanger a cette liste (`on_patch`).
+        # Celle d'un sous-dossier n'a plus rien a dire.
+        if self.scanning and not self._scan_top:
+            self.stop_scan()
+            self.progress.hide()
+        self._hush_players()
         self.browsing = True
+        self._transient = "dupes"
         self.all_items = items
         self.mode = MODE_FLAT
-        self.sort_mode = ""            # l'ordre des groupes doit tenir
         self.items = list(items)
         self.index = 0
+        self._list_leaf = "Doublons"
         self._apply_selectors()
         self.refresh_board()
-        self._show_counts()
-        how = ("qui se ressemblent" if getattr(self, "_dupes_by_image", False)
-               else "de doublons")
-        sure = len(groups) - doubtful
-        said = []
-        if sure:
-            said.append(f"{sure} groupe(s) {how} — {extra} fichier(s) en trop, "
-                        f"jusqu'à {human_size(gagne)} à récupérer")
-        if doubtful:
-            said.append(f"{doubtful} groupe(s) à comparer, trop peu sûrs pour "
-                        "dire ce qui est en trop")
         self.show_banner(
-            " ; ".join(said) + ". Cochez ce dont vous ne voulez plus, puis "
-            "« Supprimer » : tout part dans la corbeille de session et revient "
-            "par Ctrl+Z jusqu'à la fermeture. Un groupe garde toujours au "
-            "moins un exemplaire.", "info")
+            self._dupes_summary(groups, by_image) + ". Cochez ce dont vous ne "
+            "voulez plus, puis « Supprimer » : tout part dans la corbeille de "
+            "session et revient par Ctrl+Z jusqu'à la fermeture. Un groupe "
+            "garde toujours au moins un exemplaire.", "info")
 
     def _only_in_collection(self, groups: list) -> list:
         """Ecarte des groupes ce qui n'est plus dans la collection.
@@ -1949,21 +2135,28 @@ class MainWindow(QMainWindow):
                              "être ouvert. Réessayez dans un instant.", "error")
             return
 
+        # Le mode se decide sur ce qu'on sait deja du dossier. Le dossier
+        # etait enumere ici, sur le fil de l'interface, pour un seul booleen
+        # -- puis une seconde fois par `start_root`, une troisieme par la
+        # relecture.
         if item.loose_only:
             # L'entree ne porte que les videos en vrac : on va droit a elles.
             mode = MODE_FILES
-        elif list_entries(target, MODE_FOLDERS, self.cfg["skip_hidden"],
-                          self.cfg["expand_parents"]):
-            mode = self.mode_for_content()
-        else:
-            # Pas de sous-dossier : il n'y a que des videos a montrer.
+        elif (item.subdir_count == 0 and item.file_count >= 0
+              and not item.incomplete and not item.unreadable):
+            # Aucun sous-dossier, a aucune profondeur (le compte de l'analyse
+            # descend partout) : il n'y a que des videos a montrer.
             mode = MODE_FLAT
+        else:
+            # Des sous-dossiers, ou un compte incertain : `start_root` bascule
+            # sur les videos si la lecture n'en trouve aucun.
+            mode = self.mode_for_content()
         self.levels.append({
             "root": self.root,
             "mode": self.mode,
             "item_id": item.item_id,
         })
-        self.start_root(target, mode, reset_levels=False)
+        self.start_root(target, mode, reset_levels=False, state=state)
 
     def go_back(self) -> bool:
         """Revient a l'endroit precedemment visite, quel qu'en soit le niveau."""
@@ -2042,11 +2235,23 @@ class MainWindow(QMainWindow):
                 parent.relative_to(origin)
             except ValueError:
                 parent = origin
-        if parent == here or not parent.is_dir():
+        if parent == here:
+            self.show_banner("Déjà au sommet.", "quiet")
+            return
+        top = self.top_root()
+        if (self.tab != TAB_SPLIT and top is not None and parent == Path(top)
+                and self._show_tab_list(restore_id=str(self.root))):
+            # Remonter jusqu'a la racine, c'est retrouver la liste de
+            # l'onglet, deja en memoire : sur « Vidéos », on relancait un
+            # parcours a plat de tout le NAS.
+            return
+        # Une seule question au NAS, que `start_root` ne repose pas.
+        state = _folder_state(parent)
+        if state == "absent":
             self.show_banner("Déjà au sommet.", "quiet")
             return
         self.start_root(parent, self.mode_for_content(),
-                        restore_id=str(self.root))
+                        restore_id=str(self.root), state=state)
 
     def go_up(self) -> bool:
         """Remonte d'un niveau, en retrouvant le dossier d'ou l'on etait parti."""
@@ -2082,7 +2287,6 @@ class MainWindow(QMainWindow):
                 else f"Analyse {done}/{total}…")
 
     def start_harvest(self) -> None:
-        """Voir `_harvest_tasks`. Idempotent : relancer remplace la precedente."""
         """Fabrique d'avance la vignette de chaque élément, une fois pour toutes.
 
         Sur le partage, une vignette coûte environ une seconde et seize
@@ -2092,28 +2296,64 @@ class MainWindow(QMainWindow):
         vignette déjà faite se relit en deux millisecondes. On les fabrique donc
         avant, pendant qu'on fait autre chose, et la récolte s'écarte dès que
         quelqu'un demande quelque chose.
+
+        Idempotent : la même liste ne relance rien. Elle repartait de zéro à
+        chaque onglet, et ne fabriquait presque rien. La liste des tâches se
+        dresse hors du fil de l'interface (un tiers de seconde sur cent mille
+        éléments), sur un instantané de la liste.
         """
-        mark(f"start_harvest {len(self.all_items)}")
+        if self.tab == TAB_SPLIT or self._closing:
+            # Le mur a besoin de la ligne : il arrete la recolte, rien ne doit
+            # la relancer derriere lui.
+            return
+        items = self.all_items
+        key = (str(self.top_root()), len(items))
+        harvester = self.preview.harvester
+        if items is self._harvest_src and key == self._harvest_key and (
+                self._harvest_complete == key
+                or (harvester is not None and harvester.isRunning())):
+            return
+        mark(f"start_harvest {len(items)}")
+        self._harvest_src = items
+        self._harvest_key = key
+        self._harvest_complete = None
+        self._harvest_token += 1
+        token = self._harvest_token
+        snapshot = list(items)
+        from .tunnel import Chore
+
+        def then(tasks) -> None:
+            if (token != self._harvest_token or self._closing
+                    or not shiboken6.isValid(self) or self.tab == TAB_SPLIT):
+                return
+            if not tasks:
+                return
+            harvester = self.preview.start_harvest(tasks)
+            harvester.progress.connect(self.on_harvest_progress)
+            harvester.finished_harvest.connect(self.on_harvest_finished)
+            self._harvest = (0, len(tasks))
+            self._refresh_scan_button()
+
+        Chore(lambda: self._harvest_tasks(snapshot), self, fallback=[],
+              then=then).start()
+
+    @staticmethod
+    def _harvest_tasks(items: list) -> list:
+        """(cle, video, instant) de chaque carte : l'instant meme que la
+        planche demandera (`media.card_moment`). Hors du fil de l'interface.
+
+        La recolte prenait l'instant d'une formule, la planche d'une autre, la
+        preparation d'une troisieme : elle fabriquait des images que personne
+        ne demandait.
+        """
         tasks = []
-        for index, item in enumerate(self.all_items):
+        moment = media.card_moment
+        for item in items:
             if item.locked or not item.videos:
                 continue
             video = str(item.videos[0])
-            blind = media.BLIND_START
-            if item.kind == MODE_FOLDERS:
-                tasks.append((item.item_id, video, blind))
-            else:
-                info = INDEX.probe(video)
-                duration = (info or {}).get("duration") or 0.0
-                tasks.append((item.item_id, video,
-                              min(duration * 0.2, 20.0) if duration > 2 else blind))
-        if not tasks:
-            return
-        harvester = self.preview.start_harvest(tasks)
-        harvester.progress.connect(self.on_harvest_progress)
-        harvester.finished_harvest.connect(self.on_harvest_finished)
-        self._harvest = (0, len(tasks))
-        self._refresh_scan_button()
+            tasks.append((item.item_id, video, moment(video)))
+        return tasks
 
     def on_harvest_progress(self, done: int, total: int) -> None:
         self._harvest = (done, total)
@@ -2121,6 +2361,8 @@ class MainWindow(QMainWindow):
 
     def on_harvest_finished(self, made: int) -> None:
         self._harvest = (0, 0)
+        # Tout est fait pour cette liste : y revenir ne relance rien.
+        self._harvest_complete = self._harvest_key
         self._refresh_scan_button()
         if made:
             self.show_banner(
@@ -2195,9 +2437,15 @@ class MainWindow(QMainWindow):
         méthode — c'est le cas courant, et c'est ce qui rend l'ouverture immédiate.
         """
         mark(f"on_patch +{len(added)} ~{len(replaced)} -{len(removed)}")
+        if not (added or replaced or removed):
+            return
+        if self._transient and not self._scan_top:
+            # Une liste de passage (doublons) : la relecture d'un sous-dossier
+            # n'a rien a y ajouter.
+            return
         if (self._scan_top and self.all_items is not self._plain_items
                 and self.tab == TAB_FOLDERS and self.mode == MODE_FOLDERS
-                and not self.levels):
+                and not self.levels and not self._transient):
             # L'onglet Dossiers, a la racine : c'est la collection qui doit
             # etre a l'ecran. Un rappel tardif d'un autre onglet avait pu
             # remplacer la liste, et la planche restait alors d'un passage en
@@ -2218,15 +2466,33 @@ class MainWindow(QMainWindow):
                 plain[item.item_id] = item
             self._plain_items = list(plain.values())
             self._plain_root = self.root
+            # La liste affichee n'a pas bouge : sa liste triable reste bonne.
+            self._touch(sortable=False)
             return
-        if removed:
-            self._drop_items(removed)
-        if replaced:
-            self._replace_items(replaced)
-        for item in added:
-            self.all_items.append(item)
-            if self._matches(item):
-                self._accept_item(item)
+        # La planche signale chaque carte ajoutee ; on ne recompte qu'une
+        # fois, a la fin du paquet (`on_board_page`).
+        self._patching = True
+        try:
+            if removed:
+                self._drop_items(removed)
+            if replaced:
+                self._replace_items(replaced)
+            if added:
+                # Le filtre se prepare une fois par paquet, non par element :
+                # c'etait, avec la liste triable refaite a chaque carte, ce
+                # qui figeait la fenetre pendant tout un premier inventaire.
+                keep = self._matcher()
+                sortable = self._sortable
+                for item in added:
+                    self.all_items.append(item)
+                    if sortable(item) and keep(item):
+                        self._accept_item(item)
+                # La liste ne fait que s'allonger : la liste triable se
+                # complete par la fin, sans tout reparcourir.
+                self._touch(sortable=False,
+                            collection=self._shows_collection())
+        finally:
+            self._patching = False
         if self._scan_top:
             # `_drop_items` refait la liste : la collection la suit.
             self._plain_items = self.all_items
@@ -2236,7 +2502,12 @@ class MainWindow(QMainWindow):
             # Rebâtir la planche à chaque paquet la ferait clignoter : on le
             # fait au plus une fois par seconde, quand la rafale est passée.
             self.board_timer.start()
-        self._show_counts()
+        if self.browsing:
+            first, last = self.board._page_bounds()
+            self.on_board_page(first + 1 if self.board.items else 0, last,
+                               len(self.board.items))
+        else:
+            self._show_counts()
         self.update_counter()
 
     def _drop_items(self, removed: list) -> None:
@@ -2245,6 +2516,8 @@ class MainWindow(QMainWindow):
         current = self.current
         self.all_items = [item for item in self.all_items if item.item_id not in gone]
         self.items = [item for item in self.items if item.item_id not in gone]
+        # Une liste neuve : tout ce qui se tire d'elle se reconnait a son
+        # identite, rien a signaler de plus.
         if self.browsing:
             self._board_dirty = True
             return
@@ -2283,6 +2556,9 @@ class MainWindow(QMainWindow):
                     self._in_flight[old.item_id] = new
                 if old.item_id == current_id and not redraw:
                     redraw = [str(v) for v in old.videos] != [str(v) for v in new.videos]
+        # Remplaces sur place, sans que la liste change de longueur : tout
+        # ce qu'on en a tire est a refaire.
+        self._touch(collection=self._shows_collection())
         if self.browsing:
             self._board_dirty = True
         elif redraw:
@@ -2321,7 +2597,10 @@ class MainWindow(QMainWindow):
         """Place les dossiers virtuels en tete, une fois l'analyse terminee.
 
         Ils se calculent sur les videos deja trouvees : inutile de relire le
-        disque, l'analyse vient de le faire.
+        disque, l'analyse vient de le faire. Les deux familles se calculent
+        hors du fil de l'interface et se gardent tant que la collection ne
+        bouge pas : « Mes mots » se refaisait a chaque visite, deux a quatre
+        secondes de fenetre figee sur cent mille videos.
         """
         if self.mode != MODE_FOLDERS:
             return
@@ -2339,88 +2618,140 @@ class MainWindow(QMainWindow):
         # Les mots se tirent de la collection entiere, jamais de la liste
         # affichee : celle-ci peut etre celle des mots eux-memes.
         plain = self._collection()
-        videos = [video for item in plain for video in item.videos]
+        key = self._collection_key()
         # Deux familles : les mots qu'on a saisis, et ceux que les noms de
         # fichiers repetent d'eux-memes. Les seconds ne demandent aucune saisie
         # et decrivent souvent mieux la collection que ce qu'on aurait pense.
         if self.tag_family != "mine":
-            key = (str(self.root), len(videos))
             cached = self._top_tags
-            if cached is not None and cached[0] == key:
-                found = cached[1]
-            else:
+            if cached is None or cached[0] != key:
                 if self._tags_thread is None or self._tags_key != key:
+                    videos = [video for item in plain for video in item.videos]
                     self._tags_key = key
                     self._tags_thread = TagsThread(videos, INDEX.titles, self)
                     self._tags_thread.ready.connect(self._on_top_tags)
                     self._tags_thread.start()
                     self.show_banner("Mots fréquents : calcul en cours…", "info")
-                self.all_items = []
-                self.items = []
-                self.board.empty.setText("Calcul des mots fréquents…")
-                if self.browsing:
-                    self.refresh_board()
-                self.item_title.setText("Calcul des mots fréquents…")
-                self.item_subtitle.setText("")
-                self._show_counts()
-                return
+                if cached is None:
+                    return self._tags_computing("Calcul des mots fréquents…")
+                # L'ancienne liste reste a l'ecran le temps du calcul : une
+                # planche videe puis refaite pour presque les memes mots.
+            found = cached[1]
             if not found:
-                self.all_items = []
-                self.items = []
-                if self.browsing:
-                    self.refresh_board()
-                self.item_title.setText("Aucun mot-clé")
-                self.item_subtitle.setText(
+                return self._no_tags(
                     "Aucun mot ne revient assez souvent dans ces noms de fichiers.")
-                self._show_counts()
-                self.update_counter()
-                return
-            self.all_items = found if self.tab == TAB_TAGS else found + plain
-            self.items = self._filtered()
-            self.apply_sort()
-            self.start_harvest()
-            if self.browsing:
-                self.refresh_board()
-            self._show_counts()
-            self.update_counter()
-            return
+            return self._show_tag_list(found, plain)
         words = self.tags
         if not words:
             # Aucun mot-cle : la liste se vide **et l'affichage suit**. Il
             # restait auparavant sur les categories precedentes, si bien que
             # « Mes mots-cles » semblait rendre les mots frequents.
-            self.all_items = []
-            self.items = []
-            if self.browsing:
-                self.refresh_board()
-            self.item_title.setText("Aucun mot-clé")
-            self.item_subtitle.setText(
+            return self._no_tags(
                 "Ajoutez les vôtres par « ⋯ › Mots-clés automatiques… », ou "
-                "choisissez « Fréquents » pour les laisser deviner."
-                if self.tag_family == "mine"
-                else "Aucun mot ne revient assez souvent dans ces noms de fichiers."
-            )
-            self._show_counts()
-            self.update_counter()
-            return
+                "choisissez « Fréquents » pour les laisser deviner.")
         # Mes propres mots valent pour une seule video ; ceux tires des noms
         # de fichiers doivent en reunir plusieurs pour meriter une categorie.
-        with _without_gc():
-            found = build_tag_items(
-                words, videos, 1 if self.tag_family == "mine" else MIN_BUCKET
-            )
+        minimum = 1 if self.tag_family == "mine" else MIN_BUCKET
+        wanted = (key, tuple(words), minimum)
+        cached = self._mine_tags
+        if cached is None or cached[0] != wanted:
+            if self._mine_key != wanted:
+                self._mine_key = wanted
+                videos = [video for item in plain for video in item.videos]
+                chosen = list(words)
+                from .tunnel import Chore
+                Chore(lambda: build_tag_items(chosen, videos, minimum), self,
+                      fallback=[],
+                      then=lambda found, k=wanted: self._on_mine_tags(k, found)
+                      ).start()
+            if cached is None or cached[0][1:] != wanted[1:]:
+                return self._tags_computing("Calcul de vos mots-clés…")
+            # Memes mots, collection un peu changee : l'ancienne liste reste
+            # a l'ecran le temps du calcul.
+        found = cached[1]
         if not found:
+            return self._no_tags(
+                "Aucun de vos mots-clés ne figure dans les noms de fichiers.")
+        self._show_tag_list(found, plain)
+
+    def _tags_up_to_date(self) -> bool:
+        """Les mots-cles a l'ecran sont-ils ceux de la collection actuelle ?
+
+        Une relecture qui n'a rien change ne les refait pas : la planche des
+        mots-cles se rebatissait a chaque fin d'analyse, pour les memes.
+        """
+        key = self._collection_key()
+        if self.tag_family != "mine":
+            cached = self._top_tags
+            return (cached is not None and cached[0] == key
+                    and self.all_items is cached[1])
+        cached = self._mine_tags
+        return (cached is not None and cached[0][0] == key
+                and cached[0][1] == tuple(self.tags)
+                and self.all_items is cached[1])
+
+    def _on_mine_tags(self, key, found: list) -> None:
+        """Vos mots-cles sont faits : ils s'affichent, s'ils sont encore voulus."""
+        if key != self._mine_key:
+            # Un calcul remplace entre-temps (autres mots, autre collection).
             return
+        self._mine_key = None
+        self._mine_tags = (key, found)
+        if self.tab == TAB_TAGS and self.tag_family == "mine":
+            self._add_tag_items()
+
+    def _tags_computing(self, text: str) -> None:
+        """Rien a montrer encore : on dit que ca se calcule."""
+        self.all_items = []
+        self.items = []
+        self.board.empty.setText(text)
+        if self.browsing:
+            self.refresh_board()
+        self.item_title.setText(text)
+        self.item_subtitle.setText("")
+        self._show_counts()
+
+    def _no_tags(self, why: str) -> None:
+        """Aucun mot-cle : la liste se vide, et le dit.
+
+        « Mes mots » sans aucune correspondance laissait la liste des
+        dossiers a l'ecran, sous l'onglet des mots-cles.
+        """
+        self.all_items = []
+        self.items = []
+        self.board.empty.setText(why)
+        if self.browsing:
+            self.refresh_board()
+        self.item_title.setText("Aucun mot-clé")
+        self.item_subtitle.setText(why)
+        self._show_counts()
+        self.update_counter()
+        self._tell_tags([])
+
+    def _show_tag_list(self, found: list, plain: list) -> None:
         # Dans son onglet, un mot-cle n'est pas un en-tete pose sur la liste des
         # dossiers : c'est toute la liste.
         self.all_items = found if self.tab == TAB_TAGS else found + plain
         self.items = self._filtered()
         self.apply_sort()
+        self.board.empty.setText("Rien à afficher ici.")
         self.start_harvest()
         if self.browsing:
             self.refresh_board()
         elif self.items:
             self.show_item(min(self.index, len(self.items) - 1))
+        self._show_counts()
+        self.update_counter()
+        self._tell_tags(found)
+
+    def _tell_tags(self, found: list) -> None:
+        """Apres « Mots-clés automatiques… » : combien ont trouve des videos."""
+        if not self._tags_banner:
+            return
+        self._tags_banner = False
+        self.show_banner(
+            f"{len(found)} mot(s)-clé(s) sur {len(self.tags)} ont trouvé "
+            f"des vidéos", "info")
 
     def on_scan_finished(self, mode: str, total: int) -> None:
         self.scanning = False
@@ -2443,26 +2774,37 @@ class MainWindow(QMainWindow):
             self._retry_step = 0
         if mode == MODE_FOLDERS and self._scan_top and not failed:
             # La collection a ete tenue a jour au fil de la relecture
-            # (`on_patch`) : les mots frequents sont a recalculer sur elle.
-            self._top_tags = None
+            # (`on_patch`). Les mots frequents se recalculent d'eux-memes si
+            # elle a change : leur cle est sa version, et une relecture qui
+            # n'a rien trouve ne relance plus rien.
             self._plain_whole = True
-            if (self.browsing and not self.levels
+            if (self.browsing and not self.levels and not self._transient
                     and self.all_items is not self._plain_items):
                 # L'onglet affiche a pu s'ouvrir avant la fin de la lecture :
                 # il se complete, sans qu'on ait a le recliquer.
                 if self.tab == TAB_VIDEOS:
-                    before = len(self.all_items)
-                    self.show_videos_tab()
-                    if len(self.all_items) != before:
-                        self.refresh_board()
+                    kept = self._flat_list
+                    if (kept is None or kept[1] is not self.all_items
+                            or kept[0] != self._collection_key()):
+                        # La liste ET la planche, ensemble, dans le meme
+                        # ordre : la liste se rebattait sans la planche, et
+                        # un clic ouvrait -- ou ✕ ecartait -- une autre video
+                        # que celle de la vignette. Ce qu'on voyait garde sa
+                        # place ; seul ce qui arrive s'ajoute a la fin -- des
+                        # que la liste est prete, hors du fil de l'interface.
+                        self._prepare_flat(show=True)
                 elif self.tab == TAB_FAVS:
                     self.show_favorites()
+            # La liste de l'onglet Videos se prepare pendant qu'on fait autre
+            # chose : son premier clic n'aura rien a fabriquer.
+            self._prepare_flat()
             if self.origin is not None and Path(self.root) == Path(self.origin):
                 # L'analyse de la racine repertorie toute la collection : son
                 # total est la premiere reponse a « combien de videos ? ».
                 counted = sum(i.video_count for i in self._plain_items)
                 self._note_state(videos=counted, scanned_at=self._stamp())
-        self._add_tag_items()
+        if self.tab != TAB_TAGS or not self._tags_up_to_date():
+            self._add_tag_items()
         self._show_counts()
         if thread is not None and not failed and shiboken6.isValid(thread):
             # Une analyse qui se termine doit le dire, meme quand elle n'a rien
@@ -2491,7 +2833,10 @@ class MainWindow(QMainWindow):
             self.update_counter()
         self.resume_last()
         # La racine est enfin connue : c'est ici que le partage peut ouvrir.
-        self.start_share()
+        # Son catalogue ne se refait que si la collection a change, et hors
+        # du fil de l'interface : une a huit secondes de fenetre figee a la
+        # fin de chaque analyse, meme d'un sous-dossier.
+        self.start_share(rebuild=False)
         # Ce que la relecture vient de fabriquer dure : on le retire des passes
         # du ramasse-miettes, qui le reparcouraient sinon en gelant tout.
         gc.freeze()
@@ -2632,7 +2977,8 @@ class MainWindow(QMainWindow):
         except ValueError:
             self._resume_id = ""
             return False
-        if parent != self.root and parent.is_dir():
+        if parent != self.root:
+            # `jump_to` demande une fois au NAS si le dossier est la.
             self.jump_to(str(parent))
         else:
             self._resume_id = ""
@@ -2797,15 +3143,17 @@ class MainWindow(QMainWindow):
         self.cfg.save()
         set_veiled(self.cfg["veiled_names"], wanted)
         self._name_veil_action()
+        self._touch()
         self._top_tags = None
         self.plans = {}
-        if self.share_server is not None:
-            self.share_server.library.refresh()
+        # Le catalogue du partage suit, hors du fil de l'interface.
+        self.start_share()
         if self.root is not None:
-            self.items = self._filtered()
-            if self.tab == TAB_VIDEOS:
+            if self.tab == TAB_VIDEOS and not self._transient:
                 self.show_videos_tab()
-            self.apply_sort()
+            else:
+                self.items = self._filtered()
+                self.apply_sort()
             if self.browsing:
                 self.refresh_board()
             self._show_counts()
@@ -2900,45 +3248,124 @@ class MainWindow(QMainWindow):
         """Un mot de passe est-il pose ? Sans lui, on ne sert rien."""
         return bool(self.cfg["share_salt"] and self.cfg["share_digest"])
 
-    def start_share(self) -> bool:
+    def start_share(self, rebuild: bool = True) -> bool:
         """Ouvre le partage si tout est reuni. Sans bruit s'il manque quelque chose.
 
         Appele a chaque analyse terminee : c'est la qu'on connait enfin la
-        racine, et le catalogue se refait avec ce qu'on vient d'apprendre.
+        racine. Le catalogue ne se refait que s'il le faut (`rebuild`, ou une
+        collection qui a change, ou une autre racine), et toujours hors du fil
+        de l'interface : il relit toute la racine dans l'index, une a huit
+        secondes de fenetre figee a la fin de chaque analyse, meme d'un
+        sous-dossier. Vrai veut dire « ouvert, ou en cours d'ouverture ».
         """
-        from .web import Server
-
+        # Rien a importer tant que le partage n'est pas voulu : le serveur
+        # tire http.server et le courriel, pour rien.
         if not self.cfg["share"] or self.root is None or not self.share_ready():
             return False
         top = self.top_root()
-        if self.share_server is not None:
-            # Deja ouvert : on lui repasse simplement le catalogue a jour.
-            try:
-                self.share_server.library.refresh()
-            except OSError:
-                pass
+        stamp = (str(top), self._collection_key())
+        server = self.share_server
+        if server is not None:
+            if rebuild or stamp != self._share_stamp:
+                self._rebuild_catalogue(server, top, stamp)
             return True
-        try:
-            self.share_server = Server(
-                top, self.cfg["share_salt"], self.cfg["share_digest"],
-                port=int(self.cfg["share_port"] or 0),
-                host=self.cfg["share_host"] or "127.0.0.1",
-                expand=self.cfg["expand_parents"],
-                width=self.cfg["thumb_width"])
-            port = self.share_server.start()
-            self.cfg["share_port"] = port
+        if self._share_opening:
+            return True
+        self._open_share_server(top, stamp)
+        return True
+
+    def _open_share_server(self, top, stamp) -> None:
+        """Le serveur et son catalogue, faits dans un fil ; branches ici."""
+        from .tunnel import Chore
+        from .web import Server
+
+        self._share_opening = True
+        token = self._share_token
+        cfg = self.cfg
+        salt, digest = cfg["share_salt"], cfg["share_digest"]
+        port = int(cfg["share_port"] or 0)
+        host = cfg["share_host"] or "127.0.0.1"
+        expand, width = cfg["expand_parents"], cfg["thumb_width"]
+
+        def work():
+            try:
+                server = Server(top, salt, digest, port=port, host=host,
+                                expand=expand, width=width)
+                server.start()
+                return server
+            except OSError as exc:
+                return exc
+
+        def then(result) -> None:
+            if not shiboken6.isValid(self):
+                return
+            self._share_opening = False
+            stale = (token != self._share_token or self._closing
+                     or not self.cfg["share"] or not self.share_ready())
+            if isinstance(result, Exception) or result is None:
+                if not stale:
+                    self.show_banner(f"Partage impossible : {result}", "error")
+                return
+            if stale:
+                # Ferme ou change entre-temps : ce serveur n'a plus d'objet.
+                result.stop()
+                if not self._closing and self.cfg["share"] and self.share_ready():
+                    self.start_share()
+                return
+            self.share_server = result
+            self._share_stamp = stamp
+            self.cfg["share_port"] = result.port
             self.cfg.save_soon()
+            if self._share_announce:
+                self._share_announce = False
+                self.show_banner("Partage à distance ouvert.", "done")
             if self.cfg["tunnel_auto"]:
                 # L'adresse publique s'ouvre d'elle-meme : c'est elle qu'on
                 # veut, pas une commande a retaper a chaque fois.
                 QTimer.singleShot(400, self.start_tunnel)
             elif self.cfg["tunnel_kind"] == "tailscale":
-                self._check_leftover_funnel(port)
-        except OSError as exc:
-            self.share_server = None
-            self.show_banner(f"Partage impossible : {exc}", "error")
-            return False
-        return True
+                self._check_leftover_funnel(result.port)
+            if self._share_again:
+                self._share_again = False
+                self.start_share(rebuild=False)
+
+        Chore(work, self, fallback=None, then=then).start()
+
+    def _rebuild_catalogue(self, server, top, stamp) -> None:
+        """Refait le catalogue du partage dans un fil, puis l'echange d'un bloc."""
+        library = getattr(server, "library", None)
+        if library is None:
+            return
+        if self._share_building:
+            # Un seul a la fois ; le suivant part a la fin de celui-ci.
+            self._share_again = True
+            return
+        from .tunnel import Chore
+        from .web import Library
+
+        self._share_building = True
+        same = Path(library.root) == Path(top)
+        expand, width = self.cfg["expand_parents"], self.cfg["thumb_width"]
+
+        def work():
+            if same:
+                library.refresh()           # s'echange d'un bloc, sous verrou
+                return library
+            # Une autre racine : le partage servait l'ancienne.
+            return Library(top, expand, width)
+
+        def then(result) -> None:
+            if not shiboken6.isValid(self):
+                return
+            self._share_building = False
+            if result is not None and self.share_server is server:
+                server.library = result
+                self._share_stamp = stamp
+            if self._share_again:
+                self._share_again = False
+                self.start_share(rebuild=False)
+
+        Chore(work, self, fallback=None, then=then).start()
 
     def _check_leftover_funnel(self, port: int) -> None:
         """Une adresse fixe restee ouverte par une seance plantee.
@@ -3090,6 +3517,11 @@ class MainWindow(QMainWindow):
             self.tunnel_address = ""
 
     def stop_share(self, wait: bool = False) -> None:
+        # Une ouverture encore en cours, dans son fil, est oubliee : son
+        # serveur se ferme a l'arrivee.
+        self._share_token += 1
+        self._share_opening = False
+        self._share_again = False
         self.stop_tunnel(wait)
         if self.share_server is not None:
             self.share_server.stop()
@@ -3099,8 +3531,12 @@ class MainWindow(QMainWindow):
         self.cfg["share"] = bool(on)
         self.cfg.save()
         if on:
-            if self.start_share():
+            if self.share_server is not None:
                 self.show_banner("Partage à distance ouvert.", "done")
+            else:
+                # Il s'ouvre dans un fil : il le dira une fois ouvert.
+                self._share_announce = True
+                self.start_share()
         else:
             self.stop_share()
             self.show_banner("Partage à distance fermé.", "quiet")
@@ -3121,6 +3557,8 @@ class MainWindow(QMainWindow):
         if not self.share_ready():
             return "Aucun mot de passe : le partage reste fermé."
         if self.share_server is None:
+            if self._share_opening:
+                return "Ouverture du partage…"
             return ("Prêt, en attente d'une racine analysée."
                     if self.root is None else "Partage arrêté.")
         return (f"Ouvert — {len(self.share_server.library.videos)} vidéo(s) "
@@ -3163,6 +3601,7 @@ class MainWindow(QMainWindow):
         return self.tunnel_trouble or "Adresse publique fermée."
 
     def open_share(self) -> None:
+        from .share_dialog import ShareDialog
         ShareDialog(self, self).exec()
 
     def open_radial(self) -> None:
@@ -3561,6 +4000,10 @@ class MainWindow(QMainWindow):
         viewer.set_failed(slot)
 
     def on_board_page(self, first: int, last: int, total: int) -> None:
+        if self._patching:
+            # Une carte ajoutee par l'analyse : `on_patch` recompte une fois,
+            # a la fin du paquet, et non quarante.
+            return
         if self.browsing:
             self._show_counts()
         self._harvest_here(first, last)
@@ -3626,6 +4069,11 @@ class MainWindow(QMainWindow):
     def apply_sort(self) -> None:
         """Reclasse la liste visible selon le mode choisi."""
         import random
+        if self._transient == "dupes":
+            # Les doublons se lisent groupe par groupe, le meilleur exemplaire
+            # d'abord : un tri ou un filtre les dispersait dans la liste.
+            self.items.sort(key=lambda item: getattr(item, "dupe_group", 0))
+            return
         if (self.tab == TAB_TAGS and self.sort_mode in ("random", "name", "", None)
                 and self.items and all(i.is_tag for i in self.items)):
             # Les mots-cles se lisent du plus frequent au moins frequent — et
@@ -3726,9 +4174,17 @@ class MainWindow(QMainWindow):
     def _update_page_bar(self) -> None:
         self._show_counts()
 
-    def show_banner(self, text: str, tone: str = "info") -> None:
-        """Un bandeau, quatre tons : info, quiet, done, error. Rien d'autre."""
+    def show_banner(self, text: str, tone: str = "info", action=None,
+                    seconds: int = 4) -> None:
+        """Un bandeau, quatre tons : info, quiet, done, error. Rien d'autre.
+
+        `action` : ce que fait un clic sur le bandeau (« afficher les
+        doublons ») ; il reste alors plus longtemps, le temps d'y aller.
+        """
         color = BANNER_TONES.get(tone, BANNER_TONES["info"])
+        self._banner_action = action
+        self.banner.setCursor(Qt.PointingHandCursor if action is not None
+                              else Qt.ArrowCursor)
         self.banner.setText(text)
         self.banner.setStyleSheet(
             f"QLabel {{ background: {color}; color: #e9eef4; border-radius: 8px;"
@@ -3738,7 +4194,7 @@ class MainWindow(QMainWindow):
         self._place_banner()
         self.banner.show()
         self.banner.raise_()
-        self.banner_timer.start(4000)
+        self.banner_timer.start(max(1, int(seconds)) * 1000)
 
     def _place_banner(self) -> None:
         """En haut de la zone d'image, centre : il se lit sans rien pousser."""
@@ -3858,7 +4314,15 @@ class MainWindow(QMainWindow):
         Passer aux vidéos relançait une analyse complète de la racine, alors que
         l'analyse des dossiers vient d'en relever le contenu. Sur un partage
         réseau, c'était plusieurs minutes pour une information déjà connue.
+
+        Gardée tant que la collection ne bouge pas : l'onglet Vidéos, le mur
+        et les voisines d'une vidéo la redemandaient chacun, cent mille
+        chemins revus à chaque fois. La liste rendue ne se modifie pas.
         """
+        key = self._collection_key()
+        memo = self._videos_memo
+        if memo is not None and memo[0] == key:
+            return memo[1]
         seen = set()
         found = []
         # La collection, et non la liste affichee : depuis les favoris ou un
@@ -3869,11 +4333,12 @@ class MainWindow(QMainWindow):
                 # plus, jusqu'a ce qu'un Ctrl+Z le ramene.
                 continue
             for video in item.videos:
-                key = str(video)
-                if key in seen or under_veiled(video):
+                key_ = str(video)
+                if key_ in seen or under_veiled(key_):
                     continue
-                seen.add(key)
+                seen.add(key_)
                 found.append(video)
+        self._videos_memo = (key, found)
         return found
 
     def _collection(self) -> list:
@@ -3882,11 +4347,53 @@ class MainWindow(QMainWindow):
         Tant que la racine n'a pas ete lue, on se contente des vrais dossiers
         de la liste affichee.
         """
-        top = self.top_root()
-        if (self._plain_root is not None and top is not None
-                and Path(self._plain_root) == Path(top)):
+        if self._collection_known():
             return self._plain_items
         return [i for i in self.all_items if not i.is_tag]
+
+    def _collection_known(self) -> bool:
+        """Vrai quand la collection de la racine du fil est en memoire."""
+        top = self.top_root()
+        return (self._plain_root is not None and top is not None
+                and Path(self._plain_root) == Path(top))
+
+    def _touch(self, sortable: bool = True, collection: bool = True) -> None:
+        """Une liste a change sur place : ce qu'on en a tire est a refaire.
+
+        `sortable` a faux : la liste n'a fait que s'allonger (une analyse qui
+        avance), ou seuls des etats ont change (un transfert) -- la liste
+        triable se complete alors par la fin, sans tout reparcourir.
+        `collection` a faux : ce n'est pas la collection qui a bouge (la
+        relecture d'un sous-dossier), et l'onglet Videos, le mur, les
+        mots-cles gardent ce qu'ils en avaient tire.
+        """
+        if collection:
+            self._collection_gen += 1
+        if sortable:
+            self._rebuild_gen += 1
+
+    def _shows_collection(self) -> bool:
+        """La liste affichee est-elle la collection elle-meme ?"""
+        return (self.all_items is self._plain_items
+                or not self._collection_known())
+
+    def _collection_key(self) -> tuple:
+        """Ce qui distingue une version de la collection d'une autre.
+
+        La liste meme (son identite et sa longueur), le compteur des
+        changements faits sur place, et le voile : tout ce dont dependent
+        les listes qu'on en tire.
+        """
+        from . import scan as _scan
+        source = self._plain_items if self._collection_known() else self.all_items
+        if source is not self._collection_src:
+            # Une autre liste : un autre numero. On garde la liste vue en
+            # dernier, pour qu'aucune autre ne naisse a son adresse et ne
+            # passe pour elle.
+            self._collection_src = source
+            self._collection_serial += 1
+        return (str(self.top_root()), self._collection_serial, len(source),
+                self._collection_gen, _scan.SHOW_VEILED, frozenset(_scan.VEILED))
 
     def restore_folders(self) -> bool:
         """Remet la liste des dossiers déjà analysée, sans rien relire.
@@ -3895,8 +4402,8 @@ class MainWindow(QMainWindow):
         complète de la racine — plusieurs minutes sur un partage réseau, pour
         retrouver exactement ce qu'on venait de quitter.
         """
-        if self._plain_root is None or self.root is None or \
-                Path(self._plain_root) != Path(self.root):
+        if (self._plain_root is None or self.root is None
+                or Path(self._plain_root) != Path(self.root)):
             return False
         # La liste elle-meme, pas une copie : la relecture en cours continue
         # de l'alimenter, et ce qu'on y range en disparait partout.
@@ -3905,7 +4412,8 @@ class MainWindow(QMainWindow):
         self.mode = MODE_FOLDERS
         self.apply_sort()
         self.index = 0
-        self._show_counts()
+        # Les comptes suivent la planche, que l'appelant rebatit
+        # (`on_board_page`) : les faire ici les calculait sur l'ancienne.
         return True
 
     def wall_sort(self, index: int, path: str) -> None:
@@ -3934,12 +4442,8 @@ class MainWindow(QMainWindow):
                 f"NAS injoignable : « {source.name} » n'a pas été déplacé.",
                 "error")
             return False
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            self.show_banner(f"Destination inaccessible : {actions.describe(exc)}",
-                             "error")
-            return False
+        # La destination se cree dans le transfert (`actions.move_to`) : la
+        # creer ici coutait un aller-retour de plus, sur le fil de l'interface.
         # Le panneau qui la montre la lache, et les ffmpeg qui la lisent sont
         # arretes : sans cela, le deplacement butait sur le fichier ouvert.
         self._release_media(source)
@@ -4037,9 +4541,11 @@ class MainWindow(QMainWindow):
         if len(self.wall.pool) >= max(12, len(self.wall.panes) * 3):
             return
         import random as _random
-        batch = list(self._wall_unsure)
-        _random.shuffle(batch)
-        self.wall_prober = InfoScan(batch[:60], self)
+        batch = _random.sample(self._wall_unsure,
+                               min(60, len(self._wall_unsure)))
+        # Le lot est retenu : a son retour, on n'examine que lui.
+        self._wall_batch = batch
+        self.wall_prober = InfoScan(batch, self)
         # Le mur est ce qu'on regarde : il n'attend pas que les vignettes de
         # la planche, qu'on vient de quitter, aient fini.
         self.wall_prober.yields = False
@@ -4048,16 +4554,46 @@ class MainWindow(QMainWindow):
         self.wall_prober.start()
 
     def _wall_probed(self, count: int) -> None:
+        """Un lot sonde : ce qu'on y a appris rejoint le vivier, et rien d'autre.
+
+        Le vivier entier se refaisait a chaque lot -- toute la collection
+        relue, deux a quatre secondes de fenetre figee toutes les soixante
+        videos sondees.
+        """
         self.wall_prober = None
+        batch, self._wall_batch = self._wall_batch, []
         if self.tab != TAB_SPLIT or self._wall_pinned:
             return
-        before = len(self.wall.pool)
-        pool, unsure = self.vertical_pool()
-        if len(pool) > before:
+        wanted = self.cfg["wall_orientation"] or "vertical"
+        heavy_cut = len(self.wall.panes) >= 4
+        known = set()
+        fresh = []
+        for key in batch:
+            info = INDEX.probe(key) or {}
+            width, height = info.get("width") or 0, info.get("height") or 0
+            # Sonde ou non, il quitte la liste d'attente : une video que
+            # ffprobe ne lit pas ne reviendrait sinon qu'a chaque lot.
+            known.add(key)
+            if not (width and height):
+                continue
+            if heavy_cut and max(width, height) > 1920:
+                continue
+            if wanted == "any" or (
+                    ("vertical" if height > width else "horizontal") == wanted):
+                fresh.append(key)
+        if known:
+            self._wall_unsure = [key for key in self._wall_unsure
+                                 if key not in known]
+            self._pool_memo = None
+        pool = self.wall.pool
+        have = set(pool)
+        fresh = [key for key in fresh if key not in have]
+        if fresh:
             # Le vivier s'etoffe sans relancer le mur : la video qu'on
             # commencait a regarder restait sinon remplacee par une autre.
+            pool = list(pool) + fresh
             self.wall.grow_pool(pool)
-            self.wall.set_caption(len(pool), unsure)
+            self.wall.set_caption(len(pool), len(self._wall_unsure))
         elif count:
             # Rien de nouveau, mais il reste a chercher.
             self.probe_for_wall()
@@ -4165,46 +4701,67 @@ class MainWindow(QMainWindow):
         precisement ce qu'on voulait eviter. Ce qui n'a pas encore ete sonde
         est compte a part, et `probe_for_wall` va le chercher en tache de
         fond : le mur se remplit alors tout seul, sans jamais mentir.
+
+        Une seule source, la collection en memoire -- deja filtree par le
+        voile. L'index etait relu en plus, a chaque ouverture et a chaque
+        lot sonde : deux a quatre secondes de gel, et un dossier masque
+        pouvait jouer en grand sur le mur. Le resultat se garde tant que ni
+        la collection, ni les reglages, ni les sondages ne bougent.
         """
         mark("vertical_pool")
         terms = self._terms((self.criteria or {}).get(
             "include", self.cfg["filter_include"]))
         wanted = self.cfg["wall_orientation"] or "vertical"
         only_unseen = bool(self.cfg["only_unseen"])
-        top = self.top_root()
-        videos = list(self._videos_from_items())
-        if top is not None:
-            try:
-                for item in cached_items(top, MODE_FOLDERS,
-                                         self.cfg["expand_parents"]):
-                    videos.extend(item.videos)
-            except Exception:
-                pass
+        key = (self._collection_key(), wanted, only_unseen, tuple(terms),
+               len(INDEX.probes), len(INDEX.seen) if only_unseen else 0)
+        memo = self._pool_memo
+        if memo is not None and memo[0] == key:
+            self._wall_unsure = list(memo[2])
+            return list(memo[1]), len(memo[2])
+        videos = self._videos_from_items()
+        if not self._collection_known():
+            # La collection de la racine n'est pas encore lue (premier
+            # inventaire interrompu) : l'index, a defaut, masque compris.
+            top = self.top_root()
+            extra = []
+            if top is not None:
+                try:
+                    for item in cached_items(top, MODE_FOLDERS,
+                                             self.cfg["expand_parents"]):
+                        extra.extend(video for video in item.videos
+                                     if not under_veiled(video))
+                except Exception:
+                    pass
+            videos = list(videos) + extra
         found = []
         unsure = []
         seen = set()
+        probe = INDEX.probe
+        is_seen = INDEX.is_seen
         for video in videos:
-            key = str(video)
-            if key in seen:
+            key_ = str(video)
+            if key_ in seen:
                 continue
-            seen.add(key)
-            if terms and not any(term in key.lower() for term in terms):
+            seen.add(key_)
+            if terms and not any(term in key_.lower() for term in terms):
                 continue
-            if only_unseen and INDEX.is_seen(key):
+            if only_unseen and is_seen(key_):
                 continue
             if wanted == "any":
-                found.append(key)
+                found.append(key_)
                 continue
-            info = INDEX.probe(video) or {}
+            info = probe(key_) or {}
             width, height = info.get("width") or 0, info.get("height") or 0
             if not (width and height):
-                unsure.append(key)
+                unsure.append(key_)
                 continue
             kind = "vertical" if height > width else "horizontal"
             if kind == wanted:
-                found.append(key)
-        self._wall_unsure = unsure
-        return found, len(unsure)
+                found.append(key_)
+        self._pool_memo = (key, found, unsure)
+        self._wall_unsure = list(unsure)
+        return list(found), len(unsure)
 
     def wall_sibling(self, index: int, path: str) -> None:
         """La suivante du meme dossier, dans ce panneau. Une lecture du dossier,
@@ -4366,22 +4923,111 @@ class MainWindow(QMainWindow):
         self.all_items = folders + videos
         self.items = self._filtered()
         self.index = 0
-        top = self.top_root()
-        if top is not None:
-            self.crumbs.set_path(top, top)
-            self.crumbs.append_leaf("★ Favoris")
+        # La feuille du fil, posee une fois : `refresh_board` la redessine,
+        # ici comme apres un filtre ou un tri, qui la perdaient.
+        self._list_leaf = "★ Favoris"
         self._apply_selectors()
         self.board.empty.setText(
             "Aucun favori pour l'instant : l'étoile, en bas à droite d'une "
             "fiche, ou la touche 1, en ajoute un.")
+        # Les comptes suivent : la planche les refait en changeant de page
+        # (`on_board_page`).
         self.refresh_board()
-        if top is not None:
-            self.crumbs.set_path(top, top)
-            self.crumbs.append_leaf("★ Favoris")
-        self._show_counts()
         QTimer.singleShot(150, self.start_harvest)
 
-    def show_videos_tab(self) -> None:
+    def _prepare_flat(self, show: bool = False) -> None:
+        """Prepare en tache de fond la liste a plat de l'onglet Videos.
+
+        Au premier clic sur « Vidéos », cent mille elements se fabriquaient
+        sur le fil de l'interface -- une a cinq secondes ou l'application
+        semblait plantee. On les fait des que la collection est connue,
+        pendant qu'on regarde autre chose, avec leur liste triable et leurs
+        noms replies : le premier filtre n'a plus rien a preparer non plus.
+
+        `show` : l'onglet Videos est a l'ecran et attend cette liste (fin
+        d'une relecture) ; elle s'y pose des qu'elle est prete, liste et
+        planche ensemble, sans rebattre ce qu'on regardait.
+        """
+        if self._closing or not self._collection_known():
+            return
+        key = self._collection_key()
+        kept = self._flat_list
+        if kept is not None and kept[0] == key:
+            if show:
+                self._show_prepared_flat()
+            return
+        self._flat_show = self._flat_show or show
+        if self._flat_job == key:
+            return
+        self._flat_job = key
+        collection = list(self._collection())
+        cache = self._flat_cache
+        rebuild = self._sortable_key()
+        sortable = self._sortable
+
+        def work():
+            with _without_gc():
+                seen = set()
+                videos = []
+                for item in collection:
+                    if item.processed:
+                        continue
+                    for video in item.videos:
+                        text = str(video)
+                        if text in seen or under_veiled(text):
+                            continue
+                        seen.add(text)
+                        videos.append(video)
+                fresh = {}
+                for video in videos:
+                    text = str(video)
+                    made = cache.get(text)
+                    if made is None:
+                        made = Item(path=_as_path(video), kind=MODE_FILES,
+                                    videos=[video], video_count=1, file_count=1)
+                    fresh[text] = made
+                flat = list(fresh.values())
+                triable = [one for one in flat if sortable(one)]
+                names = [fold(one.name) for one in triable]
+            return videos, fresh, flat, triable, names
+
+        def then(result) -> None:
+            if not shiboken6.isValid(self):
+                return
+            if self._flat_job == key:
+                self._flat_job = None
+            if not result or self._closing or self._collection_key() != key:
+                # La collection a encore bouge : la prochaine demande refera.
+                return
+            kept = self._flat_list
+            if kept is None or kept[0] != key:
+                videos, fresh, flat, triable, names = result
+                self._videos_memo = (key, videos)
+                self._flat_cache = fresh
+                self._flat_list = (key, flat)
+                if self._sortable_key() == rebuild:
+                    memo = self._sortable_memo
+                    memo[id(flat)] = [flat, rebuild, triable, len(flat), names,
+                                      None]
+                    while len(memo) > self.SORTABLE_KEPT:
+                        memo.pop(next(iter(memo)))
+            if self._flat_show:
+                self._show_prepared_flat()
+
+        from .tunnel import Chore
+        Chore(work, self, fallback=None, then=then).start()
+
+    def _show_prepared_flat(self) -> None:
+        """La liste a plat, prete, prend la place de celle d'avant la relecture."""
+        self._flat_show = False
+        kept = self._flat_list
+        if (kept is None or self.tab != TAB_VIDEOS or not self.browsing
+                or self.levels or self._transient or self.all_items is kept[1]):
+            return
+        self.show_videos_tab(keep_order=True)
+        self.refresh_board()
+
+    def show_videos_tab(self, keep_order: bool = False) -> None:
         """Toutes les vidéos de la racine, sans relire le disque.
 
         Les parcourir pour de bon signifiait traverser toute l'arborescence du
@@ -4389,51 +5035,83 @@ class MainWindow(QMainWindow):
         lesquelles l'onglet annonçait « rien à afficher ». Or l'index porte déjà
         la liste des vidéos de chaque dossier : leur réunion est la même réponse,
         obtenue en mémoire.
+
+        La liste à plat se garde tant que la collection ne bouge pas : la même
+        liste, les mêmes objets. La refaire coûtait de une demi-seconde à cinq
+        secondes à chaque visite, et c'est elle que la liste triable, la
+        récolte et les filtres reconnaissent pour ne rien refaire.
+
+        `keep_order` : la liste se complète (fin d'une analyse) sans se
+        rebattre — ce qu'on regardait garde sa place.
         """
-        videos = self._videos_from_items()
-        if not videos:
-            known = cached_items(self.root, MODE_FOLDERS,
-                                 self.cfg["expand_parents"])
-            videos = [video for item in known for video in item.videos]
-        if not videos and self._scan_top and self.scanning:
-            # La collection est en cours de lecture : l'interrompre pour en
-            # lancer une autre laissait ensuite « Dossiers » vide. On attend
-            # sa fin, qui remplit cet onglet (`on_scan_finished`).
-            self.all_items = []
-            self.items = []
-            self.mode = MODE_FLAT
-            self.board.empty.setText(
-                "Lecture de la collection en cours : les vidéos s'afficheront "
-                "dès qu'elle sera finie.")
-            return
-        if not videos:
-            self.start_root(self.root, MODE_FLAT, reset_levels=False)
-            return
-        # Les memes objets d'une visite a l'autre : en refaire cent mille a
-        # chaque onglet coutait une demi-seconde, et perdait au passage ce
-        # qu'on avait decide d'eux.
-        mark(f"show_videos_tab {len(videos)}")
-        cache = self._flat_cache
-        fresh = {}
-        with _without_gc():
-            for video in videos:
-                key = str(video)
-                item = cache.get(key)
-                if item is None:
-                    item = Item(path=_as_path(video), kind=MODE_FILES,
-                                videos=[video], video_count=1, file_count=1)
-                fresh[key] = item
-        self._flat_cache = fresh
-        self.all_items = list(fresh.values())
+        key = self._collection_key()
+        kept = self._flat_list
+        if kept is not None and kept[0] == key:
+            flat = kept[1]
+        elif (kept is not None and self.scanning and self._scan_top
+              and kept[0][0] == key[0] and kept[0][4:] == key[4:]):
+            # La collection se relit : la liste d'avant la relecture, tout de
+            # suite. Elle se complete a la fin (`on_scan_finished`), au lieu
+            # de se refaire ici, cent mille elements a chaque visite.
+            flat = kept[1]
+        else:
+            videos = self._videos_from_items()
+            if not videos:
+                known = cached_items(self.root, MODE_FOLDERS,
+                                     self.cfg["expand_parents"])
+                videos = [video for item in known for video in item.videos]
+            if not videos and self._scan_top and self.scanning:
+                # La collection est en cours de lecture : l'interrompre pour en
+                # lancer une autre laissait ensuite « Dossiers » vide. On attend
+                # sa fin, qui remplit cet onglet (`on_scan_finished`).
+                self.all_items = []
+                self.items = []
+                self.mode = MODE_FLAT
+                self.board.empty.setText(
+                    "Lecture de la collection en cours : les vidéos s'afficheront "
+                    "dès qu'elle sera finie.")
+                return
+            if not videos:
+                self.start_root(self.root, MODE_FLAT, reset_levels=False)
+                return
+            # Les memes objets d'une visite a l'autre : en refaire cent mille a
+            # chaque onglet coutait une demi-seconde, et perdait au passage ce
+            # qu'on avait decide d'eux.
+            mark(f"show_videos_tab {len(videos)}")
+            cache = self._flat_cache
+            fresh = {}
+            with _without_gc():
+                for video in videos:
+                    text = str(video)
+                    item = cache.get(text)
+                    if item is None:
+                        item = Item(path=_as_path(video), kind=MODE_FILES,
+                                    videos=[video], video_count=1, file_count=1)
+                    fresh[text] = item
+            self._flat_cache = fresh
+            flat = list(fresh.values())
+            self._flat_list = (key, flat)
+        previous = self.items if keep_order else None
+        self.all_items = flat
         self.items = self._filtered()
         self.mode = MODE_FLAT
-        self.apply_sort()
+        if previous and self.sort_mode == "random":
+            import random
+            # Ce qui etait a l'ecran garde son rang ; ce qui arrive se melange
+            # a la suite.
+            rank = {id(item): at for at, item in enumerate(previous)}
+            random.shuffle(self.items)
+            last = len(rank)
+            self.items.sort(key=lambda item: rank.get(id(item), last))
+        else:
+            self.apply_sort()
         self.index = 0
-        self._show_counts()
+        # Les comptes suivent la planche, que l'appelant rebatit
+        # (`on_board_page`) : les faire ici les calculait sur l'ancienne.
         # Sans cela, l'onglet Videos ne beneficiait d'aucune preparation : il ne
         # passe par aucune analyse, et c'est elle seule qui lancait la recolte.
         # Un instant apres l'affichage, pas avant : l'onglet doit d'abord
-        # apparaitre, la recolte parcourt cent mille elements.
+        # apparaitre.
         QTimer.singleShot(150, self.start_harvest)
 
     def set_tab(self, tab: str, reposition: bool = True) -> None:
@@ -4540,6 +5218,8 @@ class MainWindow(QMainWindow):
         self.levels = []
         self.root = top
         self.browsing = True
+        # Une liste de passage (doublons) s'efface devant celle de l'onglet.
+        self._transient = ""
         self.stack.setCurrentIndex(PAGE_SORT)
         self._hush_players()
         self._list_leaf = ""
@@ -4549,16 +5229,22 @@ class MainWindow(QMainWindow):
         if self.tab == TAB_FAVS:
             self.mode = MODE_FOLDERS
             self.show_favorites()
+        elif self.tab == TAB_TAGS:
+            # Les mots-cles se tirent de la collection sans passer par la
+            # liste des dossiers : la filtrer et la melanger pour la jeter
+            # aussitot, puis batir la planche deux fois, coutait pour rien.
+            self.mode = MODE_FOLDERS
+            self.index = 0
+            self._apply_selectors()
+            self._add_tag_items()
         else:
             if self.tab == TAB_VIDEOS:
                 self.show_videos_tab()
             else:
                 self.restore_folders()
-                if self.tab == TAB_TAGS:
-                    self._add_tag_items()
             self._apply_selectors()
+            # Les comptes suivent la planche (`on_board_page`).
             self.refresh_board()
-            self._show_counts()
         if restore_id:
             for position, item in enumerate(self.items):
                 if item.item_id == restore_id:
@@ -4637,7 +5323,7 @@ class MainWindow(QMainWindow):
         pris pour un morceau de « X:\\Films ». Recliquer arrete.
         """
         if self.dupes is not None:
-            self._stop_dupes()
+            self._stop_dupes("sigs")
             return
         if self.root is None:
             return
@@ -4718,6 +5404,10 @@ class MainWindow(QMainWindow):
     def at_home(self) -> bool:
         """Vrai quand on est sur la liste d'un onglet, a sa racine."""
         if not self.browsing or self.levels:
+            return False
+        if self._transient:
+            # Une liste de passage (doublons), sur n'importe quel onglet :
+            # recliquer rend la collection. Sur « Vidéos », elle restait.
             return False
         if (self.tab == TAB_FOLDERS and self._plain_root is not None
                 and self.all_items is not self._plain_items):
@@ -4932,18 +5622,23 @@ class MainWindow(QMainWindow):
                 and not item.is_tag and Path(item.path) == target):
             return self.enter_current()
         top = self.top_root()
-        if (top is not None and target == Path(top) and self.levels
-                and self.tab != TAB_SPLIT):
+        if (top is not None and target == Path(top) and self.tab != TAB_SPLIT
+                and (self.levels or self._transient
+                     or (self.root is not None and Path(self.root) != Path(top)))):
             # La racine du fil, depuis un dossier ou un mot-cle ouvert : la
             # liste de l'onglet (favoris, mots-cles…), et non les dossiers
-            # relus du disque.
+            # relus du disque. Arrive par le fil d'une video, la pile etait
+            # vide : l'onglet Videos relancait alors un parcours a plat de
+            # tout le NAS pour une liste deja en memoire.
             return self.go_home()
         if self.root is not None and target == self.root:
             # Depuis une fiche, cliquer le dossier ou l'on est rend sa liste.
             if not self.browsing:
                 self.show_board_at(self.index)
             return
-        if not target.is_dir():
+        # Une seule question au NAS, que `start_root` ne repose pas.
+        state = _folder_state(target)
+        if state == "absent":
             self.show_banner(f"Introuvable : {target}", "error")
             return
         kept = []
@@ -4957,7 +5652,8 @@ class MainWindow(QMainWindow):
                 continue
             kept.append(level)
         self.levels = kept
-        self.start_root(target, self.mode_for_content(), reset_levels=False)
+        self.start_root(target, self.mode_for_content(), reset_levels=False,
+                        state=state)
 
     def toggle_board(self, visible: bool | None = None,
                      reposition: bool = True) -> None:
@@ -4965,7 +5661,10 @@ class MainWindow(QMainWindow):
         self.set_view(VIEW_BROWSE if target else VIEW_EDIT, reposition)
 
     def refresh_board(self) -> None:
-        if not self.browsing:
+        if not self.browsing or self.tab == TAB_SPLIT:
+            # Le mur n'a pas de planche : un paquet de l'analyse de la racine
+            # la remettait a l'ecran sous l'onglet « Mur », a la place du mur.
+            # Quitter le mur rebatit la planche de toute facon.
             return
         mark(f"refresh_board {len(self.items)}")
         self.viewer.setCurrentWidget(self.board)
@@ -5041,6 +5740,7 @@ class MainWindow(QMainWindow):
         self.aside_title.setText(title)
         self.aside_title.setToolTip(tip or video)
         self.aside.show()
+        self._wake_watch()
         self.aside_player.set_muted(self.cfg["muted"])
         self.aside_player.set_loop(False)
         self.aside_player.set_item(video)
@@ -5125,6 +5825,71 @@ class MainWindow(QMainWindow):
         if self.banner.isVisible():
             self._place_banner()
 
+    def _watch_needed(self) -> bool:
+        """Une image joue-t-elle a l'ecran, a cote ou sur la fiche ?"""
+        aside = (not self.aside.isHidden()
+                 and bool(getattr(self, "aside_current", "")))
+        sheet = (self.stack.currentIndex() == PAGE_SORT
+                 and not self.isMinimized()
+                 and self.viewer.currentWidget() is self.single)
+        return aside or sheet
+
+    def _watch_bars_tick(self) -> None:
+        """Un battement du guet ; il se rendort quand rien ne joue."""
+        self._watch_bars()
+        if not self._watch_needed():
+            self.aside_watch.stop()
+
+    def _wake_watch(self, *_args) -> None:
+        """Ce qu'on voit a change : le guet des bandeaux reprend s'il le faut."""
+        if not hasattr(self, "aside_watch"):
+            return
+        if (not self._timers_paused and not self._closing
+                and not self.aside_watch.isActive() and self._watch_needed()):
+            self.aside_watch.start()
+
+    def _session_tick(self) -> None:
+        """Le compteur de seance ne s'affiche que sur une fiche : sur la
+        planche, le recompter toutes les trente secondes ne servait a rien."""
+        if not self.browsing:
+            self._show_counts()
+
+    def changeEvent(self, event):
+        """Fenetre reduite : les minuteurs se taisent, et reprennent au retour.
+
+        Quinze a cinquante-sept reveils par seconde pour une fenetre qu'on
+        ne voit pas : le processeur ne dormait jamais.
+        """
+        super().changeEvent(event)
+        if not hasattr(self, "aside_watch"):
+            return                      # la fenetre se construit encore
+        if event.type() == QEvent.WindowStateChange and not self._closing:
+            if self.isMinimized() and not self._timers_paused:
+                self._timers_paused = True
+                for timer in (self.activity_timer, self.session_timer,
+                              self.aside_watch):
+                    timer.stop()
+                # Le chien de garde appartient a la derniere fenetre construite :
+                # s'il est parti avec une autre, il n'y a rien a endormir.
+                alive = shiboken6.isValid(WATCH) and shiboken6.isValid(WATCH.timer)
+                self._watchdog_was = alive and WATCH.timer.isActive()
+                if alive:
+                    WATCH.timer.stop()
+            elif not self.isMinimized() and self._timers_paused:
+                self._timers_paused = False
+                self.activity_timer.start()
+                self.session_timer.start()
+                if (getattr(self, "_watchdog_was", False)
+                        and shiboken6.isValid(WATCH)
+                        and shiboken6.isValid(WATCH.timer)):
+                    # Le battement repart d'ici : sinon la reduction entiere
+                    # s'inscrirait au journal comme un gel.
+                    WATCH._beat = time.monotonic()
+                    WATCH.timer.start()
+                self._wake_watch()
+        elif event.type() == QEvent.ActivationChange:
+            self._wake_watch()
+
     def aside_fullscreen(self) -> None:
         """Donne tout l'ecran a la video ouverte a cote, et sait en revenir."""
         if self.aside_playlist:
@@ -5205,6 +5970,13 @@ class MainWindow(QMainWindow):
         self._wake_chrome()
 
     def eventFilter(self, watched, event):
+        if (watched is getattr(self, "banner", None)
+                and event.type() == QEvent.MouseButtonRelease):
+            action, self._banner_action = self._banner_action, None
+            if action is not None:
+                self.banner.hide()
+                action()
+                return True
         if (watched is getattr(self, "progress", None)
                 and event.type() in (QEvent.Show, QEvent.Hide)
                 and hasattr(self, "state_button")):
@@ -5293,12 +6065,17 @@ class MainWindow(QMainWindow):
         target = self.reveal_target()
         if target is None:
             return
-        if not target.exists():
-            return self.show_banner(f"Introuvable : {target.name}", "error")
+        # Une question au NAS, pas trois : ce qu'est l'element (dossier ou
+        # fichier), la liste le sait deja.
+        state = actions.probe(target)
+        if state != "ok":
+            return self.show_banner(
+                f"Introuvable : {target.name}" if state == "absent" else
+                f"NAS injoignable : « {target.name} »", "error")
         try:
             item = self.current
-            if (target.is_dir() and item is not None and self.tab != TAB_SPLIT
-                    and item.kind == MODE_FOLDERS):
+            if (item is not None and self.tab != TAB_SPLIT
+                    and item.kind == MODE_FOLDERS and Path(item.path) == target):
                 # Un dossier s'ouvre, on y entre : le selectionner dans son
                 # parent obligeait a un double-clic de plus.
                 subprocess.Popen(f'explorer "{target}"')
@@ -5702,24 +6479,39 @@ class MainWindow(QMainWindow):
         # Toute la collection, meme quand on est entre dans un dossier : la
         # liste affichee n'etait plus, apres un premier tirage, que le dossier
         # ou il avait mene — le hasard « general » tournait en rond dedans.
-        source = list(self._collection()) + list(self.all_items)
-        pool = []
-        seen = set()
-        for item in source:
-            if item.locked or item.is_tag:
-                continue
-            for video in item.videos:
-                key = str(video)
-                if key not in seen and not under_veiled(key):
-                    seen.add(key)
-                    pool.append(key)
-        if not pool:
+        #
+        # Un dossier tire au sort selon son nombre de videos, puis une video
+        # dedans : c'est le meme tirage, uniforme sur les videos, sans dresser
+        # a chaque appui la liste des cent mille (un tiers de seconde).
+        key = self._collection_key()
+        memo = self._random_memo
+        if memo is None or memo[0] != key:
+            folders, weights, total = [], [], 0
+            for item in self._collection():
+                if item.locked or item.is_tag or not item.videos:
+                    continue
+                if under_veiled(item.path):
+                    continue
+                total += len(item.videos)
+                folders.append(item)
+                weights.append(total)
+            memo = self._random_memo = (key, folders, weights)
+        _key, folders, weights = memo
+        video = ""
+        for _ in range(20):
+            if not folders:
+                break
+            item = random.choices(folders, cum_weights=weights)[0]
+            pick = str(random.choice(item.videos))
+            if not under_veiled(pick):
+                video = pick
+                break
+        if not video:
             self.show_banner("Aucune vidéo à tirer au sort", "quiet")
             return
-        video = random.choice(pool)
         self.show_banner(
-            f"Au hasard parmi {len(pool)} vidéos : « {Path(video).name} »", "info"
-        )
+            f"Au hasard parmi {weights[-1]} vidéos : « {Path(video).name} »",
+            "info")
         self.play_in_app(video)
 
     # ------------------------------------------------------------------
@@ -5798,36 +6590,80 @@ class MainWindow(QMainWindow):
         """Combien d'elements pourraient s'afficher, filtres mis a part."""
         return len(self._sortable_items())
 
-    def _sortable_items(self) -> list:
-        """Les elements affichables, filtres mis a part — gardes tant que la
-        liste ne change pas.
+    # Combien de listes gardent leur liste triable : celle des dossiers, celle
+    # des videos a plat, et une ou deux de passage (favoris, mots-cles).
+    SORTABLE_KEPT = 4
 
-        Les recalculer a chaque clic, trois fois, sur cent mille elements,
-        c'etait l'essentiel de la lenteur des filtres.
-        """
+    def _sortable_key(self) -> tuple:
         from . import scan as _scan
-        key = (id(self.all_items), len(self.all_items), _scan.SHOW_VEILED,
-               frozenset(_scan.VEILED))
-        if self.scanning or key != getattr(self, "_sortable_key", None):
-            self._sortable_key = key
+        return (_scan.SHOW_VEILED, frozenset(_scan.VEILED), self._rebuild_gen)
+
+    def _sortable_entry(self) -> list:
+        """[liste, cle, triables, longueur vue, noms replies, noms par element]
+        de la liste affichee, gardee d'une fois a l'autre.
+
+        Les elements triables se recalculaient a chaque clic, trois fois, sur
+        cent mille elements ; pendant une analyse, a chaque appel -- chaque
+        carte ajoutee, chaque page tournee : un premier inventaire figeait la
+        fenetre de bout en bout. Et une seule liste etait gardee : passer de
+        « Dossiers » a « Vidéos » et retour les refaisait toutes deux. Chaque
+        liste garde desormais la sienne ; celle qui s'allonge se complete par
+        la fin, tout autre changement (`_touch`) la refait. La liste elle-meme
+        est tenue : son adresse seule pouvait etre reprise par une autre.
+        """
+        items = self.all_items
+        key = self._sortable_key()
+        memo = self._sortable_memo
+        entry = memo.get(id(items))
+        if (entry is None or entry[0] is not items or entry[1] != key
+                or len(items) < entry[3]):
             sortable = self._sortable
-            self._sortable_list = [i for i in self.all_items if sortable(i)]
-            self._sortable_folded = None
-        return self._sortable_list
+            entry = [items, key, [i for i in items if sortable(i)], len(items),
+                     None, None]
+            memo.pop(id(items), None)
+            memo[id(items)] = entry
+            while len(memo) > self.SORTABLE_KEPT:
+                memo.pop(next(iter(memo)))
+        elif len(items) > entry[3]:
+            sortable = self._sortable
+            tail = [i for i in items[entry[3]:] if sortable(i)]
+            # Une liste neuve : qui tient l'ancienne la garde telle quelle.
+            entry[2] = entry[2] + tail
+            entry[3] = len(items)
+            entry[5] = None
+        return entry
+
+    def _sortable_items(self) -> list:
+        """Les elements affichables, filtres mis a part (`_sortable_entry`)."""
+        return self._sortable_entry()[2]
 
     def _sortable_names(self) -> list:
         """Les noms replies (sans accents ni majuscules) de cette liste,
         calcules une fois par liste et non a chaque frappe.
 
         Replier cent mille noms a chaque lettre tapee coutait plus que la
-        recherche elle-meme.
+        recherche elle-meme. Une liste qui s'allonge ne replie que sa fin.
         """
-        items = self._sortable_items()
-        folded = getattr(self, "_sortable_folded", None)
-        if folded is None or len(folded) != len(items):
+        entry = self._sortable_entry()
+        items, folded = entry[2], entry[4]
+        if folded is not None and len(folded) < len(items):
+            folded = folded + [fold(item.name) for item in items[len(folded):]]
+        elif folded is None or len(folded) != len(items):
             folded = [fold(item.name) for item in items]
-            self._sortable_folded = folded
+        else:
+            return folded
+        entry[4] = folded
+        entry[5] = None
         return folded
+
+    def _folded_of(self) -> dict:
+        """Le nom replie de chaque element triable, par element : pour
+        preciser une recherche sur ce qui est deja a l'ecran."""
+        entry = self._sortable_entry()
+        names = self._sortable_names()
+        if entry[5] is None:
+            entry[5] = {id(item): name for item, name in zip(entry[2], names)}
+        return entry[5]
 
     def _sortable(self, item) -> bool:
         """Un dossier sans une seule video n'a rien a trier.
@@ -5933,7 +6769,8 @@ class MainWindow(QMainWindow):
             rules = self.controls.criteria()
             self.criteria = rules
             self.cfg["filter_include"] = rules["include"]
-            self.cfg.save()
+            # Plus tard, et d'un bloc : l'ecriture attend que le disque l'ait.
+            self.cfg.save_soon()
             self.show_wall()
             return
         return self._on_controls_changed()
@@ -6030,10 +6867,61 @@ class MainWindow(QMainWindow):
             "quiet")
         return True
 
+    def _loose_later(self) -> None:
+        """L'a-peu-pres, une fois la frappe posee.
+
+        Il parcourt toute la collection en comparant chaque nom a peu pres :
+        pres d'une demi-seconde. Lance a chaque lettre qui ne donnait rien, il
+        figeait la frappe d'un mot mal orthographie.
+        """
+        if self.items or self._loose:
+            return
+        if not self._retry_loosely():
+            return
+        self._narrow_items = None
+        self.apply_sort()
+        self._show_counts()
+        self.index = 0
+        if self.stack.currentIndex() == PAGE_DONE:
+            self.stack.setCurrentIndex(PAGE_SORT)
+        if self.browsing:
+            self.refresh_board()
+        else:
+            self.show_item(0)
+
+    @staticmethod
+    def _narrows(old: str, new: str) -> bool:
+        """Vrai si la recherche `new` ne peut que retirer des resultats a `old`.
+
+        Les memes mots, le dernier allonge ou d'autres ajoutes : chaque mot
+        est exige, en sous-chaine. Pas d'operateur (« or », « - », guillemets,
+        « ~ ») : ils peuvent elargir.
+        """
+        if not old.strip() or not new.startswith(old):
+            return False
+        for text in (old, new):
+            if any(sign in text for sign in '"-~|'):
+                return False
+            if any(word in ("or", "ou") for word in text.lower().split()):
+                return False
+        return True
+
+    def _filter_context(self) -> tuple:
+        """Tout ce qui, hors du texte cherche, decide de ce qui passe."""
+        rules = self.criteria or {}
+        return (self.all_items is self._narrow_source, len(self.all_items),
+                self._rebuild_gen, self.tab, self._transient,
+                rules.get("exclude", self.cfg["filter_exclude"]),
+                bool(self.cfg["only_unseen"]),
+                tuple(sorted(rules.get("orientations") or ())),
+                rules.get("folder_min") or 0, rules.get("folder_max") or 0)
+
     def apply_filter(self, include: str, exclude: str) -> None:
         # Toute nouvelle recherche repart de l'exact : sans cela, un repli
         # sur l'a-peu-pres restait en vigueur pour les suivantes, sans que
         # rien ne le dise.
+        self.loose_timer.stop()
+        was_loose = self._loose
         self._loose = False
         self.cfg["filter_include"] = include
         self.cfg["filter_exclude"] = exclude
@@ -6047,15 +6935,36 @@ class MainWindow(QMainWindow):
 
         current = self.current
         self.plans = {k: v for k, v in self.plans.items() if k.startswith("board@")}
-        self.items = self._filtered()
-        if not self.items:
-            self._retry_loosely()
-        self.apply_sort()
+        context = self._filter_context()
+        narrowing = (not was_loose and self._narrow_items is not None
+                     and self.items is self._narrow_items
+                     and self._narrow_context == context
+                     and self._narrows(self._narrow_query, include))
+        if narrowing:
+            # La recherche ne fait que se preciser (« pla » puis « plag ») :
+            # on filtre ce qui est deja a l'ecran, sans tout reparcourir ni
+            # rebattre l'ordre -- les cartes restent ou elles etaient.
+            test = query_tester(self._parsed(include), False)
+            names = self._folded_of()
+            self.items = [item for item in self.items
+                          if test(names.get(id(item)) or fold(item.name))]
+        else:
+            self.items = self._filtered()
+            self.apply_sort()
+        self._narrow_source = self.all_items
+        self._narrow_context = self._filter_context()
+        self._narrow_query = include
+        self._narrow_items = self.items
         self._show_counts()
 
         if not self.items:
+            # Rien d'exact : l'a-peu-pres attend que la frappe se pose.
+            if include:
+                self.loose_timer.start()
             self.preview.cancel_all()
-            self._release_media()
+            # Une pause, pas un arret : on ne deplace rien ici, et decharger
+            # chaque lecteur coutait jusqu'a une demi-seconde par lettre.
+            self._hush_players()
             self.index = 0
             self.item_title.setText("Aucun élément ne correspond au filtre")
             self.item_parent.setText("")
@@ -6063,6 +6972,10 @@ class MainWindow(QMainWindow):
                 f"{len(self.all_items)} élément(s) masqué(s). Modifiez ou effacez le filtre."
             )
             self.grid.set_no_videos("—")
+            if self.browsing:
+                # La planche suit la liste, meme vide : ses cartes restaient,
+                # et ne menaient plus a rien.
+                self.refresh_board()
             self.update_counter()
             return
 
@@ -6299,23 +7212,17 @@ class MainWindow(QMainWindow):
             return "Impossible : la destination est dans le dossier à déplacer."
         if not disk:
             return ""
+        # Une seule question au NAS : l'element est-il la, le NAS repond-il.
+        # « Meme dossier » et « destination dedans » se lisent dans les
+        # chemins, plus haut : les redemander au disque (samefile, is_dir,
+        # deux resolve) coutait jusqu'a huit allers-retours par touche, et le
+        # transfert, en tache de fond, refait ses verifications de toute facon.
         state = actions.probe(item.path)
         if state == "absent":
             return f"Introuvable : {item.name}"
         if state == "injoignable":
             return (f"NAS injoignable : « {item.name} » n'a pas été déplacé. "
                     "Réessayez dans un instant.")
-        try:
-            if Path(item.path).samefile(dest_dir):
-                return "C'est déjà ce dossier."
-        except OSError:
-            pass
-        if Path(item.path).is_dir():
-            try:
-                dest_dir.resolve().relative_to(Path(item.path).resolve())
-                return "Impossible : la destination est dans le dossier à déplacer."
-            except ValueError:
-                pass
         return ""
 
     def act_skip(self) -> None:
@@ -6471,6 +7378,12 @@ class MainWindow(QMainWindow):
 
         if job.kind != "undo":
             del self.history[:-self.HISTORY_MAX]
+        if job.kind != "move" or item is None or item.kind == MODE_FOLDERS:
+            # Un dossier ecarte ou revenu : ses videos quittent, ou retrouvent,
+            # les listes tirees de la collection (onglet Videos, mur, hasard,
+            # voisines). Une video ecartee, elle, y reste avec son etat ; un
+            # deplacement est suivi par `_follow_move`.
+            self._touch(sortable=False)
         if job.warning:
             # Tout est arrive, mais l'ancienne place n'a pas pu etre videe en
             # entier : c'est fait, avec une reserve qu'il faut dire.
@@ -6569,6 +7482,11 @@ class MainWindow(QMainWindow):
                     item.video_count += len(fresh)
                     item.file_count += len(fresh)
                     touched.add(item.item_id)
+        if touched or moved:
+            # La collection a change : ce qu'on en a tire est a refaire. La
+            # liste triable seulement si c'est elle qu'on regarde : un dossier
+            # vide de ses videos cesse d'etre triable.
+            self._touch(sortable=self.all_items is self._plain_items)
         if touched:
             # Les apercus retenus montraient l'ancienne composition.
             def owner(key: str) -> str:
@@ -6638,10 +7556,23 @@ class MainWindow(QMainWindow):
                 pane.set_stay(on)
 
     def _folder_videos(self, path: str) -> list:
-        """Les videos du dossier de ce fichier, lues une fois par session."""
+        """Les videos du dossier de ce fichier, dans l'ordre des noms.
+
+        Tirees de la collection deja en memoire : le dossier etait relu sur
+        le NAS, sur le fil de l'interface, a la premiere fleche -- et la
+        liste gardee pour toute la seance, si bien qu'une voisine rangee ou
+        ecartee depuis menait a « Vidéo introuvable ». Elle se refait
+        desormais des que la collection bouge. Le disque n'est lu que pour
+        un dossier qu'elle ne connait pas.
+        """
         from .config import VIDEO_EXTS
-        folder = Path(path).parent
-        listing = self._siblings_cache.get(str(folder))
+        if self._siblings_gen != self._collection_gen:
+            self._siblings_cache = {}
+            self._siblings_gen = self._collection_gen
+        folder = str(Path(path).parent)
+        listing = self._siblings_cache.get(folder)
+        if listing is None:
+            listing = self._known_folder_videos(folder)
         if listing is None:
             mark(f"listing {folder}")
             try:
@@ -6652,8 +7583,44 @@ class MainWindow(QMainWindow):
                     key=str.lower)
             except OSError:
                 listing = []
-            self._siblings_cache[str(folder)] = listing
+        self._siblings_cache[folder] = listing
         return listing
+
+    def _known_folder_videos(self, folder: str):
+        """Les videos de ce dossier que la memoire connait, ou None.
+
+        Le dossier ouvert en mode fichier d'abord (sa liste est celle de
+        l'analyse), puis les dossiers de la collection qui le contiennent.
+        """
+        want = os.path.normcase(folder)
+        if (self.mode == MODE_FILES and self.root is not None
+                and not self.scanning
+                and os.path.normcase(str(self.root)) == want):
+            return sorted((str(item.path) for item in self.all_items
+                           if item.kind == MODE_FILES and not item.processed),
+                          key=str.lower)
+        prefix = want.rstrip("\\/") + os.sep
+        found = []
+        covered = False
+        for item in self._collection():
+            if item.is_tag or item.processed:
+                continue
+            base = os.path.normcase(str(item.path))
+            if item.kind != MODE_FOLDERS:
+                if os.path.dirname(base) == want:
+                    covered = True
+                    found.append(str(item.path))
+                continue
+            if base != want and not prefix.startswith(base.rstrip("\\/") + os.sep):
+                continue
+            covered = True
+            for video in item.videos:
+                text = str(video)
+                if os.path.normcase(os.path.dirname(text)) == want:
+                    found.append(text)
+        if not covered:
+            return None
+        return sorted(set(found), key=str.lower)
 
     def _folder_neighbour(self, path: str, delta: int) -> str:
         listing = self._folder_videos(path)
@@ -6719,9 +7686,26 @@ class MainWindow(QMainWindow):
         pour refaire ce que la fiche fait déjà. Aller à la fiche garde un seul
         endroit où l'on regarde, avec le tri et les destinations sous la main.
         """
-        video = Path(path)
-        if not path or not video.exists():
+        if not path:
             self.show_banner("Vidéo introuvable", "error")
+            return
+        video = Path(path)
+        parent = video.parent
+        if (self.tab != TAB_SPLIT and self.root == parent
+                and self.mode == MODE_FILES and not self.browsing):
+            # Deja dans son dossier : la liste la connait, rien a demander.
+            for position, item in enumerate(self.items):
+                if item.path == video:
+                    self.show_item(position)
+                    return
+        # Une seule question au NAS -- la video est-elle la -- qui vaut aussi
+        # pour son dossier : `start_root` ne la repose pas.
+        state = actions.probe(video)
+        if state != "ok":
+            self.show_banner(
+                "Vidéo introuvable" if state == "absent" else
+                f"NAS injoignable : « {video.name} » n'a pas pu être ouverte.",
+                "error")
             return
         if self.tab == TAB_SPLIT:
             # La fiche d'une video est la meme page, d'ou qu'on vienne : le
@@ -6733,7 +7717,6 @@ class MainWindow(QMainWindow):
         self.grid.stop()
         self.board.stop()
 
-        parent = video.parent
         already_there = (self.root == parent and self.mode == MODE_FILES
                          and not self.browsing)
         if not already_there:
@@ -6745,7 +7728,7 @@ class MainWindow(QMainWindow):
                     "item_id": self.current.item_id if self.current else "",
                 })
             self.start_root(parent, MODE_FILES, reset_levels=False,
-                            restore_id=str(video))
+                            restore_id=str(video), state="ok")
             return
         for position, item in enumerate(self.items):
             if item.path == video:
@@ -6775,13 +7758,11 @@ class MainWindow(QMainWindow):
         self.tag_chips.set_value("mine")
         if self.root is None:
             return self.setFocus()
+        # Le compte se dit une fois les mots faits : ils se calculent hors
+        # du fil de l'interface (`_tell_tags`).
+        self._tags_banner = True
         if self.tab == TAB_TAGS and self.mode == MODE_FOLDERS:
             self._add_tag_items()
-            self.refresh_board()
-            found = [i for i in self.all_items if i.is_tag]
-            self.show_banner(
-                f"{len(found)} mot(s)-clé(s) sur {len(self.tags)} ont trouvé "
-                f"des vidéos", "info")
         else:
             self.set_tab(TAB_TAGS)
         self.setFocus()
@@ -6795,8 +7776,17 @@ class MainWindow(QMainWindow):
         self.setFocus()
 
     def open_web_search(self) -> None:
-        """Recherche de videos hors des grandes plateformes, en lien seul."""
-        dialog = WebSearchDialog(self.cfg, self)
+        """Recherche de videos hors des grandes plateformes, en lien seul.
+
+        Importee a la premiere ouverture seulement (requests, bs4) : pres
+        d'une seconde, qu'on payait sinon a chaque lancement.
+        """
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            from .search_dialog import WebSearchDialog
+            dialog = WebSearchDialog(self.cfg, self)
+        finally:
+            QApplication.restoreOverrideCursor()
         dialog.exec()
         self.setFocus()
 
@@ -7143,6 +8133,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         mark("fermeture")
+        # Plus rien ne doit repartir : recolte, partage, guet des bandeaux.
+        self._closing = True
         # Ce qui est local et rapide d'abord : reglages et favoris ne doivent
         # jamais dependre d'un NAS qui repond.
         self.cfg["window"] = {"w": self.width(), "h": self.height()}
@@ -7154,7 +8146,7 @@ class MainWindow(QMainWindow):
         self.hide()
         for timer in (self.session_timer, self.activity_timer, self.aside_watch,
                       self.board_timer, self.banner_timer, self.seen_timer,
-                      self.burst_timer, self.retry_timer):
+                      self.burst_timer, self.retry_timer, self.loose_timer):
             timer.stop()
         # Tous les travaux de fond s'arretent d'un coup — on le demande a
         # chacun, on attendra plus loin, ensemble. Plus aucun ffmpeg ne part,
