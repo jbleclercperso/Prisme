@@ -518,6 +518,14 @@ class Index:
         found = self._sig_index().get(str(path))
         return found is not None and (not stamp or found == stamp)
 
+    def sig_stamp(self, path) -> str | None:
+        """La date retenue avec l'empreinte d'une video, None sans empreinte.
+
+        Lecture memoire seule : le parcours des empreintes la demande pour
+        chaque video, et doit decider sans une requete par fichier.
+        """
+        return self._sig_index().get(str(path))
+
     def sig_of(self, path) -> list:
         rows = self._fetch("SELECT hashes FROM sigs WHERE path = ?", (str(path),))
         return list(_parse_hashes(rows[0][0])) if rows else []

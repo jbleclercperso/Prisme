@@ -2593,7 +2593,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     # -- l'empreinte porte sa methode, et ne laisse rien dans le cache -------
     copie_b = marks / "lot" / "copie_b.mp4"
-    stamp_b = INDEX.sigs[str(copie_b)][0]
+    stamp_b = INDEX.sig_stamp(copie_b) or ""
     check(stamp_b.endswith("|" + SIG_METHOD),
           f"l'empreinte retient la méthode qui l'a faite ({stamp_b})")
     width = window.cfg["thumb_width"]
@@ -2607,21 +2607,20 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     # -- les anciennes empreintes restent valables quand elles le peuvent ----
     faux = str(base / "faux" / "v1.mp4")
-    INDEX.sigs[faux] = ("100|200", [0x0F0F0F0F0F0F0F0F, 0x3C3C3C3C3C3C3C3C], 200)
+    INDEX.put_sig(faux, "100|200", [0x0F0F0F0F0F0F0F0F, 0x3C3C3C3C3C3C3C3C], 200)
     check(sig_current(faux, "100|200"),
           "une ancienne empreinte prise aux fractions de la durée reste bonne")
-    INDEX.sigs[faux] = ("100|200", [], 200)
+    INDEX.put_sig(faux, "100|200", [], 200)
     check(not sig_current(faux, "100|200"),
           "une ancienne empreinte vide est refaite : ce pouvait être une coupure")
-    INDEX.sigs[faux] = ("100|200", [1, 2], 200)
-    INDEX.scenes[faux] = [3.0, 9.0]
+    INDEX.put_sig(faux, "100|200", [1, 2], 200)
+    INDEX.put_scenes(faux, "", [3.0, 9.0])
     check(not sig_current(faux, "100|200"),
           "une ancienne empreinte prise sur les plans est refaite")
-    INDEX.scenes.pop(faux, None)
-    INDEX.sigs[faux] = (f"100|200|{SIG_METHOD}", [], 200)
+    INDEX.put_sig(faux, f"100|200|{SIG_METHOD}", [], 200)
     check(sig_current(faux, "100|200") and not sig_current(faux, "101|200"),
           "une empreinte récente vaut tant que le fichier ne change pas")
-    INDEX.sigs.pop(faux, None)
+    INDEX.forget_tree(str(base / "faux"))
 
     # -- une coupure passagere n'est pas retenue pour toujours ----------------
     coupure = base / "sigs_coupure"
@@ -2640,7 +2639,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(wait_for(app, lambda: "seen" in cut, 120), "passage pendant une coupure")
     _dupes._grab = real_grab
     check(cut.get("bad") == 1 and cut.get("total") == 0
-          and str(passage) not in INDEX.sigs,
+          and INDEX.sig_stamp(passage) is None,
           f"la vidéo illisible est comptée, pas retenue ({cut})")
     check(cut.get("walk") == 1, f"le recensement se dit pendant le parcours ({cut})")
     healed = {}

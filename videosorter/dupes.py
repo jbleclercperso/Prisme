@@ -1156,13 +1156,14 @@ def sig_current(path, base: str) -> bool:
     """
     from .index import INDEX
     from .media import pick_moments
-    found = getattr(INDEX, "sigs", {}).get(str(path))
-    if not found:
+    # L'index ne garde en memoire que la date de chaque empreinte : les
+    # valeurs ne sont relues que pour une ancienne empreinte a juger.
+    stamp = INDEX.sig_stamp(path)
+    if stamp is None:
         return False
-    stamp, values, _size = found
     if stamp == f"{base}|{SIG_METHOD}":
         return True
-    if stamp != base or len(values) < AGREE:
+    if stamp != base or len(INDEX.sig_of(path)) < AGREE:
         return False
     duration = float((INDEX.probe(path) or {}).get("duration") or 0.0)
     return not pick_moments(INDEX.scenes_of(path), duration, SHOTS)
@@ -1284,12 +1285,12 @@ class SignatureGroupScan(QThread):
         from .index import INDEX
         entries = self.entries
         if entries is None:
-            # Une copie d'un seul tenant : les fils d'empreintes peuvent
-            # ecrire dans la table pendant qu'on la parcourt.
-            known = list(getattr(INDEX, "sigs", {}).items())
+            # Un instantane lu d'un bloc dans la base : les fils d'empreintes
+            # peuvent ecrire dans la table pendant qu'on la parcourt, et ce
+            # qui dort dans une corbeille n'y figure deja plus.
             entries = [(path, values, size)
-                       for path, (_stamp, values, size) in known
-                       if values and (not self.root or _inside(path, self.root))]
+                       for path, values, size in INDEX.all_sigs()
+                       if not self.root or _inside(path, self.root)]
         self.examined = len(entries)
         self.progress.emit(0)
         groups = group_by_signature(
