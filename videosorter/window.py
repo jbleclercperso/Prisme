@@ -381,7 +381,12 @@ class MainWindow(QMainWindow):
         # Les regles du mur aussi : ses reglages vivent sur la premiere ligne,
         # hors du mur, et les colonnes de la planche portent le meme nom. Hors
         # de sa cascade, « Non vus » actif ne se distinguait plus d'inactif.
-        self.setStyleSheet(STYLESHEET + HEADER_STYLE + SPLIT_STYLE)
+        # Mais la taille des boutons d'un panneau (12 points, peu de marge)
+        # rapetissait « Verticales » et « Non vus » a cote des autres boutons
+        # de la ligne : ils gardent ici la taille de ceux-ci.
+        self.setStyleSheet(STYLESHEET + HEADER_STYLE + SPLIT_STYLE
+                           + "QWidget#wallControls QPushButton#splitButton "
+                             "{ padding: 6px 12px; font-size: 13px; }")
 
         self.all_items: list = []      # tout ce que l'analyse a trouve
         self.items: list = []          # ce que le filtre laisse passer
@@ -505,6 +510,8 @@ class MainWindow(QMainWindow):
         self.sig_scan = None
         # Vrai le temps d'un repli sur l'a-peu-pres, quand l'exact n'a rien rendu.
         self._loose = False
+        # Le parcours approchant en cours, par tranches (`_loose_step`).
+        self._loose_scan = None
         # Le compteur de session : combien de decisions, depuis quand.
         self._session_started = time.monotonic()
         self._decisions = 0
@@ -556,9 +563,12 @@ class MainWindow(QMainWindow):
         self._wall_return = None
         # Le cinema est un vrai plein ecran : l'etat de la fenetre a rendre.
         self._cinema_kept = None
+        self._cinema_aside = None
         # Le renommage sur place (F2) : le champ, et l'element qu'il renomme.
         self._rename_field = None
         self._renaming = None
+        # L'etat d'origine de la ligne d'infos masquee pendant l'edition.
+        self._rename_subtitle = None
         # Une fiche rechargee apres son renommage reprend a cet instant.
         self._rename_resume = None
         self._siblings_gen = -1
@@ -574,6 +584,7 @@ class MainWindow(QMainWindow):
         # Une liste de passage (les doublons) : aucun rappel ne l'ecrase, et
         # recliquer l'onglet rend la collection.
         self._transient = ""
+        self._dupe_members: dict = {}
         self._pending_dupes = None
         self._dupes_next = None
         self._banner_action = None
@@ -1030,6 +1041,27 @@ class MainWindow(QMainWindow):
         self.picked_label = QLabel("", self.picked_bar)
         self.picked_label.setObjectName("pending")
         picked_row.addWidget(self.picked_label)
+        # La pagination de la ligne des filtres, que les coches remplacent :
+        # une liste de doublons cochee d'office ne disait plus qu'elle avait
+        # d'autres pages, et « Supprimer » emportait aussi celles qu'on
+        # n'avait jamais vues.
+        self.picked_count = QLabel("", self.picked_bar)
+        self.picked_count.setObjectName("counter")
+        self.picked_previous = QPushButton("◂", self.picked_bar)
+        self.picked_next = QPushButton("▸", self.picked_bar)
+        for button, tip, name, step in (
+                (self.picked_previous, "Page précédente", "chevron-left", -1),
+                (self.picked_next, "Page suivante", "chevron-right", 1)):
+            button.setObjectName("stepper")
+            button.setFixedSize(30, 28)
+            dress(button, name, 20)
+            button.setToolTip(tip)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.clicked.connect(lambda _c=False, n=step: self.change_page(n))
+        for widget in (self.picked_previous, self.picked_count, self.picked_next):
+            widget.hide()
+            picked_row.addWidget(widget)
         # « Supprimer » en dernier, en rouge et a l'ecart : l'action de masse
         # la plus lourde avait l'air d'« Annuler », et se tenait contre lui.
         for name, text, tip, slot in (
@@ -1235,6 +1267,7 @@ class MainWindow(QMainWindow):
         # bout de la ligne de recherche, pas sur une ligne a eux.
         # Sur la premiere ligne, a la suite du chemin : le mur n'a qu'une
         # ligne, et pas de recherche par nom — il pioche au hasard.
+        self.wall.controls.setObjectName("wallControls")
         self.wall.controls.setParent(self.top_bar)
         self._row_one.insertWidget(self._row_one.indexOf(self.crumbs) + 1,
                                    self.wall.controls, 0)
@@ -1544,7 +1577,8 @@ class MainWindow(QMainWindow):
                    reset_levels: bool = True, restore_id: str = "",
                    new_origin: bool = False,
                    force: bool = False, state: str = "",
-                   remember: bool = True, departure: dict | None = None) -> None:
+                   remember: bool = True, departure: dict | None = None,
+                   probe_empty: bool = True) -> None:
         """Ouvre ce dossier : ce que l'index en sait d'abord, puis la relecture.
 
         `state` : l'appelant vient de regarder si le dossier est la (« ok »,
@@ -1555,6 +1589,8 @@ class MainWindow(QMainWindow):
         `departure` : l'endroit quitte, pris par l'appelant avant qu'il ne
         touche aux niveaux (`_here`) ; sans lui, l'historique retenait le
         niveau qu'on venait d'empiler, et Alt+← laissait un niveau fantome.
+        `probe_empty` a faux : l'appelant regarde lui-meme, hors du fil de
+        l'interface, si un dossier inconnu de l'index est vide.
         """
         if root is None:
             return
@@ -1595,7 +1631,7 @@ class MainWindow(QMainWindow):
         self.all_items = []
         self.items = []
         # Une liste de passage (doublons) ne survit pas a un autre dossier.
-        self._transient = ""
+        self._leave_transient()
         self._scan_top = False
         self.board.empty.setText("Rien à afficher ici.")
         self.plans = {}
@@ -1615,7 +1651,7 @@ class MainWindow(QMainWindow):
         known = (cached_items(self.root, self.mode, self.cfg["expand_parents"])
                  if indexed else [])
         empty = False
-        if not known and self.mode == MODE_FOLDERS and state == "ok":
+        if not known and self.mode == MODE_FOLDERS and state == "ok" and probe_empty:
             try:
                 empty = not list_entries(self.root, MODE_FOLDERS,
                                          self.cfg["skip_hidden"], False,
@@ -2439,6 +2475,12 @@ class MainWindow(QMainWindow):
         self._hush_players()
         self.browsing = True
         self._transient = "dupes"
+        # Chaque groupe tel qu'il a ete montre, le meilleur en tete : c'est lui
+        # que _spare_last_copies consulte, et non la liste du moment, qu'un
+        # filtre, un tri ou un autre onglet peuvent avoir remplacee.
+        self._dupe_members = {}
+        for item in items:
+            self._dupe_members.setdefault(item.dupe_group, []).append(item)
         self.all_items = items
         self.mode = MODE_FLAT
         self.items = list(items)
@@ -2459,6 +2501,20 @@ class MainWindow(QMainWindow):
         said += ("Un groupe garde toujours un exemplaire ; « Pas des doublons » "
                  "en retire un pour de bon.")
         self.show_banner(said, "info", seconds=12)
+
+    def _leave_transient(self) -> None:
+        """On quitte la liste de passage : ce qu'elle avait coche la quitte aussi.
+
+        Les coches d'office des doublons n'ont de sens qu'a cote de leur groupe.
+        Les memes chemins, dans « Vidéos », n'ont plus de groupe : Suppr y
+        emportait l'original avec ses copies, sans un mot sur les doublons.
+        La planche le fait deja quand elle change de liste ; pas quand elle
+        n'est pas refaite (mur, fiche ouverte d'emblee).
+        """
+        if self._transient == "dupes" and self.board.picked_ids:
+            self.board.clear_picked()
+        self._transient = ""
+        self._dupe_members = {}
 
     def _dupe_group_of(self, items) -> list:
         """Les numeros des groupes de doublons de ces elements, dans l'ordre."""
@@ -2522,6 +2578,8 @@ class MainWindow(QMainWindow):
                              "écrite : elle le sera à la prochaine occasion.",
                              "error")
         gone = {item.item_id for item in members}
+        for number in wanted:
+            self._dupe_members.pop(number, None)
         page = self.board.page
         self.all_items = [item for item in self.all_items if item.item_id not in gone]
         self.items = [item for item in self.items if item.item_id not in gone]
@@ -2953,15 +3011,6 @@ class MainWindow(QMainWindow):
         if item.is_tag:
             return self.open_tag(item)
         target = Path(item.path)
-        state = _folder_state(target)
-        if state == "absent":
-            self.show_banner(f"Introuvable : {item.name}", "error")
-            return
-        if state == "injoignable":
-            # Le dossier n'a pas disparu : c'est le NAS qui ne repond pas.
-            self.show_banner(f"NAS injoignable : « {item.name} » n'a pas pu "
-                             "être ouvert. Réessayez dans un instant.", "error")
-            return
 
         # Le mode se decide sur ce qu'on sait deja du dossier. Le dossier
         # etait enumere ici, sur le fil de l'interface, pour un seul booleen
@@ -2985,8 +3034,59 @@ class MainWindow(QMainWindow):
             "mode": self.mode,
             "item_id": item.item_id,
         })
-        self.start_root(target, mode, reset_levels=False, state=state,
-                        departure=here)
+        # On entre sur ce que l'index sait deja, sans rien demander au NAS sur
+        # le fil de l'interface : la question « le dossier est-il la » se pose
+        # a cote (`_check_entered`). Posee ici, elle figeait chaque entree
+        # d'un aller-retour -- de plusieurs secondes, NAS endormi.
+        self.start_root(target, mode, reset_levels=False, state="ok",
+                        departure=here, probe_empty=False)
+        self._check_entered(item, target)
+
+    def _check_entered(self, item, target: Path) -> None:
+        """Hors du fil de l'interface : le dossier ou l'on vient d'entrer est-il
+        la, et, inconnu de l'index, contient-il des sous-dossiers ?"""
+        from .tunnel import Chore
+        name = item.name
+        # Des sous-dossiers comptes par l'analyse, ou une liste deja connue :
+        # rien a verifier de plus que sa presence.
+        doubt = (self.mode == MODE_FOLDERS and not self.all_items
+                 and not item.subdir_count > 0)
+        skip_hidden = self.cfg["skip_hidden"]
+
+        def work():
+            state = _folder_state(target)
+            empty = False
+            if state == "ok" and doubt:
+                try:
+                    empty = not list_entries(target, MODE_FOLDERS, skip_hidden,
+                                             False, strict=True)
+                except RootUnreadable:
+                    # Illisible n'est pas vide (voir `start_root`).
+                    empty = False
+            return state, empty
+
+        Chore(work, self, fallback=("injoignable", False),
+              then=lambda found: self._entered_checked(target, name, *found)).start()
+
+    def _entered_checked(self, target: Path, name: str, state: str,
+                         empty: bool) -> None:
+        if self.root is None or Path(self.root) != target:
+            return          # on est deja ailleurs : plus rien a corriger ici
+        if state == "absent":
+            self.show_banner(f"Introuvable : {name}", "error")
+            if self.levels:
+                self.go_up()
+            return
+        if state == "injoignable":
+            # Le dossier n'a pas disparu : c'est le NAS qui ne repond pas. Ce
+            # que l'index en savait reste a l'ecran ; la relecture reessaiera.
+            self.show_banner(f"NAS injoignable : « {name} » n'a pas pu être "
+                             "relu. Réessayez dans un instant.", "error")
+            return
+        if empty and self.mode == MODE_FOLDERS and not self.all_items:
+            # Sans sous-dossier : ses videos, plutot qu'une liste vide.
+            self.start_root(target, MODE_FLAT, reset_levels=False, state="ok",
+                            remember=False)
 
     def _here(self) -> dict:
         """L'endroit ou l'on est, tel qu'Alt+← doit pouvoir y revenir.
@@ -3459,6 +3559,12 @@ class MainWindow(QMainWindow):
             # chaque element qui arrive la faisait clignoter et redemandait des
             # vignettes deja obtenues.
             self.board.append_item(item, self.ratings.get(item.path))
+            if self._restore_id and item.item_id == self._restore_id:
+                # La carte qu'on venait voir (fil d'Ariane depuis sa fiche) :
+                # en vue des qu'elle arrive.
+                self._restore_id = ""
+                self.index = len(self.items) - 1
+                self.board.scroll_to(self.index)
             return
         if self._restore_id and item.item_id == self._restore_id:
             self._restore_id = ""
@@ -3850,8 +3956,13 @@ class MainWindow(QMainWindow):
             INDEX.mark_seen(item.item_id)
 
     def _burst_next(self) -> None:
-        if (self.cfg["burst"] and not self.browsing and self.items
-                and not self._quiet and self.index + 1 < len(self.items)):
+        if not self.cfg["burst"] or self.browsing or not self.items or self._quiet:
+            return
+        if self._stays_in_folder():
+            # La rafale reste dans le dossier, comme → ; avant la borne de la
+            # liste, puisque la voisine dans le dossier fait le tour.
+            return self.step(1)
+        if self.index + 1 < len(self.items):
             self.show_item(self.index + 1)
 
     def toggle_burst(self) -> None:
@@ -5250,6 +5361,8 @@ class MainWindow(QMainWindow):
                 self.board.page > 0,
                 self.board.page < self.board.total_pages() - 1,
             )
+            if self.board.picked_ids:
+                self._show_picked_pages()
             return
         total = len(self.items)
         stats = self.stats
@@ -6019,11 +6132,7 @@ class MainWindow(QMainWindow):
         commandes, qui n'existait que la.
         """
         if self.tab == TAB_SPLIT:
-            # Le mur tel qu'on le quitte : Echap sur la fiche y ramene, avec
-            # les memes videos. On en retrouvait un autre, tire a neuf.
-            back = {"paths": [pane.video_path for pane in self.wall.panes],
-                    "pinned": list(self._wall_pinned),
-                    "single_row": self.wall.single_row}
+            back = self._wall_snapshot()
             if self.wall_full:
                 self.toggle_wall_fullscreen(False)
             self.set_tab(TAB_FOLDERS)
@@ -6036,6 +6145,15 @@ class MainWindow(QMainWindow):
                 self.on_board_open(position)
                 return
         self.play_in_app(path)
+
+    def _wall_snapshot(self) -> dict:
+        """Le mur tel qu'on le quitte pour une fiche : Echap y ramene, avec les
+        memes videos -- on en retrouvait un autre, tire a neuf -- et en plein
+        ecran s'il l'etait."""
+        return {"paths": [pane.video_path for pane in self.wall.panes],
+                "pinned": list(self._wall_pinned),
+                "single_row": self.wall.single_row,
+                "full": self.wall_full}
 
     def return_to_wall(self) -> None:
         """Echap sur une fiche ouverte depuis le mur : le meme mur, les memes videos."""
@@ -6061,6 +6179,10 @@ class MainWindow(QMainWindow):
             self.wall.single_row = back["single_row"]
         self._wall_return = back["paths"]
         self.set_tab(TAB_SPLIT)
+        if back.get("full") and not self.wall_full:
+            # Apres l'onglet : le plein ecran retient l'etat fenetre du moment,
+            # que l'Echap suivant rendra.
+            self.toggle_wall_fullscreen(True)
         self._wall_return = None
 
     def _take_wall_return(self):
@@ -6449,7 +6571,7 @@ class MainWindow(QMainWindow):
         self.root = top
         self.browsing = True
         # Une liste de passage (doublons) s'efface devant celle de l'onglet.
-        self._transient = ""
+        self._leave_transient()
         self._goto_page(PAGE_SORT)
         self._hush_players()
         self._list_leaf = ""
@@ -6921,8 +7043,31 @@ class MainWindow(QMainWindow):
                 continue
             kept.append(level)
         self.levels = kept
+        # Depuis une fiche, on vient voir le dossier de ce qu'on regarde : ses
+        # vignettes, la carte de la video en vue. `start_root` ouvrait sinon
+        # la fiche du premier element -- une autre video partait a sa place.
+        shown = self.current if not self.browsing else None
+        if shown is not None:
+            self.browsing = True
+            self._hush_players()
+            self._apply_selectors()
         self.start_root(target, self._mode_for_folder(), reset_levels=False,
-                        state=state, departure=here)
+                        state=state, departure=here,
+                        restore_id=shown.item_id if shown is not None else "")
+        if shown is not None and self._board_on(shown.path):
+            # Deja en vue : la relecture n'a plus a nous y poser.
+            self._restore_id = ""
+
+    def _board_on(self, path) -> bool:
+        """La planche en vue sur cet element, ou sur le dossier qui le contient."""
+        wanted = os.path.normcase(str(path))
+        for position, item in enumerate(self.items):
+            here = os.path.normcase(str(item.path))
+            if here == wanted or wanted.startswith(here.rstrip("\\/") + os.sep):
+                self.index = position
+                self.board.scroll_to(position)
+                return True
+        return False
 
     def toggle_board(self, visible: bool | None = None) -> None:
         target = (not self.browsing) if visible is None else visible
@@ -7325,6 +7470,18 @@ class MainWindow(QMainWindow):
             widget.setVisible(not self.cinema)
         if self.cinema and not was:
             self._cancel_rename()
+            # La video ouverte a cote s'efface elle aussi, et se tait : le
+            # plein ecran promis gardait une seconde video qui jouait a droite.
+            # Elle revient telle quelle a la sortie.
+            aside = self.aside_player.player
+            self._cinema_aside = (
+                (aside.playbackState() == aside.PlaybackState.PlayingState)
+                if not self.aside.isHidden() and self.aside_current else None)
+            if self._cinema_aside is not None:
+                if self._cinema_aside:
+                    aside.pause()
+                self.aside_bar.hide()
+                self.aside.hide()
             if not self.wall_full and not self._quiet:
                 self._cinema_kept = self.windowState()
                 self.showFullScreen()
@@ -7333,6 +7490,11 @@ class MainWindow(QMainWindow):
             kept, self._cinema_kept = self._cinema_kept, None
             if kept is not None and not self.wall_full and not self._quiet:
                 self.setWindowState(kept)
+            playing, self._cinema_aside = getattr(self, "_cinema_aside", None), None
+            if playing is not None and self.aside_current and self.tab != TAB_SPLIT:
+                self.aside.show()
+                if playing:
+                    self.aside_player.player.play()
         if not self.cinema and getattr(self, "_back_to_board", False):
             self._back_to_board = False
             self.show_board_at(self.index)
@@ -7386,6 +7548,9 @@ class MainWindow(QMainWindow):
         item = self.current
         if self.browsing or item is None or item.kind == MODE_FOLDERS:
             return
+        if self._stays_in_folder():
+            # Comme → : la case vaut aussi pour la suite qui vient toute seule.
+            return self.step(1)
         if self.index + 1 < len(self.items):
             self.show_item(self.index + 1)
         else:
@@ -7400,9 +7565,24 @@ class MainWindow(QMainWindow):
             self.controls.setVisible(not count)
         self.picked_label.setText(
             f"{count} élément(s) coché(s)" if count else "")
+        self._show_picked_pages()
         # Le titre de l'arborescence dit ce que fera le prochain clic :
         # envoyer les coches, ou y aller.
         self.tree.set_context(self.browsing and self.tab != TAB_SPLIT, count)
+
+    def _show_picked_pages(self) -> None:
+        """La page ou l'on en est, sur la barre des coches, s'il y en a plusieurs."""
+        board = self.board
+        many = (bool(board.picked_ids) and self.browsing
+                and self.tab != TAB_SPLIT and board.total_pages() > 1)
+        for widget in (self.picked_previous, self.picked_count, self.picked_next):
+            widget.setVisible(many)
+        if many:
+            first, last = board._page_bounds()
+            self.picked_count.setText(
+                f"{first + 1}–{last} sur {self._thousands(len(board.items))}")
+            self.picked_previous.setEnabled(board.page > 0)
+            self.picked_next.setEnabled(board.page < board.total_pages() - 1)
 
     def pick_all(self) -> None:
         """Coche tout ce qui est affiche."""
@@ -7670,8 +7850,13 @@ class MainWindow(QMainWindow):
     def _rate_items(self, items: list, stars: int) -> None:
         """Favori, ou non, pour ces elements — sans ouvrir aucune fiche."""
         wanted = 1 if int(stars or 0) > 0 else 0
+        tags = any(item.is_tag for item in items)
         items = [item for item in items if not item.is_tag]
         if not items:
+            if tags:
+                # 1 a 5 sur une carte « # mot » ne faisaient rien, sans un mot.
+                self.show_banner("Un mot-clé ne se met pas en favori : ouvrez-le "
+                                 "pour noter ses vidéos.", "quiet")
             return
         for item in items:
             if (self.ratings.get(item.path) > 0) != bool(wanted):
@@ -7739,11 +7924,18 @@ class MainWindow(QMainWindow):
         # garder le groupe -- meme si sa carte, faite avant, ne le sait pas.
         gone = self._gone_paths()
         members: dict = {}
-        for item in self.all_items:
-            group = getattr(item, "dupe_group", None)
-            if (group in groups and not item.locked
-                    and not _within(os.path.normcase(str(item.path)), gone)):
-                members.setdefault(group, []).append(item)
+        for group in groups:
+            known = self._dupe_members.get(group)
+            if known is None:
+                # Un groupe que la table ne connait plus (une liste d'avant) :
+                # dans le doute, un exemplaire vise reste.
+                members[group] = [item for item in items
+                                  if getattr(item, "dupe_group", None) == group]
+                continue
+            for item in known:
+                if (not item.locked
+                        and not _within(os.path.normcase(str(item.path)), gone)):
+                    members.setdefault(group, []).append(item)
         keep = set()
         for group, present in members.items():
             if present and all(id(item) in wanted for item in present):
@@ -7967,7 +8159,11 @@ class MainWindow(QMainWindow):
         self.show_banner(
             f"Au hasard parmi {weights[-1]} vidéos : « {Path(video).name} »",
             "info")
+        # Lance depuis le mur, comme ⤢ : Echap sur la fiche ramene au mur.
+        back = self._wall_snapshot() if self.tab == TAB_SPLIT else None
         self.play_in_app(video)
+        if back is not None and self.tab != TAB_SPLIT and not self.browsing:
+            self._back_to_wall = back
 
     # ------------------------------------------------------------------
     # Panneau d'arborescence
@@ -8243,39 +8439,82 @@ class MainWindow(QMainWindow):
         self.cfg.save_soon()
         self.apply_filter(rules["include"], rules["exclude"])
 
-    def _retry_loosely(self) -> bool:
-        """Rien d'exact : on retente a peu pres, et on le dit.
+    def _loose_later(self, retries: int = 0) -> None:
+        """L'a-peu-pres, une fois la frappe posee : rien d'exact, on retente
+        a peu pres, et on le dit.
 
         Une lettre de travers ne doit pas rendre un ecran vide quand il y a
-        cent mille fichiers derriere, dont beaucoup sont mal nommes.
+        cent mille fichiers derriere, dont beaucoup sont mal nommes. Comparer
+        chaque nom a peu pres coute pres d'une demi-seconde sur la collection
+        entiere : le parcours se fait par tranches de quelques millisecondes,
+        entre lesquelles l'interface respire. D'un bloc, il figeait l'ecran
+        juste apres la derniere lettre.
         """
+        self._loose_scan = None
         query = (self.criteria or {}).get("include", self.cfg["filter_include"])
-        if self._loose or not query or not self.all_items:
-            return False
-        self._loose = True
-        found = self._filtered()
+        if self.items or self._loose or not query or not self.all_items:
+            return
+        from . import query as query_module
+        if query_module._FUZZ is None:
+            # rapidfuzz ne se charge qu'a la premiere recherche approchee :
+            # son import (150 ms) se fait hors du fil de l'interface.
+            from .tunnel import Chore
+            Chore(fuzzy_available, self, fallback=False,
+                  then=lambda _found: self._loose_later(retries)).start()
+            return
+        scan = {
+            "test": query_tester(self._parsed(query), True),
+            "items": self._sortable_items(), "names": self._sortable_names(),
+            "at": 0, "hits": [], "query": query,
+            "context": self._filter_context(), "all": self.all_items,
+            "retries": retries,
+        }
+        self._loose_scan = scan
+        self._loose_step(scan)
+
+    def _loose_step(self, scan: dict) -> None:
+        """Une tranche du parcours approchant ; la suite au prochain tour."""
+        if self._loose_scan is not scan:
+            return          # une frappe, un autre reglage : abandonne
+        query = (self.criteria or {}).get("include", self.cfg["filter_include"])
+        if self.items or self._loose or query != scan["query"]:
+            self._loose_scan = None
+            return
+        test, names, hits = scan["test"], scan["names"], scan["hits"]
+        at, total = scan["at"], len(names)
+        deadline = time.perf_counter() + 0.008
+        while at < total:
+            end = min(total, at + 400)
+            hits.extend(position for position in range(at, end)
+                        if test(names[position]))
+            at = end
+            if time.perf_counter() >= deadline:
+                break
+        scan["at"] = at
+        if at < total:
+            QTimer.singleShot(0, lambda: self._loose_step(scan))
+            return
+        self._loose_scan = None
+        if (self.all_items is not scan["all"]
+                or self._filter_context() != scan["context"]):
+            # La collection a bouge pendant le parcours (relecture, filtre) :
+            # on repart d'elle, quelques fois au plus -- une relecture qui
+            # publie sans cesse ne doit pas faire tourner ceci en rond.
+            if scan["retries"] < 3:
+                self._loose_later(scan["retries"] + 1)
+            return
+        items = scan["items"]
+        keep = self._matcher(ignore_query=True)
+        found = [items[position] for position in hits if keep(items[position])]
         if not found:
-            self._loose = False
-            return False
+            return
+        self._loose = True
         self.items = found
         self.show_banner(
             f"Rien d'exact pour « {query} » — voici les {len(found)} "
             "résultat(s) approchants." + ("" if fuzzy_available() else
             " (installez rapidfuzz pour de meilleurs rapprochements)"),
             "quiet")
-        return True
-
-    def _loose_later(self) -> None:
-        """L'a-peu-pres, une fois la frappe posee.
-
-        Il parcourt toute la collection en comparant chaque nom a peu pres :
-        pres d'une demi-seconde. Lance a chaque lettre qui ne donnait rien, il
-        figeait la frappe d'un mot mal orthographie.
-        """
-        if self.items or self._loose:
-            return
-        if not self._retry_loosely():
-            return
         self._narrow_items = None
         self.apply_sort()
         self._show_counts()
@@ -8319,6 +8558,7 @@ class MainWindow(QMainWindow):
         # sur l'a-peu-pres restait en vigueur pour les suivantes, sans que
         # rien ne le dise.
         self.loose_timer.stop()
+        self._loose_scan = None
         was_loose = self._loose
         self._loose = False
         self.cfg["filter_include"] = include
@@ -8866,7 +9106,10 @@ class MainWindow(QMainWindow):
             return
         if self.cinema:
             # Le titre est dans la barre que le cinema cache : on en sort, et
-            # le champ se pose une fois la barre revenue a sa place.
+            # le champ se pose une fois la barre revenue a sa place. Sur la
+            # fiche : venu du ⛶ d'une video ouverte a cote, la sortie rendait
+            # la planche, et F2 n'avait plus rien a renommer.
+            self._back_to_board = False
             self.toggle_cinema(False)
             QTimer.singleShot(0, lambda: self.start_rename(text))
             return
@@ -8876,6 +9119,9 @@ class MainWindow(QMainWindow):
             return
         field = _RenameField(self.top_bar)
         field.setObjectName("renameField")
+        # La police du titre qu'il remplace (14 points, gras), et avant de
+        # mesurer le texte : le champ ecrivait plus petit que le nom.
+        field.ensurePolished()
         field.setText(Path(item.path).name if text is None else text)
         bar = self.top_bar.width()
         corner = piece.mapTo(self.top_bar, QPoint(0, 0))
@@ -8885,6 +9131,16 @@ class MainWindow(QMainWindow):
         x = max(0, min(corner.x(), bar - width - 4))
         y = max(0, corner.y() + (piece.height() - height) // 2)
         field.setGeometry(x, y, width, height)
+        # Ce qui suit le titre sur la ligne (« 240p · 76,7 Ko ») s'efface le
+        # temps de l'edition, sans que rien ne bouge : le champ le recouvrait
+        # a moitie et touchait la taille du fichier.
+        subtitle = self.item_subtitle
+        if subtitle.isVisible():
+            policy = subtitle.sizePolicy()
+            self._rename_subtitle = policy.retainSizeWhenHidden()
+            policy.setRetainSizeWhenHidden(True)
+            subtitle.setSizePolicy(policy)
+            subtitle.hide()
         field.committed.connect(self._commit_rename)
         field.cancelled.connect(self._cancel_rename)
         self._rename_field, self._renaming = field, item
@@ -8909,6 +9165,13 @@ class MainWindow(QMainWindow):
         """Referme le champ de renommage, sans rien renommer."""
         field, self._rename_field = self._rename_field, None
         self._renaming = None
+        retain, self._rename_subtitle = self._rename_subtitle, None
+        if retain is not None:
+            subtitle = self.item_subtitle
+            subtitle.show()
+            policy = subtitle.sizePolicy()
+            policy.setRetainSizeWhenHidden(retain)
+            subtitle.setSizePolicy(policy)
         if field is None:
             return
         field.blockSignals(True)
@@ -8949,15 +9212,21 @@ class MainWindow(QMainWindow):
         resume = 0
         if item.kind != MODE_FOLDERS and not self.browsing:
             resume = max(0, int(self.single.player.position()))
-        # Windows ne renomme pas un fichier ouvert : le lecteur le lache. Il
-        # le reprend a l'arrivee, au meme instant (`_reshow_renamed`).
-        self._release_media(item.path)
         item.status = "pending_rename"
         item.status_detail = name
         self._rename_resume = resume
-        self._submit(Transfer(kind="rename", src=item.path, new_name=name,
-                              label=old.name, item_id=item.item_id), item)
         self.show_banner(f"Renommage : « {old.name} » → « {name} »…", "info")
+
+        def send() -> None:
+            # Windows ne renomme pas un fichier ouvert : le lecteur le lache.
+            # Il le reprend a l'arrivee, au meme instant (`_reshow_renamed`).
+            # Vider un lecteur coute jusqu'a cent millisecondes : au tour
+            # suivant, une fois le champ parti et le bandeau pose, Entree
+            # repond aussitot.
+            self._release_media(old)
+            self._submit(Transfer(kind="rename", src=old, new_name=name,
+                                  label=old.name, item_id=item.item_id), item)
+        QTimer.singleShot(0, send)
 
     def _name_taken(self, item, name: str) -> str:
         """Un voisin connu porte-t-il deja ce nom ? Sans rien demander au NAS :
@@ -8989,6 +9258,9 @@ class MainWindow(QMainWindow):
         """
         old_s, new_s = str(old), str(new)
         if not old_s or not new_s or old_s == new_s:
+            return
+        if (item is not None and item.kind != MODE_FOLDERS and not item.is_tag
+                and self._follow_file_rename(item, old_s, new_s)):
             return
         # Les dossiers qui le contiennent d'abord, tant que l'element porte
         # encore son ancien nom.
@@ -9041,6 +9313,95 @@ class MainWindow(QMainWindow):
                 entry["root"] = fresh
         # Le nom a change : la recherche et les tris sont a refaire.
         self._touch()
+
+    def _follow_file_rename(self, item, old_s: str, new_s: str) -> bool:
+        """Une video renommee : on ne suit que ce qui la porte.
+
+        Le cas general balaye toute la collection (un dossier renomme emporte
+        tout ce qu'il contient), puis fait tout replier et retrier : sur cent
+        mille videos, deux a trois cents millisecondes de gel a la fin du
+        renommage, et autant a son Ctrl+Z, plus une demi-seconde au geste
+        suivant. Une video n'a rien sous elle : ses dossiers, ses fiches et
+        son nom replie suffisent. Rend faux si ses dossiers sont introuvables
+        tels quels -- le cas general s'en charge alors.
+        """
+        parents = {str(parent) for parent in Path(old_s).parents}
+        holders = []
+        for other in self._plain_items:
+            if (not other.is_tag and other.kind == MODE_FOLDERS
+                    and str(other.path) in parents):
+                holders.append(other)
+        if self._plain_items and not holders:
+            return False
+        fresh = _as_path(new_s)
+        touched = set()
+        for other in holders:
+            videos = other.videos
+            for at, video in enumerate(videos):
+                if str(video) == old_s:
+                    other.videos = list(videos)
+                    other.videos[at] = fresh
+                    touched.add(other.item_id)
+                    break
+        # Les fiches qui la montrent : elle-meme, celle de l'onglet Videos, et
+        # celle de la liste affichee si c'en est une autre.
+        renamed = [item]
+        cached = self._flat_cache.pop(old_s, None)
+        if cached is not None and str(cached.path) == old_s:
+            self._flat_cache[new_s] = cached
+            renamed.append(cached)
+        renamed.extend(other for other in self.all_items
+                       if str(other.path) == old_s)
+        seen = set()
+        for other in renamed:
+            if id(other) in seen or str(other.path) != old_s:
+                continue
+            seen.add(id(other))
+            was = other.item_id
+            other.path = fresh
+            other.videos = [fresh if str(video) == old_s else video
+                            for video in other.videos]
+            other.__dict__.pop("sort_name", None)
+            if was in self.board.picked_ids:
+                self.board.picked_ids.discard(was)
+                self.board.picked_ids.add(other.item_id)
+        # Les noms replies, a leur place : la liste triable ne change pas de
+        # membres, seul ce nom-ci a change.
+        for entry in self._sortable_memo.values():
+            folded = entry[4]
+            if folded is None:
+                continue
+            for position, other in enumerate(entry[2]):
+                if id(other) in seen and position < len(folded):
+                    name = fold(other.name)
+                    folded[position] = name
+                    if entry[5] is not None:
+                        entry[5][id(other)] = name
+        first, last = self.board._page_bounds()
+        shown = self.board.items
+        for position in range(max(0, first), min(last, len(shown))):
+            if id(shown[position]) in seen:
+                card = self.board._card_for(position)
+                if card is not None:
+                    card.set_item(shown[position],
+                                  self.ratings.get(shown[position].path))
+                    if self.browsing:
+                        self.on_board_preview(position)
+        if touched:
+            # Les apercus retenus de ses dossiers montraient l'ancien chemin
+            # (meme regle que `_follow_move`).
+            def owner(key: str) -> str:
+                for prefix in ("board@", "peek@"):
+                    if key.startswith(prefix):
+                        return key[len(prefix):]
+                return key.rsplit("@", 1)[0]
+
+            self.plans = {key: plan for key, plan in self.plans.items()
+                          if owner(key) not in touched}
+        # La collection a change de chemins (mur, hasard, voisines) ; la liste
+        # triable, elle, garde ses membres et ses noms viennent d'etre suivis.
+        self._touch(sortable=False)
+        return True
 
     def _tell_hidden_files(self, job: Transfer, item) -> None:
         """Un dossier ecarte emportait plus que ses videos : le dire tant qu'un
@@ -9185,27 +9546,49 @@ class MainWindow(QMainWindow):
         toute la collection.
         """
         item = self.current
-        if (self.cfg["stay_in_folder"] and item is not None
-                and item.kind != MODE_FOLDERS and not self.browsing):
+        if self._stays_in_folder():
             target = self._folder_neighbour(str(item.path), delta)
-            if target:
-                # La reserve prend la voisine suivante dans le dossier, et non
-                # dans la liste (melangee sous « Vidéos ») : la fleche d'apres
-                # tombait toujours a cote, et chaque appui changeait deux fois
-                # de source, avec un noir force. La liste du dossier est en
-                # memoire, `_folder_neighbour` vient de la faire.
-                listing = self._folder_videos(target)
-                spare = ""
-                if len(listing) >= 2 and target in listing:
-                    spare = listing[(listing.index(target) + delta) % len(listing)]
-                    if spare == target:
-                        spare = ""
-                for position, other in enumerate(self.items):
-                    if str(other.path) == target:
-                        return self.show_item(position, spare=spare)
-                return self.play_in_app(target)
+            if not target:
+                # Seule video de son dossier : le bandeau l'a dit, et la case
+                # demande justement de ne pas en sortir.
+                return
+            # La reserve prend la voisine suivante dans le dossier, et non
+            # dans la liste (melangee sous « Vidéos ») : la fleche d'apres
+            # tombait toujours a cote, et chaque appui changeait deux fois
+            # de source, avec un noir force. La liste du dossier est en
+            # memoire, `_folder_neighbour` vient de la faire.
+            listing = self._folder_videos(target)
+            spare = ""
+            if len(listing) >= 2 and target in listing:
+                spare = listing[(listing.index(target) + delta) % len(listing)]
+                if spare == target:
+                    spare = ""
+            for position, other in enumerate(self.items):
+                if str(other.path) == target:
+                    return self.show_item(position, spare=spare)
+            return self.play_in_app(target)
         if self.items:
-            self.show_item(self.index + delta)
+            target = self.index + delta
+            if not 0 <= target < len(self.items):
+                # Au bout de la liste, rien a montrer : `show_item` bornait
+                # l'index et rechargeait la meme video, repartie du debut
+                # sans un mot -- la position de lecture etait perdue.
+                if delta > 0 and self.scanning:
+                    self.show_banner("La suite arrive : l'analyse est en cours…",
+                                     "quiet")
+                else:
+                    self.show_banner("Dernier élément de la liste." if delta > 0
+                                     else "Premier élément de la liste.", "quiet")
+                return
+            self.show_item(target)
+
+    def _stays_in_folder(self) -> bool:
+        """Vrai quand la case « rester dans ce dossier » vaut pour ce qu'on voit :
+        la fiche d'une video (ni un dossier, ni un mot-cle)."""
+        item = self.current
+        return bool(self.cfg["stay_in_folder"] and item is not None
+                    and item.kind != MODE_FOLDERS and not item.is_tag
+                    and not self.browsing)
 
     def set_stay_in_folder(self, on: bool) -> None:
         """Une seule coche pour toute l'application : fiche, lecteur, mur."""
@@ -10013,6 +10396,8 @@ class MainWindow(QMainWindow):
                       self.board_timer, self.banner_timer, self.seen_timer,
                       self.burst_timer, self.retry_timer, self.loose_timer):
             timer.stop()
+        # Le parcours approchant en cours, par tranches, s'arrete aussi.
+        self._loose_scan = None
         # Tous les travaux de fond s'arretent d'un coup — on le demande a
         # chacun, on attendra plus loin, ensemble. Plus aucun ffmpeg ne part,
         # et ceux qui tournent sont tues : un processus invisible gardait

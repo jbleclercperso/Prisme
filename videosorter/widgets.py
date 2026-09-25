@@ -49,6 +49,11 @@ QPushButton#paneGesture { background: #1a1f27; border: 1px solid #2b323d;
 QPushButton#paneGesture:hover { color: #ffffff; border-color: #5a6474;
                                 background: #242a33; }
 QPushButton#paneGesture:checked { background: #1d2a40; border-color: #4c8dff; }
+/* Une entree de menu cochable qui porte une icone : Qt ne montre son etat
+   qu'a travers l'icone, et rien ne distinguait « Rafale » ou « Passer a la
+   suivante apres ★ » en marche ou non. Le cadre des gestes coches. */
+QMenu::icon:checked { background: #1d2a40; border: 1px solid #4c8dff;
+                      border-radius: 3px; }
 QLabel#subtitle { font-size: 15px; color: #b6c0cc; }
 QLabel#counter { font-size: 13px; color: #9aa4b0; }
 QLabel#rootPath { font-size: 13px; color: #9aa4b0; }

@@ -338,7 +338,12 @@ class SplitPane(QFrame):
         self.peek_end()
         self.video_path = ""
         self.name.setText("—")
-        self.player.stop()
+        # Une pause, puis la source videe -- sans stop(). Sur un lecteur qui
+        # a sa propre sortie son, stop() du moteur FFmpeg de Qt ne rendait
+        # parfois plus jamais la main (un panneau en train de se remplir) :
+        # la fenetre restait figee pour de bon. Vider la source libere le
+        # fichier tout autant.
+        self._pause()
         self.player.setSource(QUrl())
         self.marks.clear()
         self.bar.hide()
@@ -366,7 +371,14 @@ class SplitPane(QFrame):
         self.set_favorite(False)
 
     def stop(self) -> None:
-        self.player.stop()
+        """Arrete le panneau : une pause, jamais stop() (voir `clear`)."""
+        self._pause()
+
+    def _pause(self) -> None:
+        # Pause seulement s'il jouait : sur un lecteur arrete, pause()
+        # rechargerait la video pour en montrer la premiere image.
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
 
     def _next(self) -> None:
         self.wants_next.emit(self.index)

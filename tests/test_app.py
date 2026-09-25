@@ -6206,8 +6206,13 @@ def check_chosen_features(app, window, base, tri) -> None:
 
     print("\n[102] Doublons : le meilleur marqué, les autres cochés")
     clips = [str(p) for p in sorted(folder.glob("*.mp4"))]
-    groups = [DupeGroup(clips[0:3], [3000, 2000, 1000]),
-              DupeGroup(clips[3:5], [500, 500])]
+    # Deja classes : la definition passe avant la taille, et celle de ces
+    # videos arrive de la recolte en fond, a son heure -- sans compter la
+    # sonde posee a la main en [100] sur l'une d'elles. Le classement avait
+    # alors un meilleur different d'une execution a l'autre ; c'est la
+    # designation et l'ecart affiche qu'on verifie ici.
+    groups = [DupeGroup(clips[0:3], [3000, 2000, 1000], ranked=True),
+              DupeGroup(clips[3:5], [500, 500], ranked=True)]
     window.dupes = None
     window._dupes_stopped = False
     window._dupes_from_sigs = False
@@ -6881,6 +6886,212 @@ def check_review_fixes(app, window, base, root, tri) -> None:
           "et la décision suivante s'ajoute aux anciennes au lieu de les écraser")
 
 
+def check_reported_fixes(app, window, base, tri) -> None:
+    """Ce que la relecture avait laisse sans garde, et le lot qui a suivi."""
+    from videosorter.config import Config as _Config
+    from videosorter.dupes import DupeGroup
+    from videosorter.window import PAGE_DONE
+
+    print("\n[117] Favoris par la corbeille, F2 sur un dossier, ★ en fin de liste")
+    window.cfg["quiet_explained"] = True
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+    folder = fresh_root(app, window, base, tri, "garde-corbeille", 3)
+    window.toggle_board(False)
+    window.show_item(0)
+    pump(app, 0.3)
+    doomed = Path(window.current.path)
+    window.ratings.set(doomed, 1)
+    QTest.keyClick(window, Qt.Key_Delete)
+    settle(app, window)
+    entry = next((e for e in window.trash.entries
+                  if Path(e.origin) == doomed), None)
+    check(entry is not None and not doomed.exists()
+          and window.ratings.get(entry.stored) == 1,
+          "Suppr : le favori part avec la vidéo dans la corbeille")
+    if entry is not None:
+        window.trash.restore(entry)
+        pump(app, 0.3)
+    check(doomed.exists() and window.ratings.get(doomed) == 1,
+          "restaurée depuis Ctrl+B, elle retrouve son favori")
+    window.delete_one(doomed)
+    settle(app, window)
+    window.trash.flush("permanent")
+    pump(app, 0.3)
+    left = [key for key in window.ratings.data if window.trash.FOLDER_NAME in key]
+    check(not doomed.exists() and not left,
+          f"vidée, la corbeille ne laisse aucun favori orphelin ({len(left)})")
+
+    shelf = base / "garde-dossier"
+    shutil.rmtree(shelf, ignore_errors=True)
+    sources = sorted(tri.rglob("*.mp4"))
+    for name, count in (("Album", 2), ("Autre", 1)):
+        (shelf / name).mkdir(parents=True)
+        for position in range(count):
+            shutil.copy2(sources[position], shelf / name / f"{name}_{position}.mp4")
+    window.start_root(shelf)
+    wait_for(app, lambda: not window.scanning and len(window.items) == 2, 60)
+    window.toggle_board(False)
+    names = [i.name for i in window.items]
+    window.show_item(names.index("Album") if "Album" in names else 0)
+    pump(app, 0.3)
+    album = window.current
+    inside = shelf / "Album" / "Album_0.mp4"
+    window.ratings.set(inside, 1)
+    QTest.keyClick(window, Qt.Key_F2)
+    if window._rename_field is not None:
+        window._rename_field.setText("Album bis")
+        QTest.keyClick(window._rename_field, Qt.Key_Return)
+    settle(app, window)
+    moved = shelf / "Album bis"
+    check(moved.is_dir() and not (shelf / "Album").exists()
+          and Path(album.path) == moved
+          and all(Path(v).parent == moved for v in album.videos)
+          and window.ratings.get(moved / "Album_0.mp4") == 1,
+          "F2 sur un dossier : renommé, ses vidéos et leur favori suivent")
+    QTest.keyClick(window, Qt.Key_Z, Qt.ControlModifier)
+    settle(app, window)
+    check((shelf / "Album").is_dir() and not moved.exists()
+          and Path(album.path) == shelf / "Album"
+          and window.ratings.get(inside) == 1,
+          "Ctrl+Z lui rend son nom, favori compris")
+
+    fresh_root(app, window, base, tri, "garde-etoile", 3)
+    window.toggle_board(False)
+    window.show_item(2)
+    pump(app, 0.3)
+    if not window.cfg["advance_after_star"]:
+        window.toggle_advance_after_star()
+    # La suppression d'avant garde son bandeau un moment : un bandeau
+    # ordinaire attendrait son tour.
+    window._banner_guard = 0.0
+    QTest.keyClick(window, Qt.Key_1)
+    pump(app, 0.2)
+    check(window.index == 2 and window.stack.currentIndex() != PAGE_DONE
+          and "dernière" in window.banner.text(),
+          f"★ sur la dernière vidéo : ni page de fin, ni relance, et on le dit "
+          f"({window.index}, {window.banner.text()[:50]!r})")
+    window.set_stay_in_folder(True)
+    QTest.keyClick(window, Qt.Key_2)
+    pump(app, 0.3)
+    check(window.index != 2 and window.stack.currentIndex() != PAGE_DONE,
+          "« rester dans ce dossier » : ★ fait le tour du dossier")
+    window.toggle_advance_after_star()
+    window.set_stay_in_folder(False)
+
+    print("\n[118] Bornes, dossier, plein écran, doublons, menu, étoile")
+    window.show_item(2)
+    pump(app, 0.5)
+    shown = window.current
+    window._banner_guard = 0.0
+    QTest.keyClick(window, Qt.Key_Right)
+    pump(app, 0.2)
+    check(window.current is shown and window.index == 2
+          and "Dernier" in window.banner.text(),
+          "→ sur la dernière : elle continue, un mot le dit")
+    window.set_stay_in_folder(True)
+    window.on_video_finished()
+    pump(app, 0.2)
+    check(window.index != 2 and window.stack.currentIndex() != PAGE_DONE,
+          "case cochée : la fin d'une vidéo fait le tour du dossier")
+    window.set_stay_in_folder(False)
+
+    window.open_aside(1)
+    pump(app, 0.5)
+    window.on_board_open(0)
+    pump(app, 0.3)
+    QTest.keyClick(window, Qt.Key_F11)
+    pump(app, 0.2)
+    check(window.cinema and window.aside.isHidden(),
+          "F11 : la vidéo ouverte à côté s'efface avec le reste")
+    QTest.keyClick(window, Qt.Key_Escape)
+    pump(app, 0.2)
+    check(not window.cinema and not window.aside.isHidden(),
+          "et revient à la sortie")
+    window.close_aside()
+
+    groups = [DupeGroup([folder / "garde-corbeille_1.mp4",
+                         folder / "garde-corbeille_2.mp4"],
+                        [5_000_000, 4_000_000], [6.0, 6.0])]
+    window._pending_dupes = (groups, False)
+    window.show_found_dupes()
+    pump(app, 0.3)
+    window.pick_all()
+    window.set_tab(TAB_VIDEOS)
+    wait_for(app, lambda: not window.scanning and window.items, 30)
+    pump(app, 0.3)
+    check(not window.board.picked_ids and not window.picked_bar.isVisible(),
+          "les coches d'office des doublons ne suivent pas dans « Vidéos »")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+    window._pending_dupes = (groups, False)
+    window.show_found_dupes()
+    pump(app, 0.3)
+    window.pick_all()
+    stale = list(window.board.picked_items())
+    window.all_items = []            # une liste remplacee sous la planche
+    kept, spared = window._spare_last_copies(stale)
+    check(spared == 1 and len(kept) == 1,
+          "un groupe garde son meilleur exemplaire, quelle que soit la liste")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.3)
+
+    pages = base / "garde-pages"
+    shutil.rmtree(pages, ignore_errors=True)
+    pages.mkdir(parents=True)
+    many = []
+    for n in range(30):
+        pair = [pages / f"x{n}_a.mp4", pages / f"x{n}_b.mp4"]
+        for copy in pair:
+            shutil.copy2(sources[0], copy)
+        many.append(DupeGroup(pair, [5_000_000, 4_000_000], [6.0, 6.0]))
+    window._pending_dupes = (many, False)
+    window.show_found_dupes()
+    pump(app, 0.3)
+    check(window.picked_count.isVisible()
+          and window.picked_count.text().startswith("1–40 sur 60")
+          and window.picked_next.isEnabled(),
+          "doublons cochés d'office : la barre dit « 1–40 sur 60 » et mène à la suite")
+    window.clear_picked()
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.3)
+
+    action = window._menu_by_text.get("Passer à la suivante après ★")
+    check("QMenu::icon:checked" in window.styleSheet(),
+          "une entrée cochée du menu se voit, même avec une icône")
+    window.toggle_advance_after_star()
+    window.cfg.save()
+    check(_Config(path=window.cfg.path)["advance_after_star"] is True,
+          "« Passer à la suivante après ★ » est retenu d'une séance à l'autre")
+    window.toggle_advance_after_star()
+    window.cfg.save()
+    check(action is not None and not action.isChecked(), "et se décoche")
+
+    window.set_tab(TAB_SPLIT)
+    pump(app, 0.4)
+    orient, unseen = window.wall.orient_button, window.wall.unseen
+    check(orient.font().pixelSize() == 13 and unseen.font().pixelSize() == 13
+          and orient.sizeHint().height() >= 26,
+          "mur : « Verticales » et « Non vus » gardent la taille de la ligne")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+
+    fresh_root(app, window, base, tri, "garde-nom", 2)
+    window.toggle_board(False)
+    window.show_item(0)
+    pump(app, 0.3)
+    subtitle_shown = window.item_subtitle.isVisible()
+    QTest.keyClick(window, Qt.Key_F2)
+    field = window._rename_field
+    check(field is not None and field.font().pixelSize() == 14
+          and not window.item_subtitle.isVisible(),
+          "F2 : le champ a la police du titre et ne recouvre plus la ligne d'infos")
+    if field is not None:
+        QTest.keyClick(field, Qt.Key_Escape)
+    check(window.item_subtitle.isVisible() == subtitle_shown,
+          "Échap rend la ligne d'infos")
+
+
 def _transfer_for_test(src, dest):
     from videosorter.transfer import Transfer
     Path(dest).mkdir(parents=True, exist_ok=True)
@@ -7105,6 +7316,7 @@ def main() -> int:
     check_quiet_and_header(app, window, base, root)
     check_chosen_features(app, window, base, tri)
     check_review_fixes(app, window, base, root, tri)
+    check_reported_fixes(app, window, base, tri)
 
     window.close()
     pump(app, 0.3)

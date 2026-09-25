@@ -81,6 +81,7 @@ QPushButton#crumb:hover { color: #ffffff; text-decoration: underline; }
 QPushButton#crumb[last="true"] { color: #ffffff; font-weight: 600; }
 QLabel#crumbSep { color: #4d5563; font-size: 14px; }
 QLabel#crumb { color: #ffffff; font-weight: 600; font-size: 14px; }
+QLineEdit#renameField { font-weight: 600; font-size: 14px; }
 """
 
 

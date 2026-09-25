@@ -574,18 +574,27 @@ class HoverHandles(QWidget):
             self.pick.setChecked(card.pick.isChecked())
             self.pick.blockSignals(False)
         self.set_star(card.stars_value > 0)
+        # Un mot-cle ne se met pas en favori : son etoile ne faisait rien.
+        item = card.item
+        self.star.setVisible(not (item is not None and item.is_tag))
 
     def attach(self, card, rect: QRect) -> None:
         """Se pose sur cette carte, et relaie ses gestes a ses propres poignees."""
         changed = self.card is not card
+        starred = self.star.isVisibleTo(self)
         if changed:
             self.card = card
             self.sync(card)
-        if self.geometry() != rect:
+        if (self.geometry() != rect
+                or self.star.isVisibleTo(self) != starred):
             self.setGeometry(rect)
             self.layout().activate()
-            self.setMask(QRegion(self.pick.geometry()).united(
-                QRegion(self.star.geometry())))
+            # Sans l'etoile, son trou dans le masque avalait les clics
+            # destines a la carte.
+            region = QRegion(self.pick.geometry())
+            if self.star.isVisibleTo(self):
+                region = region.united(QRegion(self.star.geometry()))
+            self.setMask(region)
         if self.isHidden():
             self.show()
             self.raise_()
