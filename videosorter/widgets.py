@@ -9,8 +9,8 @@ from PySide6.QtCore import (
     QPoint, QPointF, QRect, QSize, QThread, QTimer, QUrl, Qt, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QCursor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
-    QRegion,
+    QColor, QCursor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen,
+    QPixmap, QPolygonF, QRegion,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -769,22 +769,33 @@ class PreviewGrid(QWidget):
         for tile in self.tiles:
             tile.set_hovered(False)
 
+    def mousePressEvent(self, event):
+        # Seul un appui recu ici arme le relachement qui ouvre une case.
+        self._armed = event.button() == Qt.LeftButton
+        super().mousePressEvent(event)
+
     def mouseReleaseEvent(self, event):
         """Un clic sur une case ouvre cette vidéo, comme partout ailleurs.
 
         Il fallait un double-clic, alors qu'une carte de la planche s'ouvre d'un
         seul : le même geste donnait deux résultats selon l'endroit.
+
+        Seulement si l'appui a eu lieu ici : un double-clic sur une carte de
+        dossier ouvrait la fiche au premier clic, et le second, tombe sur la
+        grille, entrait aussitot dans une video du dossier.
         """
+        armed, self._armed = getattr(self, "_armed", False), False
         if event.button() != Qt.LeftButton:
             return super().mouseReleaseEvent(event)
         slot = self._slot_at(event.position().toPoint())
-        if slot >= 0 and self.tiles[slot].video:
+        if armed and slot >= 0 and self.tiles[slot].video:
             self.playRequested.emit(self.tiles[slot].video, self.tiles[slot].ts)
         else:
             super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         # Le premier clic a deja ouvert : ne pas rouvrir par-dessus.
+        self._armed = False
         event.accept()
 
 
@@ -1455,6 +1466,9 @@ class SinglePlayer(QWidget):
         # Le dernier relachement a-t-il bascule la pause ? Un double-clic la
         # rebascule, pour que ses deux clics se compensent.
         self._click_paused = False
+        # L'heure du dernier appui recu par l'image elle-meme : un double-clic
+        # dont le premier appui a eu lieu ailleurs n'est pas pour elle.
+        self._press_ts = None
         layout.addWidget(self.video_area, 1)
 
         self.zoom = 1.0
@@ -1516,6 +1530,12 @@ class SinglePlayer(QWidget):
         self.hover_timer.timeout.connect(self._poll_hover)
         self.hovered_slot = -1
 
+        # La reserve a remplacer, et quand (voir preload).
+        self._spare_wanted = ""
+        self.spare_timer = QTimer(self)
+        self.spare_timer.setSingleShot(True)
+        self.spare_timer.timeout.connect(self._preload_later)
+
         self.position_timer = QTimer(self)
         self.position_timer.setSingleShot(True)
         self.position_timer.timeout.connect(self.position_label.hide)
@@ -1538,17 +1558,46 @@ class SinglePlayer(QWidget):
     def spare(self):
         return self.decks[1 - self._active]
 
+    # Le delai avant de remplacer une reserve deja chargee : la fiche se peint
+    # d'abord, et le demontage tombe pendant son noir d'ouverture.
+    SPARE_SWAP_MS = 60
+
     def preload(self, path: str) -> None:
-        """Charge `path` dans la reserve, jusqu'a sa premiere image, puis attend."""
+        """Charge `path` dans la reserve, jusqu'a sa premiere image, puis attend.
+
+        Une reserve vide se charge tout de suite. Une reserve qui tient
+        encore un autre fichier -- on revient de la planche sur une autre
+        video -- se vide un instant plus tard : son demontage, cent a quatre
+        cents millisecondes sur le fil de l'interface, passait avant la
+        peinture de la fiche, et c'etait le clic qui semblait lent.
+        """
         spare = self.spare
         if spare.path == path:
+            self._spare_wanted = ""
             return
+        if spare.path:
+            self._spare_wanted = path
+            self.spare_timer.start(self.SPARE_SWAP_MS)
+            return
+        self._spare_wanted = ""
+        self._load_spare(path)
+
+    def _load_spare(self, path: str) -> None:
+        spare = self.spare
         spare.path = path
         spare.primed = False
         spare.audio.setMuted(True)
         spare.video.hide()
         spare.player.setSource(QUrl.fromLocalFile(path))
         spare.player.play()
+
+    def _preload_later(self) -> None:
+        path, self._spare_wanted = self._spare_wanted, ""
+        if not path or not self.isVisible():
+            return
+        if path in (self.spare.path, self.decks[self._active].path):
+            return
+        self._load_spare(path)
 
     def peek_begin(self, captions: list) -> None:
         """Montre la mosaique par-dessus l'image, sans arreter la lecture."""
@@ -1574,6 +1623,8 @@ class SinglePlayer(QWidget):
 
     # -- scrub --------------------------------------------------------------
     def _scrub_press(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._press_ts = event.timestamp()
         if event.button() == Qt.LeftButton and self.player.source().isValid():
             self._scrub_x0 = event.globalPosition().x()
             self._scrub_pos0 = self.player.position()
@@ -1631,6 +1682,17 @@ class SinglePlayer(QWidget):
         if self.peeking:
             event.accept()
             return
+        pressed, self._press_ts = self._press_ts, None
+        interval = QGuiApplication.styleHints().mouseDoubleClickInterval()
+        if pressed is None or event.timestamp() - pressed > interval:
+            # Le premier clic est tombe ailleurs : sur la carte de la planche
+            # ou la case du mur qui vient d'ouvrir cette fiche. Il n'etait pas
+            # pour l'image, le second non plus -- sans cela, ouvrir une video
+            # d'un double-clic la passait aussitot en plein ecran.
+            self._click_paused = False
+            self._scrub_x0 = None
+            event.accept()
+            return
         if self._click_paused:
             self.toggle_pause()
         self._click_paused = False
@@ -1656,6 +1718,11 @@ class SinglePlayer(QWidget):
         echange, sans noir ni rechargement sur le partage.
         """
         spare = self.spare
+        wanted = getattr(self, "_spare_wanted", "")
+        if wanted and (target is None or _within(wanted, target)):
+            # Une reserve pas encore chargee ne doit pas ouvrir, juste apres,
+            # le fichier qu'on range.
+            self._spare_wanted = ""
         for deck in self.decks:
             if (target is not None and deck is spare and spare.path
                     and not _within(spare.path, target)):
@@ -1691,13 +1758,17 @@ class SinglePlayer(QWidget):
             tile.reset()
             tile.placeholder.setText(message)
         spare = self.spare
+        # Un clic ou un appui d'avant ne vaut plus pour ce fichier.
+        self._click_paused = False
+        self._press_ts = None
         if spare.path == path:
             # La suivante etait deja prete : on echange, sans rien attendre.
-            # Elle part d'abord, l'ancienne n'est videe qu'ensuite : son
-            # demontage ne retarde plus le depart de la suivante, dont le
-            # decodage avance pendant ce temps.
+            # L'ancienne est videe d'abord : la vider pendant que la suivante
+            # decodait deja coutait trois a huit fois plus cher (jusqu'a
+            # plusieurs centaines de millisecondes de gel a chaque fleche).
             old = self.decks[self._active]
             self._active = 1 - self._active
+            old.clear()
             self.blackout_timer.stop()
             self._blackout = False
             self.reset_zoom()
@@ -1709,7 +1780,6 @@ class SinglePlayer(QWidget):
                 self._awaiting_frame = True
             spare.player.setPosition(0)
             spare.player.play()
-            old.clear()
             return
         self.reset_zoom()
         deck = self.decks[self._active]
@@ -2009,12 +2079,52 @@ class _Restorer(QThread):
         self.done.emit(failures)
 
 
+def trash_fate(entries: list, mode: str = "recycle") -> str:
+    """Ce qui arrivera, a la fermeture, a ce qui reste dans la corbeille.
+
+    La boite promettait toujours la corbeille de Windows, alors que sur le
+    NAS il n'y en a pas : tout y est detruit pour de bon a la fermeture --
+    c'est voulu, encore faut-il le lire avant qu'il soit trop tard.
+    """
+    from .config import APP_NAME
+    from .media import is_network_path
+    count = len(entries)
+    if not count:
+        return "La corbeille de session est vide."
+    head = f"{count} élément(s) écartés. Rien n'est encore supprimé : "
+    if mode == "local_trash":
+        return head + (f"à la fermeture, le contenu rejoindra le dossier de "
+                       f"secours de {APP_NAME}.")
+    remote = sum(1 for entry in entries if is_network_path(entry.stored))
+    if mode == "permanent" or remote == count:
+        where = "" if mode == "permanent" else " (sur le NAS, il n'y a pas de corbeille)"
+        return head + (f"à la fermeture de {APP_NAME}, ce qui reste ici sera "
+                       f"détruit définitivement{where}. Restaurez maintenant ce "
+                       "que vous voulez garder.")
+    if remote:
+        return head + (f"à la fermeture, les {remote} élément(s) venus du NAS "
+                       "seront détruits définitivement, les autres rejoindront "
+                       "la corbeille de Windows. Restaurez maintenant ce que vous "
+                       "voulez garder.")
+    return head + ("le contenu ne partira vers la corbeille de Windows qu'à la "
+                   "fermeture, et vous pourrez encore l'en sortir depuis "
+                   "l'explorateur.")
+
+
 class TrashDialog(QDialog):
     """Ce qui a été écarté pendant la session, et de quoi le remettre en place."""
 
-    def __init__(self, trash, parent=None):
+    def __init__(self, trash, parent=None, mode: str | None = None):
         super().__init__(parent)
         self.trash = trash
+        # Le sort de ce qui reste depend du reglage de suppression : celui de
+        # la fenetre, a defaut de mieux.
+        if mode is None:
+            try:
+                mode = parent.cfg["delete_mode"]
+            except (AttributeError, KeyError, TypeError):
+                mode = "recycle"
+        self.mode = mode
         self.setWindowTitle("Corbeille de session")
         self.resize(760, 420)
 
@@ -2068,13 +2178,7 @@ class TrashDialog(QDialog):
             ])
             row.setData(0, Qt.UserRole, entry)
             self.tree.addTopLevelItem(row)
-        count = self.trash.count
-        self.summary.setText(
-            f"{count} élément(s) écartés. Rien n'est encore supprimé : le contenu "
-            "ne partira vers la corbeille de Windows qu'à la fermeture, et vous "
-            "pourrez encore l'en sortir depuis l'explorateur."
-            if count else "La corbeille de session est vide."
-        )
+        self.summary.setText(trash_fate(list(self.trash.entries), self.mode))
 
     def _restore(self, entries: list) -> None:
         """Remet les elements en place dans un fil a part.
@@ -2321,7 +2425,6 @@ class CommandBar(QWidget):
     deleteRequested = Signal()
     skipRequested = Signal()
     moveRequested = Signal(dict)
-    rateRequested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)

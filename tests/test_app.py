@@ -794,7 +794,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     # Le favori d'un element se reporte sur sa carte. Les notes de 1 a 5 et
     # leur chaine de signaux (rateRequested, on_board_rate) ont disparu.
     window.ratings.set(window.items[0].path, 0)
-    window.board.set_stars(0, window.ratings.set(window.items[0].path, 1))
+    window.ratings.set(window.items[0].path, 1)
+    pump(app, 0.1)
     check(window.ratings.get(window.items[0].path) == 1
           and window.board.cards[0].stars_value > 0,
           "le favori d'un élément se voit sur sa carte")
@@ -2779,8 +2780,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(memo.oublier(base / "range" / "a.mp4") == 2
           and not memo.est_ignoree(base / "range" / "a.mp4", base / "range" / "b.mp4"),
           "une vidéo supprimée pour de bon est oubliée")
-    check(NotDupes().path.parent == vs_config.APP_DIR,
-          "la mémoire par défaut vit dans le dossier de l'application")
+    check(NotDupes().path.parent == vs_config.PRIVATE_DIR,
+          "la mémoire par défaut vit à côté des favoris, jamais sur un cache partagé")
 
     print("\n[70] La fenêtre tient sur un écran agrandi, le lecteur de côté se ferme")
     # A 200 % sur un ecran de 1080p, il ne reste que 960 sur 540 points.
@@ -3094,6 +3095,66 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
                        "/thumb/" + "0" * 16):
             code, _body, _h = ask(sortie, token)
             check(code == 404, f"« {sortie[:24]}… » ne mène nulle part ({code})")
+
+        # -- un corps n'est jamais laisse dans la connexion ---------------------
+        # Derriere le tunnel, les connexions sont gardees ouvertes et partagees
+        # entre visiteurs : un corps non lu etait relu comme la requete
+        # suivante, celle du proprietaire.
+        import socket as _sock
+
+        def _answer(link):
+            link.settimeout(10)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = link.recv(4096)
+                if not chunk:
+                    return ""
+                data += chunk
+            head, _sep, rest = data.partition(b"\r\n\r\n")
+            length = 0
+            for line in head.split(b"\r\n")[1:]:
+                name, _c, value = line.partition(b":")
+                if name.strip().lower() == b"content-length":
+                    length = int(value.strip() or 0)
+            while len(rest) < length:
+                chunk = link.recv(4096)
+                if not chunk:
+                    break
+                rest += chunk
+            return head.split(b"\r\n")[0].decode("ascii", "replace")
+
+        hidden = "GET /logout HTTP/1.1\r\nX-Rien: "
+        for door in ("/rien", "/api/watching"):
+            link = _sock.create_connection(("127.0.0.1", port), timeout=10)
+            try:
+                link.sendall((f"POST {door} HTTP/1.1\r\nHost: x\r\n"
+                              f"Content-Length: {len(hidden)}\r\n\r\n{hidden}").encode())
+                refused = _answer(link)
+                try:
+                    link.sendall((f"GET /api/folders?start=0&count=1 HTTP/1.1\r\n"
+                                  f"Host: x\r\nCookie: prisme={token}\r\n\r\n").encode())
+                    after = _answer(link)
+                except OSError:
+                    after = "connexion fermée"
+            finally:
+                link.close()
+            check(served.guard.valid(token) and " 200 " in after + " ",
+                  f"un refus sur « {door} » lit son corps : la requête suivante est "
+                  f"servie, la session tient ({refused} puis {after})")
+        link = _sock.create_connection(("127.0.0.1", port), timeout=10)
+        try:
+            link.sendall(b"POST /login HTTP/1.1\r\nHost: x\r\n"
+                         b"Content-Length: 100000\r\n\r\n" + b"x" * 1000)
+            too_big = _answer(link)
+            link.settimeout(5)
+            try:
+                closed = link.recv(1) == b""
+            except OSError:
+                closed = True
+        finally:
+            link.close()
+        check("413" in too_big and closed,
+              f"un corps trop long est refusé et la connexion fermée ({too_big})")
 
         # -- sortir ferme vraiment la session ----------------------------------
         ask("/logout", token)
@@ -3570,7 +3631,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.3)
     first_card = window.board.cards[0]
     window.ratings.set(window.items[0].path, 0)
-    window.board.set_stars(0, window.ratings.set(window.items[0].path, 1))
+    window.ratings.set(window.items[0].path, 1)
     pump(app, 0.2)
     check(first_card.rating.text() == "★" and not first_card.rating.isHidden(),
           f"une carte notée montre sa note ({first_card.rating.text()!r})")
@@ -3786,11 +3847,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           and window.wall.panes[1].player.audioOutput() is None
           and not window.wall.audio.isMuted(),
           "sur le mur, seule la vidéo survolée a le son")
-    # Qt finit d'ouvrir la sortie audio par la boucle d'evenements : arreter
-    # le lecteur dans la meme milliseconde que le branchement l'a deja bloque
-    # pour de bon. A l'ecran, aucun geste ne suit un branchement de si pres.
-    pump(app, 0.3)
+    # Couper aussitot apres le branchement, sans laisser passer la boucle
+    # d'evenements : le mur ne debranche plus rien, il ne fait que couper.
     window.wall.set_muted(True)
+    check(window.wall.panes[0].player.audioOutput() is window.wall.audio
+          and window.wall.audio.isMuted(),
+          "couper le son juste après l'avoir branché : la sortie reste, muette")
     tab_click(TAB_FOLDERS)
 
     print("\n[83] La fiche d'une vidéo est la même page, d'où qu'on vienne")
@@ -3899,12 +3961,18 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           and not fresh.cfg["folder_max"] and not fresh.cfg["orientations"],
           "au lancement : l'onglet Dossiers, sans filtre oublié d'une autre fois")
     from videosorter import media as _media_close
+    from videosorter.index import INDEX as _index_close
+    fresh.show()
+    pump(app, 0.1)
+    shown_before = fresh.isVisible()
     fresh.close()
-    check(_media_close.CLOSING and not fresh.isVisible(),
+    check(shown_before and _media_close.CLOSING and not fresh.isVisible(),
           "fermer masque la fenêtre d'abord, et plus aucun ffmpeg ne part ensuite")
     # En vrai, un seul Prisme par processus : fermer cette fenetre d'essai ne
-    # doit pas couper les outils de celle qui continue les tests.
+    # doit pas couper les outils de celle qui continue les tests, ni lui
+    # laisser un index ferme.
     _media_close.CLOSING = False
+    _index_close.reopen(base / "_appdata" / "index.db")
     fresh.deleteLater()
 
     from videosorter.board import BoardView as _BV
@@ -4256,9 +4324,15 @@ def check_data_safety(app, window, base, root) -> None:
     session._drain()
     later = SessionTrash()
     later.stamp = "20990101-000000"
+    check(later.leftovers(troot) == [] and stored.exists(),
+          "une séance encore ouverte ailleurs garde sa corbeille : l'autre Prisme "
+          "ne la reprend pas, donc ne la détruira pas en se fermant")
+    # Un arret net : le processus lache le fichier qu'il tenait ouvert.
+    session._let_go()
     check((stored.parent / MANIFEST).exists()
           and [e.origin for e in later.leftovers(troot)] == [troot / "Dossier"],
           "après un arrêt net, la séance suivante retrouve la corbeille et son origine")
+    later._let_go()
     real_relocate = _act._relocate
     _act._relocate = lambda *_a: (_ for _ in ()).throw(OSError(5, "Accès refusé"))
     try:
@@ -4309,8 +4383,19 @@ def check_data_safety(app, window, base, root) -> None:
           "des réglages abîmés sont repris de la copie de secours")
 
     from videosorter import perf as _perf
-    check(_perf.HICCUP < 0.2 <= _perf.STALL < 0.8,
-          "le chien de garde relève aussi les à-coups de quelques dixièmes")
+    # Un chien de garde a soi : celui de l'application suit la derniere
+    # fenetre construite, et les fenetres d'essai l'emportent en partant.
+    watch = _perf.Watchdog()
+    watch.start("essai")
+    pump(app, 0.2)
+    hiccups = watch.hiccups
+    time.sleep(0.25)
+    pump(app, 0.2)
+    watch.timer.stop()
+    check(watch.hiccups >= hiccups + 1,
+          "le chien de garde relève aussi les à-coups de quelques dixièmes "
+          f"({hiccups} → {watch.hiccups})")
+    watch.deleteLater()
 
 
 def check_media(app, window, base) -> None:
@@ -5984,10 +6069,14 @@ def check_quiet_and_header(app, window, base, root) -> None:
     if fresh.global_quiet is not None:
         fresh.global_quiet.stop()
     from videosorter import media as _media_fresh
+    from videosorter.index import INDEX as _index_fresh
     fresh.close()
     # Un seul Prisme par processus, en vrai : la fenetre d'essai fermee ne
-    # doit pas couper les outils de celle qui finit les tests.
+    # doit pas couper les outils de celle qui finit les tests, ni fermer
+    # l'index sous elle -- [98] a [105] tournaient index ferme.
     _media_fresh.CLOSING = False
+    _index_fresh.reopen(base / "_appdata" / "index.db")
+    check(_index_fresh.db is not None, "la suite reprend avec l'index ouvert")
     fresh.deleteLater()
     pump(app, 0.3)
 
@@ -6041,8 +6130,11 @@ def check_chosen_features(app, window, base, tri) -> None:
     check(window.index == start + 1
           and window.ratings.get(window.items[start].path) == 1,
           f"cochée, ★ passe à la suivante ({start} → {window.index})")
+    window.ratings.set(window.current.path, 1)
     QTest.keyClick(window, Qt.Key_0)
-    check(window.index == start + 1, "0 retire sans avancer")
+    check(window.index == start + 1
+          and window.ratings.get(window.current.path) == 0,
+          "0 retire le favori, sans avancer")
     window.toggle_advance_after_star()
 
     print("\n[100] Renommer sur place (F2)")
@@ -6063,6 +6155,11 @@ def check_chosen_features(app, window, base, tri) -> None:
     if window._rename_field is not None:
         QTest.keyClick(window._rename_field, Qt.Key_Escape)
     check(window._rename_field is None and old.exists(), "Échap renonce")
+    from videosorter.index import INDEX as _index_f2
+    import sqlite3 as _sq_f2
+    _index_f2.put_probe(old, "1|1", {"duration": 7.0, "width": 320,
+                                     "height": 240, "codec": "h264", "ok": True})
+    _index_f2.commit(force=True)
     QTest.keyClick(window, Qt.Key_F2)
     window.ratings.set(old, 1)
     if window._rename_field is not None:
@@ -6072,6 +6169,14 @@ def check_chosen_features(app, window, base, tri) -> None:
     new = old.with_name("nouveau nom" + old.suffix)
     check(new.exists() and not old.exists(),
           f"renommée sur le disque, l'extension gardée ({new.name})")
+    _con = _sq_f2.connect(_index_f2.path)
+    try:
+        in_base = {row[0] for row in _con.execute(
+            "SELECT path FROM probes WHERE path IN (?, ?)", (str(old), str(new)))}
+    finally:
+        _con.close()
+    check(in_base == {str(new)},
+          f"et l'index le suit dans la base, validé aussitôt ({len(in_base)} ligne)")
     check(window.current is item and Path(item.path) == new
           and window.ratings.get(new) == 1,
           "la fiche et le favori suivent")
@@ -6127,6 +6232,12 @@ def check_chosen_features(app, window, base, tri) -> None:
     pump(app, 0.2)
     check(len(window.items) == 3 and NOT_DUPES.est_ignoree(clips[3], clips[4]),
           "« Pas des doublons » retire le groupe et le retient")
+    window.board.pick_all(True)
+    window.set_tab(TAB_VIDEOS)
+    pump(app, 0.3)
+    check(not window.board.picked_ids,
+          "quitter les doublons emporte leurs coches : dans « Vidéos », plus aucun "
+          "groupe ne protégerait le dernier exemplaire")
     window.set_tab(TAB_FOLDERS)
     pump(app, 0.2)
     check(window.not_dupes_button.isHidden(), "hors des doublons, le geste disparaît")
@@ -6199,6 +6310,576 @@ def check_chosen_features(app, window, base, tri) -> None:
     sheet.deleteLater()
     check("F1" in window.more_button.toolTip(),
           "l'infobulle de ⋯ renvoie à F1 au lieu d'une liste qui vieillit")
+
+
+def check_review_fixes(app, window, base, root, tri) -> None:
+    """Relecture des corrections : ce que chaque constat confirme doit tenir."""
+    import sqlite3 as _sq
+    from PySide6.QtCore import QEvent as _QE, QPointF as _QPF
+    from PySide6.QtGui import QMouseEvent as _QME
+    from PySide6.QtWidgets import QMessageBox as _QMB
+    import videosorter.actions as _act
+    from videosorter import dupes as _dp
+    from videosorter import media as _m
+    from videosorter import stamps as _st
+    from videosorter.dupes import DupeGroup
+    from videosorter.index import INDEX, Index as _Index, _rows_in
+    from videosorter.scan import MODE_FLAT as _FLAT, RefreshThread as _Refresh
+
+    work = base / "relecture"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    model = sorted(tri.rglob("*.mp4"))[0]
+
+    print("\n[106] Doublons de même taille : le contenu tranche, pas la taille")
+    size = 1_500_000
+    lot = work / "coffret"
+    vob_a = lot / "Disque A" / "VIDEO_TS" / "VTS_01_1.VOB"
+    vob_b = lot / "Disque B" / "VIDEO_TS" / "VTS_01_1.VOB"
+    for spot, byte in ((vob_a, b"\x01"), (vob_b, b"\x02")):
+        spot.parent.mkdir(parents=True, exist_ok=True)
+        spot.write_bytes(byte * size)
+    for spot, seconds in ((vob_a, 1500.0), (vob_b, 95.0)):
+        INDEX.put_probe(spot, "", {"duration": seconds, "width": 720, "height": 576,
+                                   "codec": "mpeg2video", "ok": True})
+    pairs = [(vob_a, size), (vob_b, size)]
+    check(_dp.group_by_size(pairs, minimum=1, ignored=()) == [],
+          "même taille mais durées connues sans rapport : pas un groupe")
+    INDEX.forget_tree(str(lot))
+    unsure = _dp.group_by_size(pairs, minimum=1, ignored=())
+    check(len(unsure) == 1 and not unsure[0].sure and unsure[0].to_check == [],
+          "durées inconnues : « à comparer », rien de coché d'office")
+    confirmed = _dp.confirm_by_content(unsure)
+    check(confirmed == [],
+          "contenus différents : pas des doublons, rien n'est proposé ni coché")
+    real_key = _dp.content_key
+    _dp.content_key = lambda _path, _size: None
+    try:
+        blind = _dp.confirm_by_content(unsure)
+    finally:
+        _dp.content_key = real_key
+    check(len(blind) == 1 and not blind[0].sure and blind[0].to_check == [],
+          "illisibles (NAS muet) : « à comparer », rien de coché")
+    twin_a = lot / "un" / "film.mp4"
+    twin_b = lot / "deux" / "film.mp4"
+    for spot in (twin_a, twin_b):
+        spot.parent.mkdir(parents=True, exist_ok=True)
+        spot.write_bytes(b"\x07" * 700_000 + b"\x08" * (size - 700_000))
+    sure = _dp.confirm_by_content(
+        _dp.group_by_size([(twin_a, size), (twin_b, size)], minimum=1, ignored=()))
+    check(len(sure) == 1 and sure[0].sure and len(sure[0].to_check) == 1,
+          "de vraies copies (mêmes octets) : sûres, l'une cochée d'office")
+    got = {}
+    scan = _dp.DuplicateScan(lot, True)
+    scan.found.connect(lambda groups: got.update(groups=groups))
+    scan.start()
+    check(wait_for(app, lambda: "groups" in got, 60), "la recherche « même taille » aboutit")
+    scan.wait(5000)
+    verdicts = sorted((group.sure, sorted(p.name for p in group.paths))
+                      for group in got.get("groups", []))
+    check(verdicts == [(True, ["film.mp4", "film.mp4"])],
+          f"de bout en bout : les copies sûres, les parties de DVD écartées ({verdicts})")
+
+    print("\n[107] Doublons d'après les empreintes : un chemin disparu n'est pas « à garder »")
+    films = work / "Films"
+    real = films / "Rangees" / "Action" / "film.mp4"
+    copy = films / "Rangees" / "Action2" / "film.mp4"
+    ghost = films / "film.mp4"
+    for spot in (real, copy):
+        spot.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(model, spot)
+    for spot in (ghost, real, copy):
+        INDEX.put_probe(spot, "", {"duration": 7.0, "width": 320, "height": 240,
+                                   "codec": "h264", "ok": True})
+    INDEX.put_sig(ghost, "1|1|v2", [1, 2, 3, 4], 10)
+    weight = real.stat().st_size
+    group = DupeGroup([ghost, real, copy], [weight] * 3, sure=True)
+    check(Path(group.keep) == ghost, "(le chemin fantôme, le plus court, passerait devant)")
+    kept = _dp.present_only([group])
+    check(len(kept) == 1 and Path(kept[0].keep) == real
+          and ghost not in [Path(p) for p in kept[0].paths]
+          and kept[0].to_check == [copy],
+          "on vérifie chaque membre : le fantôme sort, la vraie copie est gardée")
+    check(INDEX.sig_stamp(ghost) is None, "et son empreinte est oubliée de l'index")
+    check(_dp.present_only([DupeGroup([ghost, real], [weight] * 2)]) == [],
+          "un groupe qui n'a plus qu'un exemplaire disparaît")
+
+    print("\n[108] Les ffmpeg des empreintes obéissent aux arrêts")
+    calls = []
+    real_spawn = _m._spawn
+
+    def _record(cmd, timeout, binary=False):
+        calls.append((cmd, binary))
+        return None, b"", b"", "tue"
+    _m._spawn = _record
+    try:
+        image, broken = _dp._grab(real, 1.0, 160)
+    finally:
+        _m._spawn = real_spawn
+    check(len(calls) == 1 and calls[0][1] and image is None and broken,
+          "une image d'empreinte passe par le lanceur commun : ranger, arrêter ou "
+          "fermer l'arrête net")
+    stopper = _dp.SignatureScan(work, 160)
+    stopper.stop()
+    _m._LOCAL.owner = stopper._owner
+    try:
+        started = time.perf_counter()
+        _code, _out, _err, why = _m._spawn(
+            [sys.executable, "-c", "import time; time.sleep(5)"], 10)
+        spent = time.perf_counter() - started
+    finally:
+        _m._LOCAL.owner = None
+    check(why == "tue" and spent < 1.0,
+          f"arrêter les empreintes : plus aucun ffmpeg ne part ({why}, {spent:.2f} s)")
+    held = work / "tenu.mp4"
+    shutil.copy2(model, held)
+    _m.release_reads(held, 1.5)
+    try:
+        started = time.perf_counter()
+        with _m._Reading(held):
+            _code, _out, _err, why = _m._spawn([sys.executable, "-c", "print(1)"], 10)
+        spent = time.perf_counter() - started
+    finally:
+        _m.unblock(held)
+    check(why == "tue" and spent < 0.5,
+          f"un fichier qu'on range n'est pas ouvert : on renonce sans attendre "
+          f"la fin du blocage ({spent:.2f} s)")
+    key = str(held)
+    _m._MISSED.pop(key, None)
+    _m._spawn = lambda *_a, **_k: (None, "", "", "tue")
+    try:
+        info = _m._probe(held)
+    finally:
+        _m._spawn = real_spawn
+    check(key not in _m._MISSED and not info.get("ok"),
+          "un ffprobe arrêté exprès (page quittée) n'est pas pris pour une panne")
+    seen_cmds = []
+
+    def _capture(cmd, timeout, binary=False):
+        seen_cmds.append(cmd)
+        return None, "", "", "tue"
+    _m._spawn = _capture
+    try:
+        _m._make_thumb(real, 36.703333, 160, work / "carte.jpg", True)
+    finally:
+        _m._spawn = real_spawn
+    first = seen_cmds[0] if seen_cmds else []
+    asked = float(first[first.index("-ss") + 1]) if "-ss" in first else 0.0
+    check(36.8 < asked < 37.0,
+          f"une carte prise sur un plan saute un peu au-delà de son image-clé "
+          f"({asked:.3f} s pour 36,703 s)")
+
+    print("\n[109] Les vignettes : noms génériques, fichier remplacé, dossier rangé")
+    disc1 = Path("X:/Coffret/Disque 1/VIDEO_TS/VTS_01_1.VOB")
+    disc2 = Path("X:/Coffret/Disque 2/VIDEO_TS/VTS_01_1.VOB")
+    check(_m._thumb_key(disc1, "5|9", 20.0, 480) != _m._thumb_key(disc2, "5|9", 20.0, 480),
+          "deux VTS_01_1.VOB de disques différents ne partagent plus leurs images")
+    check(_m._thumb_key(Path("X:/A/film.mp4"), "5|9", 20.0, 480)
+          == _m._thumb_key(Path("X:/B/Rangees/film.mp4"), "5|9", 20.0, 480),
+          "un nom ordinaire garde ses images en changeant de dossier")
+    from videosorter.scan import human_size as _hs
+    check(_hs(2048) == "2,0 Ko" and _hs(5) == "5 o",
+          f"les poids s'écrivent à la française ({_hs(2048)})")
+    replaced = work / "remplace"
+    replaced.mkdir()
+    victim = replaced / "clip.mp4"
+    shutil.copy2(model, victim)
+    INDEX.put_probe(victim, "1|999", {"duration": 99.0, "width": 10, "height": 10,
+                                      "codec": "h264", "ok": True})
+    _st._STAMPS.pop(str(victim), None)
+    rereader = _Refresh(replaced, _FLAT, known_ids=["un", "deux"])
+    rereader.run()
+    check(rereader.known_ids == [],
+          "une relecture finie ne garde pas la liste de ce que la fenêtre montrait")
+    stat = victim.stat()
+    check(_st.stamp_of(victim) == f"{int(stat.st_mtime)}|{stat.st_size}",
+          "l'analyse retient la taille et la date relues : un fichier remplacé "
+          "n'hérite plus de l'empreinte de l'ancien")
+    carried = work / "porter"
+    source = carried / "A" / "Disque"
+    source.mkdir(parents=True)
+    moving = source / "clip.mp4"
+    shutil.copy2(model, moving)
+    stamp = _st.stamp_of(moving)
+    # Connue de l'index seul, comme au lancement : la memoire de la seance
+    # ne la connait pas.
+    _st._STAMPS.pop(str(moving), None)
+    INDEX.put_probe(moving, stamp, {"duration": 100.0, "width": 320, "height": 240,
+                                    "codec": "h264", "ok": True})
+    INDEX.put_scenes(moving, stamp, [37.0, 64.0])
+    moments = _m._moments_for(str(moving), INDEX.probe(moving))
+    for ts in moments:
+        legacy = _m._legacy_key(str(moving), stamp, ts, 480)
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_bytes(b"jpeg")
+    _m._WIDTHS.add(480)
+    moved = _act.move_to(source, carried / "B")
+    count = _m.relocate_thumbs(source, moved)
+    arrived = moved / "clip.mp4"
+    found = sum(1 for ts in moments if _m._thumb_key(arrived, stamp, ts, 480).exists())
+    check(count > 0 and found == len(moments),
+          f"un dossier rangé emporte toutes les vignettes de ses vidéos "
+          f"({found}/{len(moments)})")
+
+    print("\n[110] L'index : écritures validées, copies qui gardent la plus grosse")
+    lazy = _Index(work / "differe" / "index.db")
+    lazy.commit(force=True)
+    lazy.put_probe("C:/x/v.mp4", "1|2", {"duration": 1.0, "ok": True})
+
+    def _rows():
+        con = _sq.connect(lazy.path)
+        try:
+            return con.execute("SELECT COUNT(*) FROM probes").fetchone()[0]
+        finally:
+            con.close()
+    before = _rows()
+    pump(app, lazy.COMMIT_AFTER + 0.8)
+    check(before == 0 and _rows() == 1,
+          "une écriture isolée est validée d'elle-même peu après, sans attendre la suivante")
+    lazy.close()
+    spot = work / "rotation" / "index.db"
+    idx = _Index(spot)
+    idx.rebuilt = False
+
+    def _fill(count):
+        idx.db.execute("DELETE FROM folders")
+        idx.db.executemany("INSERT INTO folders(id, path, sig) VALUES(?,?,?)",
+                           [(f"C:/r/{i}", f"C:/r/{i}", "s") for i in range(count)])
+        idx.db.commit()
+
+    def _day():
+        con = _sq.connect(spot.as_uri() + "?mode=ro", uri=True)
+        try:
+            idx._write_backup(con)
+        finally:
+            con.close()
+    main_copy, prev_copy = idx._backups()
+    _fill(4000)
+    _day()
+    _day()
+    _fill(400)
+    for _ in range(3):
+        _day()
+    kept_rows = sorted([_rows_in(main_copy), _rows_in(prev_copy)])
+    check(kept_rows == [400, 4000],
+          f"trois jours d'index amaigri : la grosse copie est toujours là ({kept_rows})")
+    _fill(3000)
+    _day()
+    check(_rows_in(main_copy) == 3000,
+          "et la rotation reprend une fois l'index revenu")
+    idx.close()
+
+    print("\n[111] La corbeille de session dit ce qui arrivera vraiment")
+    from videosorter.trash import SessionTrash as _Trash, TrashEntry, _STAMP
+    from videosorter.widgets import TrashDialog as _Dialog, trash_fate
+    nas = [TrashEntry(origin=Path(r"\\nas\v\a.mp4"),
+                      stored=Path(r"\\nas\v\.videosorter-corbeille\s\a.mp4"))]
+    here = [TrashEntry(origin=work / "a.mp4", stored=work / "s" / "a.mp4")]
+    check("détruit définitivement" in trash_fate(nas, "recycle")
+          and "corbeille de Windows" not in trash_fate(nas, "recycle"),
+          "sur le NAS : détruit définitivement à la fermeture, et non « la corbeille de Windows »")
+    check("corbeille de Windows" in trash_fate(here, "recycle")
+          and "détruit" in trash_fate(here, "permanent")
+          and "secours" in trash_fate(here, "local_trash"),
+          "en local, selon le réglage : corbeille de Windows, destruction, dossier de secours")
+    shown = _Trash()
+    shown.entries = list(here)
+    dialog = _Dialog(shown, window)
+    check("secours" in dialog.summary.text(),
+          "la boîte suit le réglage de la fenêtre")
+    dialog.deleteLater()
+    check(bool(_STAMP.match(shown.stamp)),
+          f"le dossier de séance porte le nom de la machine ({shown.stamp})")
+
+    print("\n[112] La fiche : double-clic venu d'ailleurs, réserve, vidéo suivante")
+    folder = fresh_root(app, window, base, tri, "relecture-fiche", 5)
+    window.toggle_board(True)
+    pump(app, 0.4)
+    sp = window.single
+    wanted = []
+
+    def _cinema():
+        wanted.append(True)
+    sp.cinemaRequested.connect(_cinema)
+    window.on_board_open(0)
+    pump(app, 0.2)
+    double = _QME(_QE.MouseButtonDblClick, _QPF(100, 50), _QPF(100, 50), Qt.LeftButton,
+                  Qt.LeftButton, Qt.NoModifier)
+    sp._double_click(double)
+    pump(app, 0.2)
+    check(not wanted and not window.cinema,
+          "ouvrir une vidéo d'un double-clic sur sa carte ne la passe pas en plein écran")
+    sp.cinemaRequested.disconnect(_cinema)
+    from videosorter.widgets import PreviewGrid as _Grid
+    grid = _Grid()
+    grid.resize(600, 300)
+    grid.show()
+    pump(app, 0.1)
+    grid.tiles[0].video = str(real)
+    center = grid.tiles[0].geometry().center()
+    played = []
+    grid.playRequested.connect(lambda video, _ts: played.append(video))
+
+    def _mouse(kind):
+        return _QME(kind, _QPF(center), _QPF(center), Qt.LeftButton,
+                    Qt.LeftButton if kind != _QE.MouseButtonRelease else Qt.NoButton,
+                    Qt.NoModifier)
+    grid.mouseDoubleClickEvent(_mouse(_QE.MouseButtonDblClick))
+    grid.mouseReleaseEvent(_mouse(_QE.MouseButtonRelease))
+    first_try = list(played)
+    grid.mousePressEvent(_mouse(_QE.MouseButtonPress))
+    grid.mouseReleaseEvent(_mouse(_QE.MouseButtonRelease))
+    check(first_try == [] and played == [str(real)],
+          "sur la grille d'un dossier, seul un clic commencé sur elle ouvre une vidéo")
+    grid.close()
+    grid.deleteLater()
+
+    window.toggle_board(False)
+    window.show_item(0)
+    pump(app, 0.4)
+    check(sp.spare.path == str(window.items[1].path), "la suivante part en réserve")
+    window.show_item(3)
+    deferred = sp.spare.path == str(window.items[1].path)
+    pump(app, 0.4)
+    check(deferred and sp.spare.path == str(window.items[4].path),
+          "une réserve déjà chargée n'est remplacée qu'après la peinture de la fiche")
+    order = []
+    old_deck = sp.decks[sp._active]
+    spare_deck = sp.spare
+    real_clear = old_deck.clear
+    old_deck.clear = lambda: (order.append("vider"), real_clear())
+    real_play = spare_deck.player.play
+    spare_deck.player.play = lambda: (order.append("lancer"), real_play())
+    try:
+        window.show_item(4)
+    finally:
+        del old_deck.clear
+        del spare_deck.player.play
+    check(order[:2] == ["vider", "lancer"],
+          f"vidéo suivante : l'ancienne est vidée avant que la suivante parte ({order})")
+    pump(app, 0.2)
+
+    print("\n[112b] Mur : le son passe d'un panneau à l'autre sans rien rebrancher")
+    from PySide6.QtMultimedia import QMediaPlayer as _QMP2
+    from PySide6.QtWidgets import QVBoxLayout as _QVB, QWidget as _QW
+    from videosorter.split import SplitWall as _Wall
+    host = _QW()
+    host.resize(900, 400)
+    wall = _Wall(2, 5, host)
+    _QVB(host).addWidget(wall)
+    host.show()
+    pump(app, 0.2)
+    wall.watch_timer.stop()
+    wall_clips = [str(p) for p in sorted(folder.glob("*.mp4"))]
+    for pane, clip in zip(wall.panes, wall_clips):
+        pane.play(clip)
+    wait_for(app, lambda: all(p.player.playbackState()
+                              == _QMP2.PlaybackState.PlayingState for p in wall.panes), 20)
+    wall.set_muted(False)
+    wall.watch_timer.stop()
+    first, second = wall.panes
+    check(first.audio is None and second.audio is None,
+          "son actif mais rien d'entendu : aucune sortie ouverte")
+    wall._hear(first)
+    own = first.audio
+    wall._hear(second)
+    check(own is not None and first.audio is own and first.player.audioOutput() is own
+          and own.isMuted() and second.player.audioOutput() is second.audio
+          and not second.audio.isMuted(),
+          "passer d'un panneau à l'autre coupe l'un et rend le son à l'autre, "
+          "sans rien débrancher")
+    wall._hear(first)
+    check(first.player.audioOutput() is own and not own.isMuted()
+          and second.audio.isMuted(),
+          "au retour, le premier retrouve sa propre sortie")
+    wall.set_pane_count(3)
+    third = wall.panes[2]
+    third.play(wall_clips[2])
+    wait_for(app, lambda: third.player.playbackState()
+             == _QMP2.PlaybackState.PlayingState, 20)
+    started = time.perf_counter()
+    wall._hear(third)
+    third.clear()
+    wall.set_muted(True)
+    spent = time.perf_counter() - started
+    check(third.video_path == "" and third.audio is not None and third.audio.isMuted()
+          and all(p.audio is None or p.audio.isMuted() for p in wall.panes),
+          f"brancher le son puis vider le panneau dans le même tour : rien ne "
+          f"bloque ({spent:.2f} s)")
+    wall.stop()
+    host.close()
+    host.deleteLater()
+    pump(app, 0.2)
+
+    print("\n[113] Planche : l'étoile d'une carte survolée n'est plus doublée")
+    window.toggle_board(True)
+    pump(app, 0.3)
+    card = window.board.cards[0]
+    card.set_stars(1)
+    card.set_hovered(True)
+    hidden_under = card.rating.isHidden()
+    card.set_stars(1)
+    still_hidden = card.rating.isHidden()
+    card.set_hovered(False)
+    check(hidden_under and still_hidden and not card.rating.isHidden(),
+          "survolée, la pastille de la carte laisse la place à l'étoile flottante")
+    card.set_stars(0)
+
+    print("\n[114] Fil d'Ariane étroit : le parent reste lisible")
+    from videosorter.header import _Crumb, _elided
+    parent = _Crumb("Anniversaire")
+    parent.setStyleSheet(window.styleSheet())
+    # La police du dessin est celle d'apres la feuille de style.
+    parent.ensurePolished()
+    metrics = parent.fontMetrics()
+    margins = parent.natural() - metrics.horizontalAdvance(parent.text())
+    shown_text = _elided(parent.text(), metrics, parent.floor() - margins)
+    check(len(shown_text) >= 3 and shown_text.startswith("A") and shown_text.endswith("e"),
+          f"au plus étroit, « Anniversaire » garde son début et sa fin ({shown_text!r})")
+    short = _Crumb("root")
+    check(short.floor() == short.natural(), "« root » reste entier : un pixel ne vaut pas « r…t »")
+    parent.deleteLater()
+    short.deleteLater()
+    from PySide6.QtWidgets import QPushButton as _QPB
+    tips = [button.toolTip() for button in window.wall.controls.findChildren(_QPB)]
+    check(any("Le mur seul" in tip and "F11" in tip for tip in tips),
+          "le bouton plein écran du mur rappelle F11")
+    from videosorter.widgets import CommandBar as _Bar
+    check(not hasattr(_Bar, "rateRequested"),
+          "plus de signal de note orphelin dans la barre de commandes")
+    from PySide6.QtGui import QKeyEvent as _QKE
+    from videosorter.window import PAGE_QUIET as _QUIET
+    window.cfg["quiet_explained"] = True
+    window.enter_quiet()
+    pump(app, 0.2)
+    QApplication.sendEvent(window.quiet_page, _QKE(_QE.KeyPress, Qt.Key_Escape,
+                                                   Qt.NoModifier, "", True))
+    held = window.stack.currentIndex() == _QUIET
+    QApplication.sendEvent(window.quiet_page, _QKE(_QE.KeyPress, Qt.Key_Escape,
+                                                   Qt.NoModifier))
+    pump(app, 0.2)
+    check(held and window.stack.currentIndex() != _QUIET,
+          "Échap encore tenu ne fait pas ressortir du repli ; un nouvel appui, si")
+    import subprocess as _sp
+    probe_env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    loaded = _sp.run(
+        [sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); "
+         "import videosorter.window; print('rapidfuzz' in sys.modules)",
+         str(Path(__file__).resolve().parents[1])],
+        capture_output=True, text=True, env=probe_env, timeout=120)
+    check(loaded.stdout.strip() == "False",
+          f"rapidfuzz ne se charge plus au lancement ({loaded.stdout.strip() or loaded.stderr[-80:]})")
+    import pathlib as _pl
+    shelf = tri / "+relecture"
+    shelf.mkdir(exist_ok=True)
+    window.tree.set_root(str(tri))
+    wait_for(app, lambda: window.tree.model.index(str(shelf)).isValid(), 10)
+    stats = []
+    real_is_dir = _pl.Path.is_dir
+    _pl.Path.is_dir = lambda self, *a, **k: (stats.append(str(self)), real_is_dir(self, *a, **k))[1]
+    chosen = []
+    window.tree.folderChosen.disconnect()
+    window.tree.folderChosen.connect(chosen.append)
+    try:
+        window.tree._on_clicked(window.tree.model.index(str(shelf)))
+    finally:
+        _pl.Path.is_dir = real_is_dir
+        window.tree.folderChosen.disconnect()
+        window.tree.folderChosen.connect(window.on_tree_folder)
+    check(chosen and Path(chosen[0]) == shelf and not stats,
+          "un clic dans l'arborescence ne relit plus le disque pour savoir si c'est un dossier")
+
+    print("\n[115] Décodage et fermeture")
+    import main as _main
+    env = {}
+    _main._pick_decoding(env, False)
+    kept_env = {_main.DECODING_VARIABLE: "d3d11va"}
+    _main._pick_decoding(kept_env, False)
+    hard = {}
+    _main._pick_decoding(hard, True)
+    check(env.get(_main.DECODING_VARIABLE) == "," and not hard
+          and kept_env[_main.DECODING_VARIABLE] == "d3d11va"
+          and window.cfg["hw_decoding"] is False,
+          "par défaut le processeur décode (plus de gel au survol), "
+          "« hw_decoding » rend la carte graphique")
+
+    class _Fake:
+        def __init__(self, busy, beats):
+            self.transfers = type("T", (), {"busy": busy})()
+            self.beats = beats
+
+        def findChildren(self, _kind):
+            self.beats -= 1
+            return [type("Q", (), {"isRunning": lambda _s: True})()] if self.beats > 0 else []
+    started = time.perf_counter()
+    _main._leave_now_if_stuck(app, _Fake(False, 3), 0)
+    _main._leave_now_if_stuck(app, _Fake(True, 99), 0)
+    check(time.perf_counter() - started < 1.0,
+          "un fil qui finit à temps, ou un transfert en vol : on sort normalement")
+
+    # R40 : une vraie fermeture, sur une fenetre montree, un Suppr en vol.
+    closing = fresh_root(app, window, base, tri, "relecture-fermeture", 3)
+    fresh = MainWindow(window.cfg)
+    fresh.resize(900, 600)
+    fresh.show()
+    fresh.start_root(closing)
+    wait_for(app, lambda: not fresh.scanning and len(fresh.items) == 3, 60)
+    fresh.toggle_board(True)
+    pump(app, 0.3)
+    target = fresh.items[0]
+    doomed = Path(target.path)
+    fresh.ratings.set(doomed, 1)
+    real_move = _act.move_to
+    warned = []
+    real_warning = _QMB.warning
+
+    def _slow(src, dest):
+        time.sleep(1.2)
+        return real_move(src, dest)
+    _act.move_to = _slow
+    _QMB.warning = staticmethod(lambda *a, **k: warned.append(a[2] if len(a) > 2 else ""))
+    try:
+        fresh.board.picked_ids.add(target.item_id)
+        fresh.delete_picked()
+        pump(app, 0.1)
+        started = time.perf_counter()
+        fresh.close()
+        spent = time.perf_counter() - started
+    finally:
+        _act.move_to = real_move
+        _QMB.warning = real_warning
+        _m.CLOSING = False
+        INDEX.reopen(base / "_appdata" / "index.db")
+    from videosorter.ratings import Ratings as _Ratings
+    import videosorter.ratings as _ratings_mod
+    reread = _Ratings(path=Path(_ratings_mod.RATINGS_PATH))
+    check(not doomed.exists() and not (closing / ".videosorter-corbeille").exists()
+          and fresh.trash.flush_result == (1, "") and not warned,
+          f"fermer pendant un Suppr : le transfert finit, puis la corbeille se vide "
+          f"({fresh.trash.flush_result}, {spent:.1f} s)")
+    check(not any(str(closing) in key for key in reread.data)
+          and spent < fresh.CLOSE_TRANSFER_WAIT_S,
+          "le favori de ce qui est détruit est oublié, sans attendre le délai de secours")
+    fresh.deleteLater()
+    pump(app, 0.2)
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+
+    print("\n[116] Mémoire « pas des doublons » : un fichier abîmé ne fait rien perdre")
+    from videosorter.dupes_memory import NotDupes
+    memo_path = work / "memo" / "pas-doublons.json"
+    first_memo = NotDupes(memo_path)
+    first_memo.ignorer("C:/a.mp4", "C:/b.mp4")
+    NotDupes(memo_path).snapshot()             # la copie de secours du lancement
+    memo_path.write_text("{abîmé", encoding="utf-8")
+    again = NotDupes(memo_path)
+    check(again.est_ignoree("C:/a.mp4", "C:/b.mp4") and again.problem
+          and list(memo_path.parent.glob("pas-doublons.abime-*.json")),
+          "abîmé : mis de côté, la copie de secours reprise")
+    again.ignorer("C:/c.mp4", "C:/d.mp4")
+    last = NotDupes(memo_path)
+    check(last.est_ignoree("C:/a.mp4", "C:/b.mp4") and last.est_ignoree("C:/c.mp4", "C:/d.mp4"),
+          "et la décision suivante s'ajoute aux anciennes au lieu de les écraser")
 
 
 def _transfer_for_test(src, dest):
@@ -6424,6 +7105,7 @@ def main() -> int:
     check_navigation(app, window, base)
     check_quiet_and_header(app, window, base, root)
     check_chosen_features(app, window, base, tri)
+    check_review_fixes(app, window, base, root, tri)
 
     window.close()
     pump(app, 0.3)

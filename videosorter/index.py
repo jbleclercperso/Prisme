@@ -191,6 +191,8 @@ class Index:
         # l'index, mais on sait qu'il n'a pas tout retenu.
         self.problem = ""
         self.last_commit = time.monotonic()
+        # La validation differee qui suit une ecriture isolee (voir _touched).
+        self._flush_timer = None
         # Les sondages ffprobe tiennent en memoire : ils sont consultes des
         # dizaines de milliers de fois par tri (durees, resolutions, filtres) et
         # une requete par consultation couterait plus que le service rendu.
@@ -375,9 +377,19 @@ class Index:
 
     def _write_backup(self, con: sqlite3.Connection) -> None:
         """Deux generations, a cote : si l'index se perdait, on repartirait
-        d'hier et non de zero. Une copie bien plus petite que la precedente
-        ne chasse pas la plus grosse -- c'est la signature d'un index vide."""
-        if self.rebuilt or con.execute("SELECT COUNT(*) FROM folders").fetchone()[0] == 0:
+        d'hier et non de zero.
+
+        Un index soudain amaigri -- moins de la moitie des dossiers de la
+        plus grosse copie -- ressemble a une perte plus qu'a un menage : la
+        plus grosse copie est alors gelee dans `.sauvegarde-1`, et seule
+        `.sauvegarde` suit l'index, jusqu'a ce qu'il ait retrouve au moins la
+        moitie de ses dossiers. On compte les dossiers et non les octets : le
+        fichier ne rapetisse pas quand on en retire des lignes. L'ancienne
+        regle comparait les tailles a la seule copie de la veille, si bien que
+        la bonne copie disparaissait des le deuxieme jour.
+        """
+        rows = con.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
+        if self.rebuilt or rows == 0:
             return          # un index vide ou refait ne remplace pas une vraie copie
         main, prev = self._backups()
         tmp = Path(str(main) + ".tmp")
@@ -389,12 +401,11 @@ class Index:
                 con.backup(target)
             finally:
                 target.close()
-            size = tmp.stat().st_size
-            if main.exists():
-                main_size = main.stat().st_size
-                small = size < main_size / 2
-                keep_prev = small and prev.exists() and prev.stat().st_size >= main_size
-                if not keep_prev:
+            in_main, in_prev = _rows_in(main), _rows_in(prev)
+            if in_main is not None:
+                frozen = (in_prev is not None and in_prev > in_main
+                          and rows < in_prev / 2)
+                if not frozen:
                     os.replace(main, prev)
             os.replace(tmp, main)
         except (OSError, sqlite3.Error):
@@ -732,6 +743,26 @@ class Index:
         if (self.pending >= self.COMMIT_EVERY
                 or now - self.last_commit >= self.COMMIT_AFTER):
             self.commit()
+            return
+        self._arm_flush()
+
+    def _arm_flush(self) -> None:
+        """Valide un peu plus tard ce qui vient d'etre ecrit.
+
+        Sans cela, une ecriture isolee (un rangement, une empreinte) ne se
+        validait qu'a l'ecriture suivante -- parfois jamais : un arret net
+        la perdait, et l'index gardait la video a son ancien chemin.
+        """
+        if self._flush_timer is not None:
+            return
+        timer = threading.Timer(self.COMMIT_AFTER, self._flush_later)
+        timer.daemon = True
+        self._flush_timer = timer
+        timer.start()
+
+    def _flush_later(self) -> None:
+        self._flush_timer = None
+        self.commit()
 
     def commit(self, force: bool = False) -> None:
         with self.lock:
@@ -922,6 +953,9 @@ class Index:
             except sqlite3.Error:
                 return moved
             self._touched()
+        # Un rangement est rare et precieux : valide tout de suite, un arret
+        # net juste apres ne laisse pas la video a son ancien chemin.
+        self.commit(force=True)
         return moved
 
     def forget_tree(self, path) -> None:
@@ -1206,6 +1240,27 @@ class Index:
             return self.path.stat().st_size
         except OSError:
             return 0
+
+
+def _rows_in(copy: Path) -> int | None:
+    """Nombre de dossiers d'une copie de l'index : None si elle n'existe pas,
+    0 si elle ne se lit pas."""
+    if not copy.exists():
+        return None
+    try:
+        con = sqlite3.connect(Path(copy).as_uri() + "?mode=ro", uri=True,
+                              timeout=2.0)
+    except (sqlite3.Error, ValueError, OSError):
+        return 0
+    try:
+        return int(con.execute("SELECT COUNT(*) FROM folders").fetchone()[0])
+    except sqlite3.Error:
+        return 0
+    finally:
+        try:
+            con.close()
+        except sqlite3.Error:
+            pass
 
 
 def _rekey(table: dict, old: str, new: str) -> int:

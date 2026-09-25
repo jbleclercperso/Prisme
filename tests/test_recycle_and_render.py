@@ -6,9 +6,14 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
+# Avant tout import de Prisme : la fenetre ouvre index, reglages et favoris,
+# qui doivent etre ceux d'un bac a sable, jamais ceux de l'utilisateur.
+os.environ.setdefault("PRISME_SANDBOX",
+                      os.path.join(tempfile.gettempdir(), "prisme-tests-rendu"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

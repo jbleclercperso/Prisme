@@ -211,11 +211,14 @@ def known_media(item) -> tuple:
 
 
 def human_size(num: float) -> str:
+    """Un poids lisible, a la francaise : « 2,4 Go » et non « 2.4 Go »."""
     for unit in ("o", "Ko", "Mo", "Go", "To"):
         if num < 1024 or unit == "To":
-            return f"{num:.0f} {unit}" if unit == "o" else f"{num:.1f} {unit}"
+            if unit == "o":
+                return f"{num:.0f} {unit}"
+            return f"{num:.1f} {unit}".replace(".", ",")
         num /= 1024
-    return f"{num:.1f} To"
+    return f"{num:.1f} To".replace(".", ",")
 
 
 def human_duration(seconds: float) -> str:
@@ -945,6 +948,15 @@ class RefreshThread(QThread):
         return signature(path, stamps.get(str(path)) if stamps else None)
 
     def run(self) -> None:
+        try:
+            self._run()
+        finally:
+            # Ce que la fenetre montrait : cent mille identifiants qui ne
+            # servent plus. Une relecture arretee, qui n'annonce pas sa fin,
+            # les gardait aussi longtemps que le fil lui-meme.
+            self.known_ids = []
+
+    def _run(self) -> None:
         import time as _time
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -986,6 +998,14 @@ class RefreshThread(QThread):
         except RootUnreadable as exc:
             self._unreachable(mode, exc, INDEX)
             return
+        if mode != MODE_FOLDERS and stamps:
+            # Taille et date de chaque video, relevees gratuitement par
+            # l'enumeration : sans elles, l'empreinte retenue par l'index
+            # l'emportait sur le disque, et une video remplacee sur place
+            # gardait l'ancienne vignette et l'ancienne duree.
+            from .stamps import remember
+            for key, pair in list(stamps.items()):
+                remember(key, pair[0], pair[1])
         if self._stop:
             INDEX.commit(force=True)
             return

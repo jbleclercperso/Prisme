@@ -1,9 +1,14 @@
-"""Recherche de doublons, sans relire un octet des vidéos.
+"""Recherche de doublons, en relisant le moins d'octets possible.
 
 Deux fichiers vidéo de taille rigoureusement identique, à l'octet près, sont
-presque toujours le même fichier : les formats compressés ne produisent pas deux
-fois la même longueur par hasard. La taille est donc le premier tri, et elle ne
-coûte rien — l'énumération d'un répertoire la rapporte déjà.
+souvent le même fichier : la taille est donc le premier tri, et elle ne coûte
+rien — l'énumération d'un répertoire la rapporte déjà. Souvent, pas toujours :
+les parties d'un DVD (VTS_01_1.VOB, VTS_01_2.VOB…) et les segments d'une
+caméra ont tous la même taille. Avant d'annoncer un groupe comme sûr — donc
+d'en cocher d'office les exemplaires en trop —, on compare trois petits blocs
+de chaque membre (début, milieu, fin) : ce qui diffère n'est pas un doublon.
+Un groupe qu'on n'a pas pu vérifier est proposé « à comparer », sans rien de
+coché.
 
 Deux encodages d'un même film, eux, n'ont ni la même taille ni les mêmes octets,
 mais les mêmes images : on les compare par empreintes d'image. Là, la durée sert
@@ -21,8 +26,9 @@ qui regarde, et passe par la corbeille de session comme toute suppression.
 """
 from __future__ import annotations
 
+import hashlib
 import os
-import subprocess
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import combinations
@@ -267,6 +273,62 @@ class DupeGroup(tuple):
         return " · ".join(parts) or "identique"
 
 
+# Des noms de segments : les parties d'un meme DVD, d'une meme sequence de
+# camescope, ont toutes la meme taille (le graveur coupe a 1 Go) sans etre le
+# meme fichier. Leur taille seule ne prouve rien.
+_SEGMENT = re.compile(r"^(vts_\d+_\d+\.vob|\d{5}\.(m2ts|mts))$", re.IGNORECASE)
+
+
+def _is_segment(path) -> bool:
+    return bool(_SEGMENT.match(os.path.basename(str(path))))
+
+
+def _split_same_size(paths: list, size: int) -> list:
+    """Les sous-groupes d'un meme casier de taille, sans rien lire.
+
+    Deux membres dont les durees connues (ou les hauteurs connues) different
+    ne sont pas le meme fichier : ils ne partagent jamais un groupe. Les
+    membres a duree inconnue rejoignent le seul sous-groupe qui existe, ou se
+    groupent entre eux. Un sous-groupe n'est « sur » que si toutes ses durees
+    sont connues et concordent, et qu'aucun nom ne trahit un segment
+    (VTS_01_1.VOB) : la taille seule ne prouve rien. `DuplicateScan`
+    confirme ensuite par le contenu.
+    """
+    facts = [_facts(path) for path in paths]
+    known = sorted((i for i in range(len(paths)) if facts[i][2] > 0),
+                   key=lambda i: facts[i][2])
+    clusters: list = []
+    for i in known:
+        duration, height = facts[i][2], facts[i][1]
+        home = None
+        for cluster in clusters:
+            heights = {facts[j][1] for j in cluster if facts[j][1]}
+            # Tries par duree croissante : le dernier membre est le plus proche.
+            if (_same_length(duration, facts[cluster[-1]][2], 0.0)
+                    and (not height or not heights or heights == {height})):
+                home = cluster
+                break
+        if home is None:
+            clusters.append([i])
+        else:
+            home.append(i)
+    unknown = [i for i in range(len(paths)) if facts[i][2] <= 0]
+    if unknown:
+        if len(clusters) == 1:
+            clusters[0].extend(unknown)
+        else:
+            clusters.append(unknown)
+    out = []
+    for cluster in clusters:
+        if len(cluster) < 2:
+            continue
+        members = [paths[i] for i in sorted(cluster)]
+        sure = (all(facts[i][2] > 0 for i in cluster)
+                and not any(_is_segment(path) for path in members))
+        out.append(DupeGroup(members, [size] * len(members), sure=sure))
+    return out
+
+
 def group_by_size(pairs, minimum: int = MIN_SIZE, ignored=None) -> list:
     """Groupes d'au moins deux fichiers partageant exactement une taille.
 
@@ -274,6 +336,9 @@ def group_by_size(pairs, minimum: int = MIN_SIZE, ignored=None) -> list:
     veut les traiter, puisque c'est là que se trouve la place à récupérer.
     `ignored` : les paires declarees « pas des doublons » (voir
     `dupes_memory.pair_test`), la memoire de l'application par defaut.
+
+    Rien n'est lu ici : un groupe n'y est « sur » que sur la foi de l'index
+    (voir `_split_same_size`). `DuplicateScan` le confirme par le contenu.
     """
     from .dupes_memory import NOT_DUPES, filter_groups
     by_size: dict = {}
@@ -281,8 +346,8 @@ def group_by_size(pairs, minimum: int = MIN_SIZE, ignored=None) -> list:
         if size < minimum:
             continue
         by_size.setdefault(size, []).append(path)
-    groups = [DupeGroup(paths, [size] * len(paths))
-              for size, paths in by_size.items() if len(paths) > 1]
+    groups = [group for size, paths in by_size.items() if len(paths) > 1
+              for group in _split_same_size(paths, size)]
     if ignored is None:
         ignored = NOT_DUPES.snapshot()
     if ignored and not hasattr(ignored, "est_ignoree"):
@@ -291,6 +356,99 @@ def group_by_size(pairs, minimum: int = MIN_SIZE, ignored=None) -> list:
         groups = ignored.filtrer_groupes(groups)
     groups.sort(key=lambda group: (-group[0], str(group[1][0]).lower()))
     return groups
+
+
+# Ce qu'on relit de chaque membre d'un groupe de meme taille : trois blocs,
+# au debut, au milieu et a la fin. Deux parties de DVD ou deux segments de
+# camera different des le premier ; deux vraies copies sont identiques
+# partout. Trois petites lectures par membre d'un groupe candidat -- et non
+# par video de la collection.
+CONTENT_BLOCK = 64 * 1024
+CONTENT_WORKERS = 8
+
+
+def content_key(path, size: int) -> str | None:
+    """Empreinte de trois blocs du fichier, ou None s'il n'a pas pu etre lu.
+
+    Signale sa lecture (`media._Reading`) : un rangement attend qu'elle
+    finisse, et un chemin qu'on s'apprete a deplacer n'est pas ouvert.
+    """
+    from . import media
+    key = media._key(path)
+    if media.CLOSING or media._held_until(key):
+        return None
+    size = int(size or 0)
+    spots = sorted({0, max(0, size // 2 - CONTENT_BLOCK // 2),
+                    max(0, size - CONTENT_BLOCK)})
+    digest = hashlib.sha1(str(size).encode("ascii"))
+    try:
+        with media._Reading(path), open(path, "rb", buffering=0) as handle:
+            for spot in spots:
+                handle.seek(spot)
+                digest.update(handle.read(CONTENT_BLOCK))
+    except (OSError, ValueError):
+        return None
+    return digest.hexdigest()
+
+
+def confirm_by_content(groups: list, should_stop=None) -> list:
+    """Ne garde « surs » que les groupes dont les membres ont le meme contenu.
+
+    Les membres identiques forment un groupe sur, dont les exemplaires en
+    trop seront coches d'office : la taille seule avait fait cocher la
+    partie 2 d'un DVD comme copie de sa partie 1. Un membre dont le contenu
+    ne ressemble a aucun autre n'est pas un doublon : il sort -- sans quoi
+    cinquante DVD formaient un groupe de deux cents parties « a comparer ».
+    Ceux qu'on n'a pas pu lire (NAS qui ne repond pas) restent ensemble « a
+    comparer », sans rien de coche.
+    """
+    jobs = sorted({(str(path), group.sizes[at]) for group in groups
+                   for at, path in enumerate(group.paths)})
+    if not jobs:
+        return list(groups)
+    keys: dict = {}
+    with ThreadPoolExecutor(max_workers=CONTENT_WORKERS) as pool:
+        futures = {pool.submit(content_key, path, size): path
+                   for path, size in jobs}
+        for future, path in futures.items():
+            if should_stop is not None and should_stop():
+                pool.shutdown(wait=True, cancel_futures=True)
+                return []
+            try:
+                keys[path] = future.result()
+            except Exception:                           # noqa: BLE001
+                keys[path] = None
+    out = []
+    for group in groups:
+        by_key: dict = {}
+        for at, path in enumerate(group.paths):
+            found = keys.get(str(path))
+            if found is not None:
+                by_key.setdefault(found, []).append(at)
+        twins = [members for members in by_key.values() if len(members) > 1]
+        if len(twins) == 1 and len(twins[0]) == len(group.paths):
+            if group.sure:
+                out.append(group)
+            else:
+                out.append(DupeGroup(group.paths, group.sizes, group.durations,
+                                     sure=True, ranked=True))
+            continue
+        placed = set()
+        for members in twins:
+            placed.update(members)
+            out.append(DupeGroup([group.paths[i] for i in members],
+                                 [group.sizes[i] for i in members],
+                                 [group.durations[i] for i in members],
+                                 sure=True, ranked=True))
+        rest = [at for at in range(len(group.paths))
+                if at not in placed and keys.get(str(group.paths[at])) is None]
+        if len(rest) > 1:
+            out.append(DupeGroup([group.paths[i] for i in rest],
+                                 [group.sizes[i] for i in rest],
+                                 [group.durations[i] for i in rest],
+                                 sure=False, ranked=True))
+    out.sort(key=lambda group: (-group[0], str(group[1][0]).lower()))
+    return out
 
 
 class DuplicateScan(QThread):
@@ -321,7 +479,12 @@ class DuplicateScan(QThread):
                 self.progress.emit(len(pairs))
                 last = now
         self.progress.emit(len(pairs))
-        self.found.emit([] if self._stop else group_by_size(pairs))
+        if self._stop:
+            self.found.emit([])
+            return
+        groups = confirm_by_content(group_by_size(pairs),
+                                    should_stop=lambda: self._stop)
+        self.found.emit([] if self._stop else groups)
 
 
 # ---------------------------------------------------------------------------
@@ -1012,11 +1175,16 @@ def _grab(video: Path, ts: float, width: int) -> tuple:
     Le saut est exact (l'instant demande, pas l'image cle qui le precede) :
     c'est ce qui rend l'empreinte independante de l'encodage. `echec` est
     vrai quand ffmpeg n'a pas pu lire — partage injoignable, delai depasse,
-    fichier abime — et faux quand la video n'a simplement pas d'image a cet
-    instant : le premier se retente, le second non.
+    fichier abime, arret demande — et faux quand la video n'a simplement pas
+    d'image a cet instant : le premier se retente, le second non.
+
+    ffmpeg part par `media._spawn`, comme tous les autres : ranger la video,
+    arreter les empreintes ou fermer Prisme l'arrete net. Lance a part, il
+    tenait le fichier ouvert pendant qu'on le rangeait (« utilise par un
+    autre processus »), et survivait a la fenetre.
     """
     from PySide6.QtGui import QImage
-    from .media import NO_WINDOW, Tools
+    from .media import Tools, _spawn
     if not Tools.ffmpeg:
         return None, True
     head = [Tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
@@ -1026,22 +1194,22 @@ def _grab(video: Path, ts: float, width: int) -> tuple:
     # En-tete abrege d'abord, comme pour les vignettes ; en entier ensuite,
     # pour les rares fichiers qui ne se laissent pas lire autrement.
     for quick in (["-probesize", "2M", "-analyzeduration", "2M"], []):
-        try:
-            proc = subprocess.run(head + quick + seek + tail, capture_output=True,
-                                  timeout=GRAB_TIMEOUT, creationflags=NO_WINDOW)
-        except (OSError, subprocess.SubprocessError):
+        code, out, _err, why = _spawn(head + quick + seek + tail, GRAB_TIMEOUT,
+                                      binary=True)
+        if why == "tue":
+            return None, True
+        if why or code != 0:
             continue
-        if proc.returncode != 0:
-            continue
-        if not proc.stdout:
+        if not out:
             return None, False
-        image = QImage.fromData(proc.stdout, "PPM")
+        image = QImage.fromData(out, "PPM")
         if not image.isNull():
             return image, False
     return None, True
 
 
-def signature_report(video, width: int, shots: int = SHOTS) -> tuple:
+def signature_report(video, width: int, shots: int = SHOTS,
+                     should_stop=None) -> tuple:
     """(empreintes, echecs, essais) pour cette video.
 
     Les instants sont toujours des fractions de la duree, jamais les plans
@@ -1052,8 +1220,11 @@ def signature_report(video, width: int, shots: int = SHOTS) -> tuple:
 
     `echecs` compte les images que la lecture n'a pas pu donner : une
     coupure passagere ne doit pas etre retenue comme « rien d'exploitable ».
+    `should_stop` est consulte avant chaque image : un arret n'attend plus
+    les images restantes.
     """
     from .index import INDEX
+    from . import media
     from .media import Tools, _Reading, probe
 
     video = Path(video)
@@ -1075,8 +1246,13 @@ def signature_report(video, width: int, shots: int = SHOTS) -> tuple:
         moments = [0.0]
     found = []
     failed = 0
+    owner = getattr(media._LOCAL, "owner", None)
     with _Reading(video):
         for ts in moments:
+            if (media.CLOSING or (owner is not None and owner.cancelled)
+                    or (should_stop is not None and should_stop())):
+                failed += 1
+                break
             image, broken = _grab(video, ts, width)
             if broken:
                 failed += 1
@@ -1189,30 +1365,52 @@ class SignatureScan(QThread):
     def __init__(self, root: Path, width: int, skip_hidden: bool = True,
                  parent=None):
         super().__init__(parent)
+        from .media import _Owner
         self.root = Path(root)
         self.width = width
         self.skip_hidden = skip_hidden
         self.failed_count = 0
         self._stop = False
+        # Porte les ffmpeg des empreintes : l'arret les coupe net, au lieu
+        # d'attendre jusqu'a quatre images de vingt-cinq secondes chacune
+        # pendant que la fenetre se ferme.
+        self._owner = _Owner()
 
     def stop(self) -> None:
         self._stop = True
+        self._owner.kill()
 
     def _one(self, job):
         """Sonde une video. Rend None si l'arret a ete demande, -1 si elle
         est illisible (rien n'est retenu), 0 si elle n'a que des images
         plates, 1 sinon."""
         from .index import INDEX
+        from . import media
         video, size, stamp = job
         if self._stop:
             return None
-        values, failed, tried = signature_report(video, self.width)
+        # Ce qu'on regarde passe devant : six ffmpeg d'empreintes sur le
+        # partage ralentissaient d'autant la page affichee.
+        media.wait_foreground(lambda: self._stop)
+        if self._stop or media.CLOSING:
+            return None
+        media._LOCAL.owner = self._owner
+        try:
+            values, failed, tried = signature_report(
+                video, self.width, should_stop=lambda: self._stop)
+        finally:
+            media._LOCAL.owner = None
+        # Coupee par l'arret : ni illisible, ni a retenir -- l'index est
+        # peut-etre deja ferme.
+        if self._stop or media.CLOSING:
+            return None
         if failed and len(values) < min(AGREE, tried):
             return -1
         INDEX.put_sig(video, stamp, values, size)
         return 1 if values else 0
 
     def run(self) -> None:
+        from .index import INDEX
         from .stamps import remember
         todo = []
         known = 0
@@ -1231,7 +1429,8 @@ class SignatureScan(QThread):
         seen = stored = failed = 0
         last = 0.0
         if total and not self._stop:
-            with ThreadPoolExecutor(max_workers=self.WORKERS) as pool:
+            pool = ThreadPoolExecutor(max_workers=self.WORKERS)
+            try:
                 for outcome in pool.map(self._one, todo):
                     if outcome is None:
                         continue
@@ -1246,6 +1445,13 @@ class SignatureScan(QThread):
                         last = now
                     if self._stop:
                         break
+            finally:
+                # Sans `cancel_futures`, sortir attendait les milliers de
+                # videos deja confiees au pot.
+                pool.shutdown(wait=True, cancel_futures=True)
+        # Ce qui vient d'etre appris est ecrit tout de suite : un arret net
+        # juste apres ne doit pas le perdre.
+        INDEX.commit(force=True)
         self.progress.emit(seen, total)
         self.failed_count = failed
         self.unreadable.emit(failed)
@@ -1296,4 +1502,56 @@ class SignatureGroupScan(QThread):
         groups = group_by_signature(
             entries, should_stop=lambda: self._stop,
             report=lambda part: self.progress.emit(int(len(entries) * part)))
+        if groups and not self._stop:
+            groups = present_only(groups, should_stop=lambda: self._stop)
         self.found.emit([] if self._stop else groups)
+
+
+# Combien de chemins on verifie de front sur le partage : autant que de
+# dossiers parcourus a la fois par l'analyse.
+PRESENCE_WORKERS = 8
+
+
+def present_only(groups: list, should_stop=None) -> list:
+    """Retire des groupes les videos qui n'existent plus, puis les reclasse.
+
+    Les empreintes vivent dans l'index, qui garde celle d'une video rangee ou
+    supprimee hors de Prisme a son ancien chemin -- souvent moins profond,
+    donc classe « ✓ à garder » devant la vraie copie, qui etait alors cochee
+    d'office. On regarde chaque membre (une lecture par membre de groupe, et
+    non par video) : un absent est oublie de l'index ; un membre qu'on n'a
+    pas pu voir (NAS qui ne repond pas) rend son groupe « a comparer », sans
+    rien de coche.
+    """
+    from . import actions
+    from .index import INDEX
+    members = sorted({str(path) for group in groups for path in group.paths})
+    if not members:
+        return list(groups)
+    states: dict = {}
+    with ThreadPoolExecutor(max_workers=PRESENCE_WORKERS) as pool:
+        for path, state in zip(members, pool.map(actions.probe, members)):
+            states[path] = state
+            if should_stop is not None and should_stop():
+                pool.shutdown(wait=True, cancel_futures=True)
+                return []
+    for path, state in states.items():
+        if state == "absent":
+            INDEX.forget_sig(path)
+    out = []
+    for group in groups:
+        kept = [at for at, path in enumerate(group.paths)
+                if states.get(str(path)) != "absent"]
+        if len(kept) < 2:
+            continue
+        doubtful = any(states.get(str(group.paths[at])) != "ok" for at in kept)
+        if len(kept) == len(group.paths) and not doubtful:
+            out.append(group)
+            continue
+        # Reclasse sans les absents : le meilleur exemplaire peut changer.
+        out.append(DupeGroup([group.paths[at] for at in kept],
+                             [group.sizes[at] for at in kept],
+                             [group.durations[at] for at in kept],
+                             sure=group.sure and not doubtful))
+    out.sort(key=lambda group: (-group.gain, str(group[1][0]).lower()))
+    return out

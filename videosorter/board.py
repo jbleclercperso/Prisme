@@ -392,10 +392,16 @@ class BoardCard(QFrame):
         self.set_state(item.status)
 
     def set_stars(self, stars: int) -> None:
-        """La note en un chiffre d'or ; rien du tout sans note."""
+        """La note en un chiffre d'or ; rien du tout sans note.
+
+        Cachee tant que la carte est survolee : l'etoile flottante, posee au
+        meme endroit, la remplace -- les deux ensemble faisaient une etoile
+        doublee, decalee de quelques pixels.
+        """
         self.stars_value = int(stars or 0)
         self.rating.setText("★" if self.stars_value else "")
-        self.rating.setVisible(self.stars_value > 0)
+        self.rating.setVisible(self.stars_value > 0
+                               and self.property("hovered") != "true")
         if self.stars_value:
             self._place_handles()
 
@@ -460,6 +466,7 @@ class BoardCard(QFrame):
 
     def _show_handles(self, hovered: bool) -> None:
         self.pick.setVisible(hovered or self.pick.isChecked())
+        self.rating.setVisible(self.stars_value > 0 and not hovered)
         if hovered or self.pick.isChecked():
             self._place_handles()
 
@@ -591,6 +598,11 @@ class HoverHandles(QWidget):
     def detach(self) -> None:
         self.card = None
         self.hide()
+
+
+def _in_dupes(item) -> bool:
+    """Vrai pour un element de la liste des doublons (il porte son groupe)."""
+    return getattr(item, "dupe_group", None) is not None
 
 
 class BoardView(QWidget):
@@ -772,6 +784,14 @@ class BoardView(QWidget):
         previous = self.items
         same_head = bool(previous) and bool(items) and previous[:1] == items[:1]
         self.items = list(items)
+        if (self.picked_ids and previous and _in_dupes(previous[0])
+                and not (items and _in_dupes(items[0]))):
+            # On quitte la liste des doublons : ses coches d'office lui
+            # appartiennent. Les memes videos, dans « Vidéos », n'ont plus de
+            # groupe, et « un groupe garde toujours un exemplaire » ne les
+            # protegeait plus -- Suppr emportait l'original avec ses copies.
+            self.picked_ids = set()
+            self.pickedChanged.emit(0)
         if self.picked_ids:
             # Une coche posee dans une autre liste ne doit pas annoncer « un
             # element coche » ici, ou rien ne l'est.

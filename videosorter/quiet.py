@@ -160,6 +160,9 @@ class QuietPage(QWidget):
         # c'est la touche qu'un collegue presse pour « rafraichir » une page
         # qui ne l'interesse pas.
         if event.key() == Qt.Key_Escape:
-            self.leave.emit()
+            # Une repetition, c'est la touche encore tenue d'avant le repli :
+            # elle ne doit pas en faire ressortir aussitot.
+            if not event.isAutoRepeat():
+                self.leave.emit()
             return
         super().keyPressEvent(event)

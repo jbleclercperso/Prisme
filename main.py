@@ -67,6 +67,63 @@ def _read_setting(name: str) -> bool:
         return False
 
 
+# Le decodage video par la carte graphique : Qt cree un peripherique Direct3D
+# pour chaque video ouverte, sur le fil de l'interface. C'etait l'essentiel du
+# gel de 0,13 a 0,5 s a chaque apercu survole sur la planche. Le processeur
+# decode sans ce prix-la. `"hw_decoding": true` dans config.json le rend a la
+# carte graphique, pour une machine trop juste en 4K.
+DECODING_VARIABLE = "QT_FFMPEG_DECODING_HW_DEVICE_TYPES"
+
+
+def _pick_decoding(environ, hardware: bool) -> None:
+    """Avant tout import de QtMultimedia : Qt lit ce choix une fois pour toutes.
+    Un choix pose a la main dans l'environnement l'emporte."""
+    if not hardware:
+        environ.setdefault(DECODING_VARIABLE, ",")
+
+
+def _leave_now_if_stuck(app, window, code: int, wait: float = 2.0) -> None:
+    """Apres la fermeture, ne laisse pas un fil de fond detruire le processus.
+
+    Un fil qui n'a pas entendu l'arret (un ffmpeg lent, une lecture du NAS
+    qui ne revient pas) survivait a la fenetre : detruit encore en marche,
+    Qt arrete le programme en catastrophe, et d'ici la le processus garde le
+    verrou -- relancer Prisme repondait « deja ouvert ». Tout ce qui compte
+    est deja ecrit (reglages, favoris, index ferme) : au-dela d'un court
+    delai, on s'en va. Sauf un transfert encore en vol, qu'on laisse finir
+    comme avant : couper une copie laisserait un dossier a moitie deplace.
+    """
+    import os
+    import time
+    try:
+        from PySide6.QtCore import QThread
+        if window.transfers.busy:
+            return
+    except (AttributeError, RuntimeError, ImportError):
+        return
+
+    def running() -> list:
+        try:
+            return [type(thread).__name__ for thread in window.findChildren(QThread)
+                    if thread.isRunning()]
+        except RuntimeError:
+            return []
+
+    deadline = time.monotonic() + wait
+    while running():
+        if time.monotonic() >= deadline:
+            crash = getattr(app, "_prisme_crash", None)
+            if crash is not None:
+                crash.write(f"--- fermeture forcee apres {wait:.0f} s : "
+                            f"{', '.join(running()[:6])} ---\n")
+            try:
+                app._prisme_lock.unlock()
+            except (AttributeError, RuntimeError):
+                pass
+            os._exit(code)
+        time.sleep(0.05)
+
+
 # ---------------------------------------------------------------------------
 # Les erreurs de la séance
 # ---------------------------------------------------------------------------
@@ -352,6 +409,7 @@ def run() -> int:
     if _read_setting("ignore_dpi"):
         os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
         os.environ["QT_SCALE_FACTOR"] = "1"
+    _pick_decoding(os.environ, _read_setting("hw_decoding"))
 
     from PySide6.QtCore import QLockFile
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -428,7 +486,13 @@ def run() -> int:
     if not check_tools(window):
         return 1
 
-    return app.exec()
+    # Une fermeture de session Windows ne passe pas toujours par la fenetre :
+    # ce que l'index a appris est ecrit quoi qu'il arrive.
+    from videosorter.index import INDEX
+    app.aboutToQuit.connect(lambda: INDEX.commit(force=True))
+    code = app.exec()
+    _leave_now_if_stuck(app, window, code)
+    return code
 
 
 def main() -> int:

@@ -7,9 +7,13 @@ fabrique a la main, comme le ferait une vraie page.
 """
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 
+os.environ.setdefault("PRISME_SANDBOX",
+                      os.path.join(tempfile.gettempdir(), "prisme-tests-web"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import videosorter.websearch as ws  # noqa: E402

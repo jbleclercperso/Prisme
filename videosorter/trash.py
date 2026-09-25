@@ -20,11 +20,20 @@ contient et d'où cela vient. Un Prisme arrêté net (plantage, coupure, arrêt
 forcé) laissait sinon ses dossiers de session orphelins -- invisibles, puisque
 le point les cache, et irrestaurables, puisque plus rien ne savait d'où
 venaient les éléments. `leftovers` les retrouve au lancement suivant.
+
+Il ne reprend que ceux d'une séance vraiment terminée. Chaque séance tient
+ouvert, tant qu'elle vit, un petit fichier dans son dossier (`LOCK_NAME`) :
+Windows -- et le NAS, qui applique les mêmes règles de partage -- refuse de
+l'effacer tant qu'il est ouvert. Une séance plantée l'a lâché avec son
+processus. Sans cela, un second Prisme lancé sur la même racine (une autre
+machine) reprenait la corbeille vivante du premier, puis la détruisait en se
+fermant.
 """
 from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import threading
 import time
@@ -40,7 +49,23 @@ from .config import TRASH_FOLDER_NAME
 
 FOLDER_NAME = TRASH_FOLDER_NAME
 MANIFEST = "prisme-corbeille.json"
-_STAMP = re.compile(r"^\d{8}-\d{6}$")
+# Tenu ouvert par la seance qui vit : son dossier n'est pas a reprendre.
+LOCK_NAME = "prisme-seance.lock"
+# La date de la seance, suivie du nom de la machine depuis cette version :
+# deux PC lances dans la meme seconde partageaient sinon un dossier, et
+# s'ecrasaient leurs registres.
+_STAMP = re.compile(r"^\d{8}-\d{6}(-[A-Za-z0-9_-]+)?$")
+
+
+def _machine() -> str:
+    name = os.environ.get("COMPUTERNAME") or platform.node() or ""
+    return re.sub(r"[^A-Za-z0-9_-]", "", name)[:24]
+
+
+def _session_stamp() -> str:
+    machine = _machine()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-{machine}" if machine else stamp
 
 
 @dataclass
@@ -74,7 +99,7 @@ class SessionTrash(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.stamp = time.strftime("%Y%m%d-%H%M%S")
+        self.stamp = _session_stamp()
         self.base: Path | None = None
         self.entries: list = []
         self.folders: set = set()
@@ -84,6 +109,10 @@ class SessionTrash(QObject):
         self._writer_lock = threading.Lock()
         # (nombre traité, dernière erreur) du dernier vidage en tâche de fond.
         self.flush_result: tuple | None = None
+        # Les fichiers tenus ouverts, un par dossier de session : tant qu'ils
+        # le sont, aucune autre seance ne reprend ces dossiers.
+        self._locks: dict = {}
+        self._locks_lock = threading.Lock()
 
     def set_base(self, root: Path | None) -> None:
         """Choisit la racine sous laquelle mettre les éléments écartés."""
@@ -100,7 +129,57 @@ class SessionTrash(QObject):
         if actions.is_cross_device(path, folder):
             folder = Path(actions.LOCAL_TRASH) / self.stamp
         self.folders.add(folder)
+        if folder not in self._locks:
+            # Des la premiere mise a l'ecart, et sur le fil du registre : le
+            # dossier se marque « vivant » avant que quiconque puisse le voir.
+            self._submit(self._hold, folder)
         return folder
+
+    # -- dossiers vivants ---------------------------------------------------
+    def _hold(self, folder: Path) -> bool:
+        """Ouvre, et garde ouvert, le fichier qui dit « seance en cours »."""
+        with self._locks_lock:
+            if folder in self._locks:
+                return True
+            try:
+                Path(folder).mkdir(parents=True, exist_ok=True)
+                handle = open(Path(folder) / LOCK_NAME, "a", encoding="utf-8")
+            except OSError:
+                return False
+            self._locks[folder] = handle
+            return True
+
+    def _let_go(self, folder: Path | None = None, remove: bool = False) -> None:
+        """Lache le fichier de ce dossier (de tous, sans dossier)."""
+        with self._locks_lock:
+            folders = [folder] if folder is not None else list(self._locks)
+            handles = [(one, self._locks.pop(one, None)) for one in folders]
+        for one, handle in handles:
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            if remove:
+                try:
+                    (Path(one) / LOCK_NAME).unlink()
+                except OSError:
+                    pass
+
+    def _claim(self, folder: Path) -> bool:
+        """Vrai si le dossier d'une autre seance est libre, et le prend.
+
+        Effacer son fichier echoue tant qu'une seance vivante le tient
+        ouvert ; une seance plantee l'a lache avec son processus. Un dossier
+        qu'on ne peut pas examiner (NAS qui ne repond pas) n'est pas repris.
+        """
+        try:
+            (Path(folder) / LOCK_NAME).unlink()
+        except FileNotFoundError:
+            pass                    # une version d'avant, ou rien d'ecarte
+        except OSError:
+            return False            # tenu par une seance vivante, ou illisible
+        return self._hold(folder)
 
     # -- registre ---------------------------------------------------------
     def record(self, origin: Path, stored: Path, size: int = 0) -> TrashEntry:
@@ -128,12 +207,14 @@ class SessionTrash(QObject):
         ]
 
     def _save_manifest(self, folder: Path) -> None:
-        rows = self._snapshot(folder)
+        self._submit(_write_manifest, folder, self._snapshot(folder))
+
+    def _submit(self, work, *args) -> None:
         with self._writer_lock:
             if self._writer is None:
                 self._writer = ThreadPoolExecutor(
                     max_workers=1, thread_name_prefix="corbeille")
-            self._writer.submit(_write_manifest, folder, rows)
+            self._writer.submit(work, *args)
 
     def _drain(self) -> None:
         """Attend que les registres en attente soient écrits."""
@@ -262,7 +343,9 @@ class SessionTrash(QObject):
                 if any(Path(e.stored).parent == folder for e in self.entries):
                     continue
                 if not folder.is_dir():
+                    self._let_go(folder)
                     continue
+                self._let_go(folder, remove=True)
                 manifest = folder / MANIFEST
                 if manifest.exists():
                     manifest.unlink()
@@ -298,7 +381,18 @@ class SessionTrash(QObject):
             except OSError:
                 continue
             for folder in sorted(stamps):
-                found.extend(_read_session(Path(folder), guess_base))
+                # Une seance encore ouverte ailleurs garde sa corbeille : la
+                # reprendre la faisait detruire a notre fermeture, sous ses
+                # yeux.
+                if not self._claim(Path(folder)):
+                    continue
+                left = _read_session(Path(folder), guess_base)
+                if not left:
+                    # Rien a reprendre : le dossier vide ne doit pas rester,
+                    # retenu a chaque lancement par une seance differente.
+                    self._let_go(Path(folder), remove=True)
+                    _remove_empty(Path(folder))
+                found.extend(left)
         return found
 
     def adopt(self, entries: list) -> None:
@@ -339,6 +433,18 @@ def _write_manifest(folder: Path, rows: list) -> None:
         pass
 
 
+def _remove_empty(folder: Path) -> None:
+    """Retire un dossier de session vide, son registre compris."""
+    try:
+        manifest = folder / MANIFEST
+        if manifest.exists():
+            manifest.unlink()
+        if not any(folder.iterdir()):
+            folder.rmdir()
+    except OSError:
+        pass
+
+
 def _read_session(folder: Path, base: Path | None) -> list:
     """Les éléments encore présents dans un dossier de session d'autrefois."""
     try:
@@ -348,6 +454,7 @@ def _read_session(folder: Path, base: Path | None) -> list:
         return []
     present.discard(MANIFEST)
     present.discard(MANIFEST + ".tmp")
+    present.discard(LOCK_NAME)
     rows = []
     try:
         raw = json.loads((folder / MANIFEST).read_text(encoding="utf-8"))

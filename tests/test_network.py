@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
+# Avant tout import de Prisme : l'import de media ouvre l'index, qui doit
+# etre celui d'un bac a sable et jamais celui de l'utilisateur.
+os.environ.setdefault("PRISME_SANDBOX",
+                      os.path.join(tempfile.gettempdir(), "prisme-tests-reseau"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)

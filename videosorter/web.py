@@ -523,9 +523,53 @@ def _make_handler(server: Server):
                 self.send_header("Content-Security-Policy", CSP)
             for name, value in (extra or {}).items():
                 self.send_header(name, value)
+            if self.close_connection:
+                self.send_header("Connection", "close")
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
+
+        # Le plus gros corps qu'une requete legitime envoie : le mot de passe,
+        # ou un battement « je regarde ».
+        BODY_CAP = 8192
+
+        def _read_body(self) -> bytes | None:
+            """Lit le corps annonce en entier, ou ferme la connexion apres la reponse.
+
+            Un corps laisse dans la connexion etait relu comme la requete
+            suivante : derriere le tunnel, qui garde ses connexions ouvertes
+            et les partage entre visiteurs, un inconnu pouvait glisser une
+            requete cachee (« /logout ») dans celle du proprietaire. Rend None
+            quand le corps est trop gros ou illisible : la connexion ne sert
+            alors plus a rien d'autre.
+            """
+            if self.headers.get("Transfer-Encoding"):
+                self.close_connection = True
+                return None
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self.close_connection = True
+                return None
+            if length < 0 or length > self.BODY_CAP:
+                self.close_connection = True
+                return None
+            try:
+                body = self.rfile.read(length) if length else b""
+            except OSError:
+                self.close_connection = True
+                return None
+            if len(body) != length:
+                self.close_connection = True
+                return None
+            return body
+
+        def _no_body(self) -> None:
+            """Une requete sans corps attendu (GET, HEAD) qui en porte un : on
+            ne le lit pas, on ferme apres la reponse."""
+            if (self.headers.get("Transfer-Encoding")
+                    or (self.headers.get("Content-Length") or "0").strip() != "0"):
+                self.close_connection = True
 
         def _gzip_ok(self) -> bool:
             for part in self.headers.get("Accept-Encoding", "").split(","):
@@ -565,6 +609,7 @@ def _make_handler(server: Server):
 
         # -- routes ------------------------------------------------------
         def do_GET(self) -> None:          # noqa: N802
+            self._no_body()
             parsed = urlparse(self.path)
             route = unquote(parsed.path)
             query = parse_qs(parsed.query)
@@ -603,9 +648,14 @@ def _make_handler(server: Server):
             self.do_GET()
 
         def do_POST(self) -> None:         # noqa: N802
+            # Le corps d'abord, quelle que soit l'issue : un refus qui ne le
+            # lisait pas le laissait dans la connexion (voir _read_body).
+            body = self._read_body()
+            if body is None:
+                return self._send(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Trop long.")
             route = urlparse(self.path).path
             if route == "/api/watching":
-                return self._watching()
+                return self._watching(body)
             if route != "/login":
                 return self._send(HTTPStatus.NOT_FOUND, "Rien ici.")
             who = self._who()
@@ -617,11 +667,7 @@ def _make_handler(server: Server):
                     HTTPStatus.TOO_MANY_REQUESTS)
             verdict = None
             try:
-                try:
-                    length = min(int(self.headers.get("Content-Length") or 0), 4096)
-                except ValueError:
-                    length = 0
-                raw = self.rfile.read(length).decode("utf-8", "replace")
+                raw = body.decode("utf-8", "replace")
                 given = parse_qs(raw).get("password", [""])[0]
                 # Un temps de reponse constant, et jamais instantane : c'est ce
                 # qui decourage les essais en rafale.
@@ -652,7 +698,7 @@ def _make_handler(server: Server):
                                    + secure),
                 })
 
-        def _watching(self) -> None:
+        def _watching(self, body: bytes = b"") -> None:
             """Le navigateur dit ce qu'il regarde, et depuis combien de temps.
 
             Sans ce battement, on saurait seulement qu'une video a ete
@@ -662,9 +708,10 @@ def _make_handler(server: Server):
                 return self._json({"error": "connexion requise"},
                                   HTTPStatus.UNAUTHORIZED)
             try:
-                length = min(int(self.headers.get("Content-Length") or 0), 2048)
-                told = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+                told = json.loads(body.decode("utf-8", "replace"))
             except (ValueError, OSError):
+                return self._json({"ok": False}, HTTPStatus.BAD_REQUEST)
+            if not isinstance(told, dict):
                 return self._json({"ok": False}, HTTPStatus.BAD_REQUEST)
             mark = str(told.get("id", ""))
             path = server.library.videos.get(mark)

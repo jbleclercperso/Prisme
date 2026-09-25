@@ -254,5 +254,7 @@ class TreePanel(QWidget):
         # Le clic sur la flèche de dépliage n'atteint pas l'élément : seul un
         # clic sur le nom du dossier déclenche l'envoi.
         path = self.model.filePath(index)
-        if path and Path(path).is_dir():
+        # Le modele sait deja que c'est un dossier : le redemander au disque
+        # coutait un aller-retour avec le NAS a chaque clic.
+        if path and self.model.isDir(index):
             self.folderChosen.emit(path)

@@ -116,6 +116,12 @@ def carry(old, new) -> list:
             from .index import INDEX
             sources += [(path, entry[0]) for path, entry
                         in _under(INDEX.probes, heads) if entry[0]]
+            # L'index a pu suivre le deplacement avant nous (actions._carry) :
+            # ce qu'il sait vit alors sous le nouveau chemin, et l'on retrouve
+            # l'ancien en remplacant la tete.
+            fresh = (target + "\\", target + "/")
+            sources += [(prefix + path[len(target):], entry[0]) for path, entry
+                        in _under(INDEX.probes, fresh) if entry[0]]
         except ImportError:
             pass
         for path, value in sources:

@@ -400,7 +400,9 @@ python main.py
 quelques réglages : `preview_seconds` (durée de la boucle au survol),
 `thumb_count` (nombre d'aperçus), `thumb_width` (finesse des vignettes),
 `delete_mode`, `scroll_seconds` (pas de la molette), `tree_root`,
-`filter_include`, `filter_exclude`, `skip_hidden`, `use_scan_cache`.
+`filter_include`, `filter_exclude`, `skip_hidden`, `use_scan_cache`,
+`hw_decoding` (`true` pour décoder par la carte graphique ; par défaut le
+processeur décode, sans le gel qu'impose chaque vidéo ouverte).
 L'index est à côté, dans `index.db`, et le cache de vignettes dans `thumbs\`.
 
 ## Tests

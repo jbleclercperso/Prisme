@@ -36,6 +36,10 @@ for folder, names in {
 
 sandbox = base / "_appdata"
 sandbox.mkdir(parents=True, exist_ok=True)
+# Avant tout import de Prisme : sans cela, l'import de media ouvrait l'index
+# reel (%LOCALAPPDATA%\Prisme\index.db), et Ratings() recopiait les vrais
+# favoris.
+os.environ.setdefault("PRISME_SANDBOX", str(sandbox))
 
 from PySide6.QtWidgets import QApplication            # noqa: E402
 from videosorter import config as vs_config           # noqa: E402
@@ -46,8 +50,11 @@ from videosorter.header import TAB_FOLDERS, TAB_TAGS, TAB_VIDEOS  # noqa: E402
 from videosorter.scan import MODE_FLAT, MODE_FOLDERS  # noqa: E402
 from videosorter.window import MainWindow             # noqa: E402
 
+import videosorter.ratings as vs_ratings            # noqa: E402
+
 vs_media.THUMB_DIR = sandbox / "thumbs"
 vs_config.LOCAL_TRASH = sandbox / "_TRASH"
+vs_ratings.RATINGS_PATH = sandbox / "ratings.json"
 INDEX.reopen(sandbox / "index.db")
 
 app = QApplication.instance() or QApplication(sys.argv)
@@ -141,15 +148,23 @@ check(len(seen) == len(set(seen)),
 
 window.set_tab(TAB_FOLDERS)
 settle()
-check("Analyser" in window.scan_button.text(),
-      "au repos, le bouton propose d analyser (" + window.scan_button.text() + ")")
+window._show_activity()
+check("analyse" not in window.activity_label.text(),
+      "au repos, l activite ne parle pas d analyse ("
+      + window.activity_label.text() + ")")
+if getattr(window, "_harvest", (0, 0))[1]:
+    # Le meme geste arrete d'abord la preparation des apercus, s'il y en a.
+    window.toggle_scan()
+    pump(0.2)
 window.toggle_scan()
 check(window.scanning, "un clic relance l analyse")
-check("/" in window.scan_button.text() or "Analyse" in window.scan_button.text(),
-      "et le bouton compte (" + window.scan_button.text() + ")")
+window._show_activity()
+check("analyse" in window.activity_label.text(),
+      "et l activite le dit (" + window.activity_label.text() + ")")
 settle()
-check(not window.scanning and "Analyser" in window.scan_button.text(),
-      "puis revient au repos (" + window.scan_button.text() + ")")
+window._show_activity()
+check(not window.scanning and "analyse" not in window.activity_label.text(),
+      "puis revient au repos (" + window.activity_label.text() + ")")
 check("termin" in window.banner.text(),
       "en disant que c est fini (" + window.banner.text()[:55] + ")")
 

@@ -36,9 +36,10 @@ DEFAULT_PANES = 3
 # fixes mettait six secondes a remplir un mur de dix.
 STAGGER_MS = 650
 STAGGER_MIN_MS = 150
-# Le son suit la souris, mais pas a chaque panneau traverse : brancher la
-# sortie audio sur un lecteur ouvre un flux Windows, l'en debrancher coute
-# jusqu'a une cinquantaine de millisecondes. On attend que la souris se pose.
+# Le son suit la souris, mais pas a chaque panneau traverse : la premiere fois
+# qu'on entend un panneau, on lui branche sa propre sortie audio, ce qui ouvre
+# un flux Windows. On attend que la souris se pose. Ensuite, passer d'un
+# panneau a l'autre ne fait plus que couper l'un et rendre le son a l'autre.
 HEAR_SETTLE_MS = 250
 # Les nombres qui font un rectangle. Cinq ou sept n'en font pas.
 PANE_CHOICES = (2, 3, 4, 5, 6, 8, 9, 10)
@@ -257,10 +258,13 @@ class SplitPane(QFrame):
         self.hovered = False
 
         # Le son ne vient que de la video survolee : six videos qui parlent
-        # en meme temps ne s'ecoutent pas.
-        # Pas de sortie audio a soi : le mur n'en a qu'une, branchee sur la
-        # video survolee. Dix sorties ouvertes a la fois pesaient sur le
-        # systeme pour n'en faire entendre qu'une.
+        # en meme temps ne s'ecoutent pas. La sortie du panneau ne nait que
+        # la premiere fois qu'on l'entend (son actif), puis reste branchee,
+        # coupee quand la souris est ailleurs : la faire passer d'un lecteur a
+        # l'autre, comme avant, figeait l'interface 0,1 a 0,5 s a chaque
+        # changement de panneau. Tant que le son reste coupe -- le reglage
+        # par defaut -- aucune n'existe.
+        self.audio = None
         self.player = QMediaPlayer(self)
         self.player.setVideoOutput(self.video)
         self.player.playbackStateChanged.connect(self._show_pause)
@@ -598,7 +602,7 @@ class SplitWall(QWidget):
         full.setFixedSize(34, 28)
         full.setObjectName("splitButton")
         full.setFocusPolicy(Qt.NoFocus)
-        full.setToolTip("Le mur seul, sur tout l'écran — Échap pour revenir")
+        full.setToolTip("Le mur seul, sur tout l'écran (F11) — Échap pour revenir")
         full.clicked.connect(self.fullscreenRequested)
         controls.addWidget(full)
         outer.addWidget(self.controls)
@@ -630,8 +634,6 @@ class SplitWall(QWidget):
 
         # Le widget video natif ne signale pas le survol : on le sonde.
         self.muted = False
-        self.audio = QAudioOutput(self)
-        self.audio.setMuted(True)
         self._heard = None
         self._hear_next = None       # le panneau survole, pas encore branche
         self.hear_timer = QTimer(self)
@@ -642,25 +644,46 @@ class SplitWall(QWidget):
         self.watch_timer.setInterval(120)
         self.watch_timer.timeout.connect(self._watch)
 
+    @property
+    def audio(self):
+        """La sortie du panneau qu'on entend, s'il y en a un."""
+        pane = self._heard
+        return getattr(pane, "audio", None) if pane is not None else None
+
+    def _mute_heard(self, muted: bool) -> None:
+        output = self.audio
+        if output is not None:
+            try:
+                output.setMuted(muted)
+            except RuntimeError:
+                pass
+
     def set_muted(self, muted: bool) -> None:
         self.muted = bool(muted)
-        self.audio.setMuted(self.muted)
+        self._mute_heard(self.muted)
         # Rendre le son est un geste voulu : le panneau survole l'a aussitot.
         self._watch(at_once=True)
 
     def _hear(self, pane) -> None:
-        """Branche l'unique sortie audio sur ce panneau, et sur lui seul."""
+        """Le son pour ce panneau, et pour lui seul.
+
+        L'ancien se tait, sans rien debrancher. Le nouveau recoit sa propre
+        sortie la premiere fois (un flux Windows s'ouvre, une fois pour
+        toutes), sinon il retrouve simplement le son.
+        """
         if pane is self._heard:
             return
-        if self._heard is not None:
-            try:
-                self._heard.player.setAudioOutput(None)
-            except RuntimeError:
-                pass
+        self._mute_heard(True)
         self._heard = pane
-        if pane is not None:
-            pane.player.setAudioOutput(self.audio)
-            self.audio.setMuted(self.muted)
+        if pane is None:
+            return
+        if pane.audio is None:
+            output = QAudioOutput(pane)
+            output.setMuted(self.muted)
+            pane.audio = output
+            pane.player.setAudioOutput(output)
+        else:
+            self._mute_heard(self.muted)
 
     def _choose_heard(self, pane, at_once: bool = False) -> None:
         """Le son pour ce panneau, sans rebrancher quoi que ce soit pour rien.
@@ -680,29 +703,31 @@ class SplitWall(QWidget):
             # panneau, coute bien moins.
             self.hear_timer.stop()
             self._hear_next = None
-            self.audio.setMuted(True)
+            self._mute_heard(True)
             return
         if pane is None:
             # Plus rien sous la souris : on se tait, sans debrancher.
             self.hear_timer.stop()
             self._hear_next = None
-            self.audio.setMuted(True)
+            self._mute_heard(True)
             return
         if pane is self._heard:
             self.hear_timer.stop()
             self._hear_next = None
-            self.audio.setMuted(False)
+            self._mute_heard(False)
             return
-        if at_once:
+        if at_once or pane.audio is not None:
+            # Deja equipe : lui rendre le son ne coute rien, inutile
+            # d'attendre que la souris se pose.
             self.hear_timer.stop()
             self._hear_next = None
             self._hear(pane)
             return
         if pane is not self._hear_next:
-            # Un autre panneau : l'ancien se tait tout de suite, le nouveau
-            # ne sera branche que si la souris s'y pose.
+            # Un autre panneau, jamais entendu : l'ancien se tait tout de
+            # suite, le nouveau ne sera branche que si la souris s'y pose.
             self._hear_next = pane
-            self.audio.setMuted(True)
+            self._mute_heard(True)
             self.hear_timer.start()
 
     def _settle_heard(self) -> None:
@@ -739,11 +764,11 @@ class SplitWall(QWidget):
     def hideEvent(self, event):
         super().hideEvent(event)
         self.watch_timer.stop()
-        # Se taire suffit : la sortie reste branchee, et sera reprise ou
-        # deplacee au retour sans avoir ete fermee entre-temps.
+        # Se taire suffit : la sortie reste branchee, et sera reprise au
+        # retour sans avoir ete fermee entre-temps.
         self.hear_timer.stop()
         self._hear_next = None
-        self.audio.setMuted(True)
+        self._mute_heard(True)
         if self.hold:
             # Les demarrages en attente se perdraient derriere une page
             # cachee (`_start_one` ne lance rien d'invisible) : ils attendent.

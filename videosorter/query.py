@@ -20,10 +20,21 @@ from pathlib import Path
 
 from .tagging import fold
 
-try:                                    # pragma: no cover - selon l'installation
-    from rapidfuzz import fuzz
-except ImportError:                     # pragma: no cover
-    fuzz = None
+# rapidfuzz ne se charge qu'a la premiere recherche approchee : son import
+# pesait sur chaque lancement, pour une fonction dont on ne se sert pas
+# toujours. None tant qu'on ne l'a pas cherche, False s'il manque.
+_FUZZ = None
+
+
+def _fuzz():
+    global _FUZZ
+    if _FUZZ is None:
+        try:                            # pragma: no cover - selon l'installation
+            from rapidfuzz import fuzz as found
+        except ImportError:             # pragma: no cover
+            found = False
+        _FUZZ = found
+    return _FUZZ or None
 
 # Au-dessus de ce score sur cent, deux mots sont « a peu pres » les memes.
 # Quatre-vingts laisse passer une lettre fausse ou manquante dans un mot de
@@ -41,6 +52,7 @@ def approximate(term: str, folded_name: str) -> bool:
     """
     if term in folded_name:
         return True
+    fuzz = _fuzz()
     if fuzz is None:
         return False
     return fuzz.partial_ratio(term, folded_name, score_cutoff=NEAR) > 0
@@ -48,7 +60,7 @@ def approximate(term: str, folded_name: str) -> bool:
 
 def available() -> bool:
     """Dit si l'a-peu-pres est disponible, pour le signaler a l'ecran."""
-    return fuzz is not None
+    return _fuzz() is not None
 
 # Un terme : soit une expression entre guillemets, soit un mot. Le « - » qui
 # l'introduit eventuellement est capte a part.

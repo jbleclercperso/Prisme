@@ -230,37 +230,40 @@ def _held_until(key: str) -> float:
     return 0.0
 
 
-def _wait_unblocked(key: str) -> None:
-    # Jamais sur le fil de l'interface : c'est justement lui qu'on protege.
-    if threading.current_thread() is threading.main_thread():
-        return
-    while not CLOSING and _held_until(key):
-        time.sleep(0.05)
-
-
-def _spawn(cmd: list[str], timeout: float) -> tuple:
+def _spawn(cmd: list[str], timeout: float, binary: bool = False) -> tuple:
     """Lance un outil et rend (code, sortie, erreurs, pourquoi).
 
     `pourquoi` vaut "" pour une execution menee a terme, "tue" quand on l'a
     arretee (fichier range, travail annule, fermeture), "delai" quand elle a
     depasse son temps, "echec" quand elle n'a pas pu partir. Dans ces trois
     cas le code vaut None : rien ne peut en etre conclu sur le fichier.
+
+    `binary` rend la sortie en octets (une image tiree par un tuyau) : tout
+    outil passe par ici, pour que `release_reads`, `close_all` et l'arret
+    d'un travail l'atteignent.
+
+    Un chemin qu'on s'apprete a ranger n'est pas ouvert : on renonce tout de
+    suite (« tue ») au lieu d'attendre la fin du blocage pour le lire quand
+    meme. Attendre gardait la lecture inscrite, que le rangement attendait a
+    son tour ; le ffmpeg partait ensuite sur un fichier en plein deplacement,
+    qui echouait alors en « utilise par un autre processus ».
     """
+    empty = b"" if binary else ""
     stack = getattr(_LOCAL, "keys", None)
     key = stack[-1] if stack else ""
-    if key:
-        _wait_unblocked(key)
-    if CLOSING:
-        return None, "", "", "tue"
     owner = getattr(_LOCAL, "owner", None)
+    if CLOSING or (owner is not None and owner.cancelled):
+        return None, empty, empty, "tue"
+    if key and _held_until(key):
+        return None, empty, empty, "tue"
+    text = {} if binary else {"text": True, "encoding": "utf-8", "errors": "replace"}
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, creationflags=NO_WINDOW,
-            text=True, encoding="utf-8", errors="replace",
+            stderr=subprocess.PIPE, creationflags=NO_WINDOW, **text,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
-        return None, "", "", "echec"
+        return None, empty, empty, "echec"
     proc._prisme_killed = False
     with _READING_LOCK:
         _PROCS.setdefault(key, set()).add(proc)
@@ -281,10 +284,10 @@ def _spawn(cmd: list[str], timeout: float) -> tuple:
             try:
                 out, err = proc.communicate(timeout=5)
             except (OSError, ValueError, subprocess.SubprocessError):
-                out, err = "", ""
+                out, err = empty, empty
         except (OSError, ValueError, subprocess.SubprocessError):
             _kill(proc)
-            out, err = "", ""
+            out, err = empty, empty
             why = "echec"
     finally:
         with _READING_LOCK:
@@ -298,8 +301,8 @@ def _spawn(cmd: list[str], timeout: float) -> tuple:
     if proc._prisme_killed:
         why = "tue"
     if why:
-        return None, out or "", err or "", why
-    return proc.returncode, out or "", err or "", ""
+        return None, out or empty, err or empty, why
+    return proc.returncode, out or empty, err or empty, ""
 
 
 def _run_err(cmd: list[str], timeout: int = 30) -> tuple:
@@ -496,11 +499,17 @@ def _probe(path: Path) -> dict:
     if missed is not None and time.monotonic() - missed < _MISS_QUIET:
         return cached or info
 
-    code, out, err = _run_err([
+    code, out, err, why = _spawn([
         Tools.ffprobe, "-v", "error",
     ] + PROBE_LIMITS + [
         "-print_format", "json", "-show_format", "-show_streams", str(path),
-    ])
+    ], 30)
+    if why == "tue":
+        # Arrete expres (page quittee, video rangee, fermeture) : ce n'est pas
+        # une panne. Le retenir comme telle privait la video de sondage une
+        # minute, et une pellicule preparee entre-temps posait ses cinq
+        # images a zero seconde.
+        return cached or info
     if code == 0 and out:
         try:
             data = json.loads(out)
@@ -568,6 +577,33 @@ def _thumb_file(digest: str) -> Path:
     return THUMB_DIR / digest[:2] / f"{digest}.jpg"
 
 
+# Des noms que portent des milliers de fichiers differents, et de meme taille :
+# les parties d'un DVD, les sequences d'un camescope AVCHD. Deux disques d'un
+# meme coffret ont chacun leur VTS_01_1.VOB, de meme taille (le graveur coupe
+# a 1 Go) et souvent de meme date : leur nom seul ne les distingue plus. Les
+# noms d'appareil photo (IMG_1234) n'en sont pas : leurs tailles different, et
+# changer leur nom de vignette ferait tout refabriquer sur le partage.
+_GENERIC_NAME = re.compile(r"^(vts_\d+_\d+\.vob|video_ts\.vob|\d{5}\.(m2ts|mts))$",
+                           re.IGNORECASE)
+
+
+def _key_name(video) -> str:
+    """Ce qui nomme une video dans le nom de ses vignettes.
+
+    Son nom seul, sauf pour un nom generique, qu'on complete par son dossier
+    (celui du disque, au-dessus de VIDEO_TS) : ranger le disque entier garde
+    alors ses images.
+    """
+    text = str(video).replace("/", "\\")
+    name = text.rsplit("\\", 1)[-1].casefold()
+    if not _GENERIC_NAME.match(name):
+        return name
+    parts = text.rstrip("\\").split("\\")[:-1]
+    if parts and parts[-1].casefold() == "video_ts":
+        parts = parts[:-1]
+    return parts[-1].casefold() + "\\" + name if parts else name
+
+
 def _thumb_key(video, stamp: str, ts: float, width: int) -> Path:
     """Le nom d'une vignette : nom du fichier, taille, date, instant, largeur.
 
@@ -575,12 +611,14 @@ def _thumb_key(video, stamp: str, ts: float, width: int) -> Path:
     mais changeait son chemin, donc le nom de toutes ses vignettes : le
     dossier de destination n'avait que des cartes vides, refaites une a une
     par ffmpeg sur le NAS. Deux fichiers de meme nom, meme taille et meme date
-    a la seconde pres sont des copies : ils partagent leurs images.
+    a la seconde pres sont des copies : ils partagent leurs images -- sauf
+    sous un nom generique (VTS_01_1.VOB), ou le dossier les distingue
+    (voir _key_name).
     """
     if not stamp:
         # Sans empreinte, le nom seul confondrait des videos differentes.
         return _legacy_key(video, "0|0", ts, width)
-    name = os.path.basename(str(video)).casefold()
+    name = _key_name(video)
     digest = hashlib.sha1(
         f"{name}|{stamp}|{ts:.2f}|{width}".encode("utf-8", "replace")
     ).hexdigest()
@@ -715,6 +753,9 @@ def _await(making: _Making) -> bool:
 # Plus tot dans la video, l'image-cle risque d'etre celle du debut — le logo ou
 # le noir que l'instant choisi voulait justement eviter.
 KEYFRAME_FROM = 30.0
+# De combien on depasse l'instant d'une carte prise a l'image-cle (voir
+# _make_thumb).
+KEYFRAME_NUDGE = 0.2
 
 
 def _drop(path: Path) -> None:
@@ -756,7 +797,14 @@ def _make_thumb(video: Path, ts: float, width: int, out: Path,
     # (-fps_mode passthrough) : c'est la que le reseau economise vraiment.
     quick = ["-probesize", "2M", "-analyzeduration", "2M"]
     if keyframe and at >= KEYFRAME_FROM:
-        first = (base + ["-noaccurate_seek", "-threads", "1"] + quick + seek
+        # Un peu au-dela de l'instant : les plans sont des images-cles
+        # exactes (36,703333 s), et l'arrondi a deux decimales (36,70)
+        # tombait juste avant, donc sur l'image-cle d'avant -- le plan
+        # precedent. Deux dixiemes couvrent aussi le recul que ffmpeg
+        # applique aux fichiers a images B ; on reste bien avant l'image-cle
+        # suivante. Le nom de la vignette garde l'instant demande.
+        nudged = ["-ss", f"{at + KEYFRAME_NUDGE:.3f}"]
+        first = (base + ["-noaccurate_seek", "-threads", "1"] + quick + nudged
                  + source + ["-fps_mode", "passthrough"] + tail)
     else:
         first = base + quick + seek + source + tail
@@ -828,7 +876,11 @@ def relocate_thumbs(old, new) -> int:
         dot = after.rfind(".")
         if dot <= 0 or after[dot:].lower() not in VIDEO_EXTS:
             continue
-        info = INDEX.probe(before)
+        # Le deplacement a deja fait suivre sondage et plans a l'index
+        # (actions._carry) : c'est au nouveau chemin qu'on les trouve. Lus a
+        # l'ancien, ils manquaient, et seules les images a 0 et 20 s
+        # suivaient la video.
+        info = INDEX.probe(after) or INDEX.probe(before)
         if info is not None and INDEX.probe(after) is None:
             INDEX.put_probe(after, stamp, dict(info))
         if INDEX.has_scenes(before) and not INDEX.has_scenes(after):
@@ -838,9 +890,7 @@ def relocate_thumbs(old, new) -> int:
 
 
 def _carry_images(before: str, after: str, stamp: str, info) -> int:
-    renamed = (os.path.basename(before).casefold()
-               != os.path.basename(after).casefold())
-    moments = _moments_for(before, info)
+    moments = _moments_for(after, info) | _moments_for(before, info)
     pairs = {(ts, width) for width in (list(_WIDTHS) or [480])
              for ts in moments}
     # Et tout ce qui a ete servi pour elle pendant la seance, quel qu'en soit
@@ -858,8 +908,9 @@ def _carry_images(before: str, after: str, stamp: str, info) -> int:
                 os.replace(legacy, target)
                 count += 1
                 continue
-            if renamed:
-                source = _thumb_key(before, stamp, ts, width)
+            source = _thumb_key(before, stamp, ts, width)
+            if source != target:
+                # Renommee a l'arrivee, ou nom generique dans un autre dossier.
                 if _usable(source):
                     # Une copie, pas un deplacement : une autre copie de la
                     # video, restee sous l'ancien nom, s'en sert peut-etre.

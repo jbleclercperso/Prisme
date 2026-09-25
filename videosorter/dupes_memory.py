@@ -1,6 +1,6 @@
 """Ce que la recherche de doublons retient d'une séance à l'autre.
 
-Deux mémoires, toutes deux de simples fichiers JSON à côté des favoris :
+Deux mémoires, toutes deux de simples fichiers JSON :
 
 - les paires « pas des doublons » : deux vidéos qu'on a regardées et jugées
   différentes. Sans elles, chaque recherche remontrait les mêmes faux
@@ -11,6 +11,12 @@ Deux mémoires, toutes deux de simples fichiers JSON à côté des favoris :
   recherche, six minutes de calcul pour un résultat qui ne change pas.
 
 Rien ici ne touche aux vidéos : ce ne sont que des notes sur elles.
+
+Les « pas des doublons » sont des décisions prises à la main, comme les
+favoris, et sont traitées comme eux : à côté d'eux, chez soi et non sur un
+cache partagé où deux machines s'écraseraient l'une l'autre ; écrites pour de
+bon ; copiées une fois par lancement ; et un fichier illisible est mis de
+côté au lieu d'être remplacé par la décision suivante.
 """
 from __future__ import annotations
 
@@ -45,16 +51,21 @@ def _under(key: str, prefix: str) -> bool:
 
 
 def _write_json(path: Path, data) -> None:
-    """Ecriture atomique : un fichier a moitie ecrit ne remplace jamais le bon.
+    """Ecriture atomique et forcee sur le disque : un fichier a moitie ecrit
+    ne remplace jamais le bon, et une coupure de courant juste apres ne
+    laisse pas un fichier vide. Leve OSError si le disque refuse."""
+    problem = config._write_atomic(
+        path, json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+    if problem:
+        raise OSError(problem)
 
-    Un arret brutal pendant l'ecriture laisse au pire le fichier temporaire ;
-    l'ancien reste lisible, et l'on ne perd que la derniere decision.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")),
-                   encoding="utf-8")
-    os.replace(tmp, path)
+
+def _pairs_of(raw) -> set:
+    pairs = set()
+    for item in (raw.get("pairs") or []) if isinstance(raw, dict) else []:
+        if isinstance(item, list) and len(item) == 2 and item[0] != item[1]:
+            pairs.add(_pair(item[0], item[1]))
+    return pairs
 
 
 class NotDupes:
@@ -77,29 +88,84 @@ class NotDupes:
         self._path = Path(path) if path else None
         self.lock = threading.Lock()
         self.pairs: set | None = None
+        # Vrai tant que le fichier existe mais n'a pas pu etre lu : ecrire
+        # alors effacerait toutes les decisions qu'il porte.
+        self.read_only = False
+        # Ce qu'il faudrait dire a l'utilisateur, s'il y a lieu.
+        self.problem = ""
 
     @property
     def path(self) -> Path:
-        return self._path or (config.APP_DIR / self.FILE)
+        return self._path or (config.PRIVATE_DIR / self.FILE)
+
+    @property
+    def backup_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".bak")
+
+    def _read(self) -> set | None:
+        """Les paires du fichier, ou None s'il ne se lit pas pour l'instant.
+
+        Absent : rien, ou ce que l'ancienne version avait laisse dans le
+        dossier de l'application (un cache partage), repris une fois. Abime :
+        mis de cote, et la copie du lancement reprise a sa place.
+        """
+        text = config._read_text(self.path)
+        if text is None:
+            legacy = config.APP_DIR / self.FILE
+            if self._path is None and legacy != self.path:
+                old = config._read_text(legacy)
+                raw = config._parse_object(old) if isinstance(old, str) else None
+                return _pairs_of(raw or {})
+            return set()
+        if isinstance(text, OSError):
+            self.problem = (f"« Pas des doublons » illisibles pour l'instant "
+                            f"({text}) : rien n'est réécrit tant qu'ils ne se "
+                            "relisent pas.")
+            return None
+        raw = config._parse_object(text)
+        if raw is None:
+            aside = config._set_aside(self.path)
+            backup = config._read_text(self.backup_path)
+            raw = config._parse_object(backup) if isinstance(backup, str) else None
+            where = f" (mis de côté sous « {aside.name} »)" if aside else ""
+            self.problem = ("Le fichier des « pas des doublons » était abîmé" + where
+                            + (" : la copie de secours a été reprise."
+                               if raw is not None else " : il repart de zéro."))
+            if aside is None:
+                return None
+            return _pairs_of(raw or {})
+        pairs = _pairs_of(raw)
+        if pairs:
+            # Une copie par lancement : c'est d'elle qu'on repartira si le
+            # fichier s'abimait.
+            config._copy_quietly(self.path, self.backup_path)
+        return pairs
 
     def _loaded(self) -> set:
         if self.pairs is None:
-            pairs = set()
-            try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                raw = {}
-            for item in (raw.get("pairs") or []) if isinstance(raw, dict) else []:
-                if isinstance(item, list) and len(item) == 2 and item[0] != item[1]:
-                    pairs.add(_pair(item[0], item[1]))
-            self.pairs = pairs
+            found = self._read()
+            self.read_only = found is None
+            self.pairs = found or set()
         return self.pairs
 
     def save(self) -> bool:
         """Ecrit la memoire. Faux si le disque a refuse : on garde la
-        decision en memoire, elle sera ecrite a la prochaine occasion."""
+        decision en memoire, elle sera ecrite a la prochaine occasion.
+
+        Tant que le fichier n'a pas pu etre lu, on le relit d'abord et l'on
+        y ajoute ce qu'on a decide entre-temps : l'ecraser perdait toutes
+        les decisions d'avant.
+        """
         with self.lock:
-            data = {"version": 1, "pairs": sorted([a, b] for a, b in self._loaded())}
+            pairs = self._loaded()
+            if self.read_only:
+                found = self._read()
+                if found is None:
+                    return False
+                pairs |= found
+                self.read_only = False
+                self.problem = ""
+            data = {"version": 1, "pairs": sorted([a, b] for a, b in pairs)}
         try:
             _write_json(self.path, data)
             return True
@@ -314,9 +380,12 @@ class LookMemo:
         if self.values is not None:
             return
         values: dict = {}
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        text = config._read_text(self.path)
+        raw = config._parse_object(text) if isinstance(text, str) else {}
+        if raw is None:
+            # Un cache se recalcule, mais on garde le fichier abime de cote
+            # plutot que de l'ecraser sans rien dire.
+            config._set_aside(self.path)
             raw = {}
         if isinstance(raw, dict):
             for name, text in (raw.get("looks") or {}).items():

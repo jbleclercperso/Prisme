@@ -240,6 +240,58 @@ def _shrink(wants: list, floors: list, budget: int):
     return widths(low)
 
 
+# En deca de tant de pixels gagnes, on ne rogne pas un nom : « root » devenait
+# « r…t » pour un seul pixel.
+_NOT_WORTH = 12
+
+
+def _floor_width(text: str, metrics, natural: int) -> int:
+    """La plus petite largeur qui dise encore quelque chose d'un nom.
+
+    Le dessin coupe au milieu : il lui faut au moins une lettre de chaque
+    cote des points de suspension, sans quoi il ne reste que « … » -- le
+    plancher calcule sur « ab… » etait trop etroit pour cela, et le dossier
+    parent s'affichait « … ». Plutot que de deviner comment Qt partage la
+    place (il compte en fractions de pixel, et la moitie gauche doit loger
+    sa premiere lettre), on lui demande : quelques dizaines d'essais, a
+    peine une fraction de milliseconde.
+    """
+    margins = natural - metrics.horizontalAdvance(text)
+    if len(text) <= 3:
+        return natural
+    room = None
+    for width in range(metrics.horizontalAdvance("…"), natural - margins + 1):
+        shown = metrics.elidedText(text, Qt.ElideMiddle, width)
+        if len(shown) >= 3 and shown[0] != "…" and shown[-1] != "…":
+            room = width
+            break
+    if room is None:
+        return natural
+    shortest = margins + room
+    if natural - shortest < _NOT_WORTH:
+        return natural
+    return min(natural, shortest)
+
+
+def _cached_floor(widget) -> int:
+    """Le plancher d'un segment, calcule une fois par nom et par police : le
+    fil d'Ariane le redemande a chaque redimensionnement."""
+    natural = widget.natural()
+    key = (widget.text(), widget.font().toString(), natural)
+    if getattr(widget, "_floor_key", None) != key:
+        widget._floor_key = key
+        widget._floor_value = _floor_width(key[0], widget.fontMetrics(), natural)
+    return widget._floor_value
+
+
+def _elided(text: str, metrics, room: int) -> str:
+    """Le nom coupe au milieu ; a droite si le milieu ne laisse que « … »."""
+    shown = metrics.elidedText(text, Qt.ElideMiddle, max(0, room))
+    if shown == "…" and text != "…":
+        shown = metrics.elidedText(text, Qt.ElideRight, max(0, room))
+    return shown
+
+
 class _Crumb(QPushButton):
     """Un segment du fil d'Ariane : son nom entier quand la place le permet,
     rogne au milieu sinon — le debut et la fin d'un nom sont ce qui le
@@ -258,19 +310,16 @@ class _Crumb(QPushButton):
         return QPushButton.sizeHint(self).width()
 
     def floor(self) -> int:
-        """La plus petite largeur qui dise encore quelque chose : deux
-        lettres et les points de suspension."""
-        metrics = self.fontMetrics()
-        margins = self.natural() - metrics.horizontalAdvance(self.text())
-        return min(self.natural(), margins + metrics.horizontalAdvance("ab…"))
+        """La plus petite largeur qui dise encore quelque chose (voir
+        `_floor_width`)."""
+        return _cached_floor(self)
 
     def paintEvent(self, event):
         option = QStyleOptionButton()
         self.initStyleOption(option)
         room = self.style().subElementRect(QStyle.SE_PushButtonContents,
                                            option, self).width()
-        option.text = self.fontMetrics().elidedText(self.text(), Qt.ElideMiddle,
-                                                    max(0, room))
+        option.text = _elided(self.text(), self.fontMetrics(), room)
         painter = QStylePainter(self)
         painter.drawControl(QStyle.CE_PushButton, option)
 
@@ -291,9 +340,7 @@ class _Leaf(QLabel):
         return QLabel.sizeHint(self).width()
 
     def floor(self) -> int:
-        metrics = self.fontMetrics()
-        margins = self.natural() - metrics.horizontalAdvance(self.text())
-        return min(self.natural(), margins + metrics.horizontalAdvance("ab…"))
+        return _cached_floor(self)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -301,8 +348,7 @@ class _Leaf(QLabel):
         painter.setPen(self.palette().color(self.foregroundRole()))
         room = self.contentsRect()
         painter.drawText(room, Qt.AlignLeft | Qt.AlignVCenter,
-                         self.fontMetrics().elidedText(self.text(), Qt.ElideMiddle,
-                                                       max(0, room.width())))
+                         _elided(self.text(), self.fontMetrics(), room.width()))
         painter.end()
 
 

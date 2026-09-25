@@ -9,6 +9,7 @@ La comparaison ignore casse et accents : « Été » trouve « ete » et « ETE 
 """
 from __future__ import annotations
 
+import os
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
@@ -228,7 +229,8 @@ def build_tag_items(tags: list, videos: list, minimum: int = 1) -> list:
     carried: list = []
     counts: dict = {needle: 0 for _term, needle in folded}
     for video in videos:
-        name = fold(Path(video).name)
+        # Le nom sans fabriquer de Path : cent mille fois par calcul.
+        name = fold(os.path.basename(str(video)))
         hits = [needle for _term, needle in folded if needle in name]
         if not hits:
             continue

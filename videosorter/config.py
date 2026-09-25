@@ -227,6 +227,10 @@ DEFAULTS = {
     "ffprobe": "",
     "window": {"w": 1400, "h": 900},
     "ignore_dpi": False,         # ignorer la mise a l'echelle de Windows
+    # Decoder par la carte graphique (lu au lancement, voir main.py). Faux :
+    # le processeur decode, sans le gel qu'impose a chaque video ouverte la
+    # creation d'un peripherique Direct3D.
+    "hw_decoding": False,
     # Le partage a distance. Actif des le depart : il ne sert a rien s'il
     # faut penser a l'allumer. Mais il reste inerte tant qu'aucun mot de
     # passe n'est pose — on n'ouvre pas une collection sans serrure.
