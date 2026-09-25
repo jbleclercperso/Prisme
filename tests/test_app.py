@@ -1899,6 +1899,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     source = (Path(__file__).resolve().parents[1]
               / "videosorter" / "window.py").read_text(encoding="utf-8")
     handled = set(_re.findall(r"key == Qt\.Key_([A-Z])\b", source))
+    # Les touches de fonction aussi : F1, F2, F11 manquaient a la fiche.
+    handled |= set(_re.findall(r"key == Qt\.Key_(F\d{1,2})\b", source))
     documented = documented_keys()
     missing = sorted(handled - documented)
     check(not missing,
@@ -2097,6 +2099,11 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(wanted_cinema == [True], "le double-clic demande le cinéma")
     check(sp.player.playbackState() == _QMP.PlaybackState.PlayingState,
           "et ses deux clics se compensent : la vidéo joue toujours")
+    # La fenetre l'a entendu : plein ecran, dont on ressort pour la suite.
+    check(window.cinema and window.isFullScreen(),
+          "la fenêtre passe en plein écran")
+    window.toggle_cinema(False)
+    pump(app, 0.2)
 
     decisions = window._decisions
     window.act_skip()
@@ -2257,7 +2264,10 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           f"clic droit : une pastille par destination ({len(radial.rects)})")
     check(window.single.player.playbackState() == window.single.player.PlaybackState.PlayingState,
           "et la lecture continue")
-    check(not window.single.video.isHidden(), "l'image reste visible")
+    # La premiere image d'un fichier tout juste ouvert peut tarder sous
+    # charge : on l'attend, puis on verifie que la rosace ne l'a pas cachee.
+    check(wait_for(app, lambda: not window.single.video.isHidden(), 5),
+          "l'image reste visible")
     sent = []
     kept_move = window.act_move
     window.act_move = lambda dest: sent.append(dest["label"])
@@ -5982,6 +5992,215 @@ def check_quiet_and_header(app, window, base, root) -> None:
     pump(app, 0.3)
 
 
+def check_chosen_features(app, window, base, tri) -> None:
+    """Plein ecran, favori d'un clic, renommage, doublons, hasard sans remise."""
+    from PySide6.QtWidgets import QScrollArea as _Scroll
+    from videosorter.dupes import DupeGroup
+    from videosorter.dupes_memory import NOT_DUPES
+    from videosorter.help import HelpDialog, documented_keys
+    from videosorter.split import Deck
+
+    print("\n[98] Plein écran : F11, Alt+Entrée, double-clic")
+    window.cfg["quiet_explained"] = True
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+    folder = fresh_root(app, window, base, tri, "choisies", 6)
+    window.toggle_board(False)
+    window.show_item(0)
+    pump(app, 0.3)
+    before = window.windowState()
+    QTest.keyClick(window, Qt.Key_F11)
+    pump(app, 0.2)
+    check(window.cinema and window.isFullScreen() and window.top_bar.isHidden(),
+          "F11 : l'image seule, sur tout l'écran")
+    QTest.keyClick(window, Qt.Key_Escape)
+    pump(app, 0.2)
+    check(not window.cinema and not window.isFullScreen()
+          and window.windowState() == before,
+          "Échap en sort, la fenêtre reprend son état")
+    QTest.keyClick(window, Qt.Key_Return, Qt.AltModifier)
+    pump(app, 0.2)
+    check(window.cinema, "Alt+Entrée y entre — et ne met plus en pause")
+    window.single.cinemaRequested.emit()
+    pump(app, 0.2)
+    check(not window.cinema and window.windowState() == before,
+          "le double-clic sur l'image en sort")
+
+    print("\n[99] Favori : ★ puis la suivante, si on le demande")
+    window.cfg["advance_after_star"] = False
+    start = window.index
+    QTest.keyClick(window, Qt.Key_1)
+    check(window.ratings.get(window.current.path) == 1 and window.index == start,
+          "par défaut, 1 met en favori et reste sur la vidéo")
+    action = window._menu_by_text.get("Passer à la suivante après ★")
+    check(action is not None and action.isCheckable() and not action.isChecked(),
+          "l'option est dans ⋯ › Affichage, décochée")
+    window.toggle_advance_after_star()
+    QTest.keyClick(window, Qt.Key_2)
+    pump(app, 0.2)
+    check(window.index == start + 1
+          and window.ratings.get(window.items[start].path) == 1,
+          f"cochée, ★ passe à la suivante ({start} → {window.index})")
+    QTest.keyClick(window, Qt.Key_0)
+    check(window.index == start + 1, "0 retire sans avancer")
+    window.toggle_advance_after_star()
+
+    print("\n[100] Renommer sur place (F2)")
+    item = window.current
+    old = Path(item.path)
+    QTest.keyClick(window, Qt.Key_F2)
+    field = window._rename_field
+    check(field is not None and field.text() == old.name
+          and field.selectedText() == old.stem,
+          "F2 : le titre devient un champ, le nom sans l'extension sélectionné")
+    if field is not None:
+        field.setText("a|b")
+        QTest.keyClick(field, Qt.Key_Return)
+        pump(app, 0.2)
+    check(old.exists() and window._rename_field is not None
+          and window._rename_field.text() == "a|b",
+          "un caractère interdit sous Windows est refusé, le champ reste")
+    if window._rename_field is not None:
+        QTest.keyClick(window._rename_field, Qt.Key_Escape)
+    check(window._rename_field is None and old.exists(), "Échap renonce")
+    QTest.keyClick(window, Qt.Key_F2)
+    window.ratings.set(old, 1)
+    if window._rename_field is not None:
+        window._rename_field.setText("nouveau nom")
+        QTest.keyClick(window._rename_field, Qt.Key_Return)
+    settle(app, window)
+    new = old.with_name("nouveau nom" + old.suffix)
+    check(new.exists() and not old.exists(),
+          f"renommée sur le disque, l'extension gardée ({new.name})")
+    check(window.current is item and Path(item.path) == new
+          and window.ratings.get(new) == 1,
+          "la fiche et le favori suivent")
+    QTest.keyClick(window, Qt.Key_Z, Qt.ControlModifier)
+    settle(app, window)
+    check(old.exists() and not new.exists() and Path(item.path) == old,
+          "Ctrl+Z lui rend son nom")
+    taken = window.items[(window.index + 1) % len(window.items)]
+    QTest.keyClick(window, Qt.Key_F2)
+    if window._rename_field is not None:
+        window._rename_field.setText(Path(taken.path).name)
+        QTest.keyClick(window._rename_field, Qt.Key_Return)
+    settle(app, window)
+    check(old.exists() and Path(taken.path).exists(),
+          "un nom déjà pris est refusé : rien n'est écrasé")
+    window._cancel_rename()
+
+    print("\n[101] Planche et mur : l'étoile d'un clic")
+    window.toggle_board(True)
+    pump(app, 0.3)
+    target = window.board.items[1]
+    was = window.ratings.get(target.path)
+    window.board.favoriteToggled.emit(1)
+    check(window.ratings.get(target.path) == (0 if was else 1)
+          and window.board.cards[1].stars_value == (0 if was else 1),
+          "l'étoile d'une vignette bascule son favori, et la carte suit")
+
+    print("\n[102] Doublons : le meilleur marqué, les autres cochés")
+    clips = [str(p) for p in sorted(folder.glob("*.mp4"))]
+    groups = [DupeGroup(clips[0:3], [3000, 2000, 1000]),
+              DupeGroup(clips[3:5], [500, 500])]
+    window.dupes = None
+    window._dupes_stopped = False
+    window._dupes_from_sigs = False
+    window._dupes_by_image = False
+    window.on_dupes_found(groups)
+    window.show_found_dupes()
+    pump(app, 0.3)
+    notes = [getattr(i, "board_note", "") for i in window.items]
+    check(notes[0] == "✓ à garder" and notes[3] == "✓ à garder"
+          and "de moins" in notes[1],
+          f"le meilleur de chaque groupe est désigné, l'écart se lit ({notes})")
+    check(window.board.cards[1].meta.full_text().startswith(notes[1]),
+          "sur la carte elle-même")
+    check(len(window.board.picked_ids) == 3
+          and window.items[0].item_id not in window.board.picked_ids,
+          f"les exemplaires en trop sont cochés d'office ({len(window.board.picked_ids)})")
+    check(not window.not_dupes_button.isHidden(),
+          "« Pas des doublons » paraît dans la barre des cochés")
+    window.board.clear_picked()
+    window.board.picked_ids.add(window.items[3].item_id)
+    window.not_dupes_picked()
+    pump(app, 0.2)
+    check(len(window.items) == 3 and NOT_DUPES.est_ignoree(clips[3], clips[4]),
+          "« Pas des doublons » retire le groupe et le retient")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+    check(window.not_dupes_button.isHidden(), "hors des doublons, le geste disparaît")
+
+    print("\n[103] Le hasard sans remise")
+    deck = Deck()
+    pool = [f"v{n}" for n in range(12)]
+    drawn = [deck.draw(pool) for _ in range(12)]
+    check(len(set(drawn)) == 12 and deck.rounds == 0,
+          "douze tirages dans douze vidéos : aucune ne revient")
+    check(deck.draw(pool, {"v3"}) not in ("", "v3") and deck.rounds == 1,
+          "puis un nouveau tour, sans ce qui est à l'écran")
+    window.start_root(folder, MODE_FILES)
+    wait_for(app, lambda: not window.scanning and len(window.items) >= 6, 30)
+    seen = []
+    for _ in range(4):
+        window.pick_random()
+        wait_for(app, lambda: not window.scanning, 30)
+        pump(app, 0.1)
+        if window.current is not None:
+            seen.append(str(window.current.path))
+    check(len(seen) == 4 and len(set(seen)) == 4,
+          f"Ctrl+H ne remontre pas une vidéo déjà tirée ({len(set(seen))}/4)")
+
+    print("\n[104] Le mur : ⤢ puis Échap y ramène")
+    orientation = window.cfg["wall_orientation"]
+    window.set_tab(TAB_SPLIT)
+    window.set_wall_orientation("any")
+    window.set_wall_count(2)
+    wait_for(app, lambda: all(p.video_path for p in window.wall.panes), 20)
+    shown = [p.video_path for p in window.wall.panes]
+    if shown and shown[0]:
+        window.wall.panes[0].opened.emit(shown[0])
+        wait_for(app, lambda: not window.scanning, 30)
+        pump(app, 0.2)
+        check(window.tab == TAB_FOLDERS and not window.browsing
+              and str(window.current.path) == shown[0],
+              "⤢ ouvre la fiche de la vidéo")
+        QTest.keyClick(window, Qt.Key_Escape)
+        wait_for(app, lambda: [p.video_path for p in window.wall.panes] == shown, 10)
+        check(window.tab == TAB_SPLIT
+              and [p.video_path for p in window.wall.panes] == shown,
+              "Échap ramène au même mur, les mêmes vidéos")
+        path = window.wall.panes[1].video_path
+        was = window.ratings.get(path)
+        window.wall.favoriteToggled.emit(path)
+        check(window.ratings.get(path) == (0 if was else 1)
+              and window.wall.panes[1].favorite == (not was),
+              "l'étoile d'un panneau enregistre le favori")
+    else:
+        check(False, "le mur se remplit")
+    window.set_wall_orientation(orientation or "vertical")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+
+    print("\n[105] L'aide dit les touches réelles")
+    keys = documented_keys()
+    check({"F1", "F2", "F11"} <= keys, "F1, F2 et F11 y figurent")
+    sheet = HelpDialog()
+    sheet.show()
+    pump(app, 0.2)
+    area = sheet.findChild(_Scroll)
+    check(area is not None and area.horizontalScrollBar().maximum() == 0,
+          "la fiche se lit sans défiler de côté")
+    text = " ".join(f"{k} {w}" for _t, rows in __import__(
+        "videosorter.help", fromlist=["SHORTCUTS"]).SHORTCUTS for k, w in rows)
+    check("Note" not in text and "0 à 5" not in text,
+          "ni note de 1 à 5, ni chip « Note » disparus")
+    sheet.close()
+    sheet.deleteLater()
+    check("F1" in window.more_button.toolTip(),
+          "l'infobulle de ⋯ renvoie à F1 au lieu d'une liste qui vieillit")
+
+
 def _transfer_for_test(src, dest):
     from videosorter.transfer import Transfer
     Path(dest).mkdir(parents=True, exist_ok=True)
@@ -6204,6 +6423,7 @@ def main() -> int:
     check_fluidity(app, window, base, root)
     check_navigation(app, window, base)
     check_quiet_and_header(app, window, base, root)
+    check_chosen_features(app, window, base, tri)
 
     window.close()
     pump(app, 0.3)

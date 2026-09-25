@@ -6,6 +6,8 @@ fait échouer le jeu de tests — c'est ce qui garantit que la fiche reste vraie
 """
 from __future__ import annotations
 
+import re
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QScrollArea, QVBoxLayout, QWidget,
@@ -14,27 +16,47 @@ from PySide6.QtWidgets import (
 # (section, [(touche, ce qu'elle fait)])
 SHORTCUTS = [
     ("Trier", [
-        ("0 à 5", "1 à 5 : en favori ; 0 : retiré des favoris"),
+        ("1 à 5, 0", "1 à 5 : en favori ; 0 : retiré des favoris"),
         ("6, 7, 8… puis A, Z, E…", "l'envoyer vers la destination de cette touche"),
         ("Espace", "passer au suivant sans rien décider"),
-        ("Suppr", "l'écarter dans la corbeille de session"),
-        ("Planche et mur", "Suppr, les destinations et 0 à 5 visent la vignette "
+        ("Suppr", "l'écarter dans la corbeille de session — sur le NAS, détruit "
+                  "pour de bon à la fermeture"),
+        ("Planche et mur", "Suppr, les destinations, 1 à 5 et 0 visent la vignette "
                            "ou le panneau sous la souris, ou les éléments cochés ; "
                            "sinon, rien"),
-        ("Ctrl+Z", "annuler la dernière décision"),
+        ("Clic sur ☆", "sur la vignette survolée ou le bandeau d'un panneau du "
+                       "mur : en favori, ou retiré"),
+        ("F2", "renommer ce qu'on regarde, sur place : Entrée valide, Échap "
+               "annule ; l'extension reste"),
+        ("Ctrl+Z", "annuler la dernière décision, ou le dernier renommage"),
         ("Ctrl+B", "ouvrir la corbeille de session"),
+        ("⋯ → Passer à la suivante après ★", "sur la fiche d'une vidéo, 1 à 5 "
+                                             "passent aussi à la suivante"),
     ]),
     ("Se déplacer", [
-        ("← →", "élément précédent, suivant ; sur la planche, page précédente, suivante"),
+        ("← →", "élément précédent, suivant — sans sortir du dossier si « rester "
+                "dans ce dossier » est cochée ; sur la planche, page précédente, "
+                "suivante"),
         ("Molette", "avancer ou reculer dans la vidéo"),
         ("Ctrl+↓", "entrer dans le dossier affiché"),
-        ("Échap", "quitter le cinéma, puis la fiche, puis le dossier"),
-        ("Ctrl+←/→", "page d'aperçus précédente, suivante"),
-        ("Ctrl+H", "une vidéo au hasard, partout"),
+        ("Ctrl+↑", "remonter au dossier parent"),
+        ("Échap", "quitter le plein écran, puis la fiche — vers le mur si elle "
+                  "en vient —, puis remonter d'un dossier"),
+        ("Alt+←", "revenir à l'endroit visité juste avant"),
+        ("Ctrl+←/→", "page précédente, suivante : de vignettes sur la planche, "
+                     "d'aperçus sur une fiche"),
+        ("Ctrl+H, ou le dé", "une vidéo au hasard dans toute la collection : "
+                             "aucune ne revient avant que toutes soient passées"),
+        ("« Au hasard ici »", "de même, dans ce dossier ou dans la liste affichée"),
     ]),
     ("Regarder", [
-        ("Ctrl+J", "cinéma : l'image seule, sans rien autour"),
-        ("Ctrl+J sur le mur", "le mur seul, plein écran — Échap pour revenir"),
+        ("F", "la fiche de la vidéo sous la souris : vignette, aperçu, panneau "
+              "du mur"),
+        ("Entrée, clic sur l'image", "pause, reprise"),
+        ("F11, Alt+Entrée, Ctrl+J", "plein écran : l'image seule, sans rien "
+                                    "autour — sur le mur, le mur seul"),
+        ("Double-clic sur l'image", "plein écran, et retour ; sur la vidéo "
+                                    "ouverte à côté, sa fiche en plein écran"),
         ("Ctrl+P", "basculer entre la planche et la fiche"),
         ("Ctrl+M", "couper ou rendre le son"),
         ("Ctrl+molette", "zoomer dans l'image"),
@@ -42,45 +64,56 @@ SHORTCUTS = [
                                    "en cliquer une envoie la vidéo, sans rien arrêter"),
         ("Maj (maintenue)", "neuf instants en mosaïque ; cliquer une case y va"),
         ("Glisser sur l'image", "avancer ou reculer : toute la largeur, toute la durée"),
-        ("Clic sur l'image", "pause, reprise"),
         ("Clic droit sur une vignette", "l'ouvrir à côté, sans quitter la planche"),
     ]),
     ("Choisir et agir", [
         ("Ctrl+A", "cocher tout"),
         ("Ctrl+N", "tout décocher"),
         ("Ctrl+I", "inverser la sélection"),
-        ("Ctrl+E", "ouvrir le dossier, le fichier déjà sélectionné"),
+        ("Ctrl+E", "montrer dans l'explorateur : la vignette ou le panneau "
+                   "survolé, sinon ce qu'on regarde"),
         ("Ctrl+O", "l'ouvrir dans le lecteur du système"),
         ("Ctrl+D", "modifier les destinations"),
         ("Ctrl+T", "afficher ou masquer l'arborescence"),
         ("Ctrl+F", "aller au champ de recherche"),
         ("Ctrl+R", "réanalyser ce dossier en entier — à la racine, toute la "
                    "collection, après confirmation"),
-        ("Ctrl+K", "passer à autre chose — Échap ou un double-clic pour revenir"),
+        ("Ctrl+K", "passer à autre chose — Ctrl+K, Échap ou un double-clic pour "
+                   "revenir"),
         ("Ctrl+Alt+K", "la même chose depuis n'importe quelle fenêtre — sans jamais "
                        "ramener Prisme"),
-        ("Chip « Note »", "n'afficher que les éléments notés ainsi — exactement, pas « au moins »"),
-        ("Chip « Non vus »", "ne garder que ce qui n'a été ni décidé ni regardé"),
+        ("F1", "cette fiche"),
+        ("« Non vus »", "ne garder que ce qui n'a été ni décidé ni regardé"),
         ("⋯ → Rafale", "la suivante arrive toute seule après 8 s sans décision"),
+        ("⋯ → Doublons", "le meilleur de chaque groupe est marqué « ✓ à garder », "
+                         "les autres sont cochés d'office ; « Pas des doublons » "
+                         "retire un groupe pour de bon"),
+        ("⋯ → Empreintes", "sonde ce qui manque ; ensuite les doublons sortent sans toucher au disque"),
         ("⋯ → Journal des gels", "quand l'interface s'est figée, combien de temps, après quoi"),
         ("⋯ → Analyser les titres", "lit le titre des métadonnées de chaque vidéo, pour les mots fréquents"),
         ("⋯ → Repérer les plans", "les vignettes se posent sur des changements de plan, non sur des fractions"),
-        ("⋯ → Empreintes", "sonde ce qui manque ; ensuite les doublons sortent sans toucher au disque"),
         ("⋯ → Afficher les dossiers masqués", "montre, ou remasque, « BIN » et ce qu'il contient"),
         ("⋯ → Partage à distance", "le mot de passe, l'adresse publique à scanner, "
                                    "et qui a regardé quoi"),
         ("⋯ → Où sont les vignettes", "leur dossier, et comment le partager avec un autre PC"),
         ("⋯ → Ignorer la mise à l'échelle", "sur un écran agrandi, rend à la fenêtre une taille qui tient"),
-        ("Mur : ▸ ⚄ ⤢ ⛶", "la suivante du même dossier ; une autre n'importe où ; "
-                            "ouvrir sa fiche ; cette vidéo seule en grand"),
-        ("Mur : clic droit sur un panneau", "les destinations, pour le ranger sans quitter le mur"),
-        ("Mur : Maj + clic droit", "ses neuf instants ; cliquer une case y va"),
+    ]),
+    ("Le mur", [
+        ("◂ ⏯ ▸", "la précédente du panneau ; pause ; une autre au hasard, sans "
+                  "remise — ou la suivante du même dossier si « rester dans ce "
+                  "dossier » est cochée"),
+        ("☆ ⤢ ⛶", "en favori ; ouvrir sa fiche (Échap ramène au mur) ; cette "
+                  "vidéo seule en grand"),
+        ("Clic sur un panneau", "pause, reprise"),
+        ("Clic droit sur un panneau", "les destinations, pour le ranger sans quitter le mur"),
+        ("Maj + clic droit", "ses neuf instants ; cliquer une case y va"),
+        ("Molette sur un panneau", "avancer ou reculer dans cette vidéo seulement"),
     ]),
 ]
 
 SEARCH_HELP = [
     ("plage montagne", "les deux mots sont exigés"),
-    ("plage or mer", "l'un ou l'autre suffit"),
+    ("plage or mer, plage ou mer", "l'un ou l'autre suffit"),
     ("plage -hiver", "« plage », mais pas « hiver »"),
     ('"saison 2"', "l'expression exacte, espaces compris"),
     ("~montagne", "à peu près : « mongagne » et « Montaigne » aussi"),
@@ -97,15 +130,19 @@ QLabel#helpIntro { color: #8b94a1; font-size: 13px; }
 
 
 def _table(rows: list) -> str:
-    """Deux colonnes alignees, en HTML : la touche, puis ce qu'elle fait."""
+    """Deux colonnes, en HTML : la touche, puis ce qu'elle fait.
+
+    Toute la largeur, et des lignes qui se replient : en « nowrap », la fiche
+    defilait a l'horizontale des qu'une description etait un peu longue.
+    """
     lines = []
     for key, what in rows:
         lines.append(
-            f'<tr><td style="padding:2px 18px 2px 0;color:#e9eef4;'
-            f'white-space:nowrap"><b>{key}</b></td>'
+            f'<tr><td width="36%" style="padding:2px 14px 2px 0;'
+            f'color:#e9eef4"><b>{key}</b></td>'
             f'<td style="padding:2px 0">{what}</td></tr>'
         )
-    return "<table>" + "".join(lines) + "</table>"
+    return '<table width="100%">' + "".join(lines) + "</table>"
 
 
 class HelpDialog(QDialog):
@@ -115,7 +152,7 @@ class HelpDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Raccourcis et recherche")
         self.setStyleSheet(HELP_STYLE)
-        self.resize(620, 680)
+        self.resize(640, 700)
 
         layout = QVBoxLayout(self)
         inner = QWidget(self)
@@ -123,8 +160,9 @@ class HelpDialog(QDialog):
         body.setContentsMargins(4, 0, 10, 0)
 
         intro = QLabel(
-            "Les commandes sont sur Ctrl ou sur des touches de navigation : "
-            "chiffres et lettres restent libres pour les destinations.", inner)
+            "Les commandes sont sur Ctrl, sur les touches F1 à F12 ou de "
+            "navigation : chiffres et lettres restent aux destinations — sauf "
+            "0 à 5, pour le favori, et F, pour la fiche survolée.", inner)
         intro.setObjectName("helpIntro")
         intro.setWordWrap(True)
         body.addWidget(intro)
@@ -136,6 +174,7 @@ class HelpDialog(QDialog):
             table = QLabel(_table(rows), inner)
             table.setObjectName("helpBody")
             table.setTextFormat(Qt.RichText)
+            table.setWordWrap(True)
             body.addWidget(table)
 
         head = QLabel("Chercher", inner)
@@ -144,6 +183,7 @@ class HelpDialog(QDialog):
         search = QLabel(_table(SEARCH_HELP), inner)
         search.setObjectName("helpBody")
         search.setTextFormat(Qt.RichText)
+        search.setWordWrap(True)
         body.addWidget(search)
 
         note = QLabel(
@@ -157,6 +197,8 @@ class HelpDialog(QDialog):
 
         area = QScrollArea(self)
         area.setWidgetResizable(True)
+        # Jamais de defilement horizontal : le texte se replie a la largeur.
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         area.setWidget(inner)
         layout.addWidget(area, 1)
 
@@ -168,11 +210,14 @@ class HelpDialog(QDialog):
 
 
 def documented_keys() -> set:
-    """Touches citees par la fiche, pour que le test puisse la confronter."""
+    """Touches citees par la fiche, pour que le test puisse la confronter :
+    les lettres (« Ctrl+E ») et les touches de fonction (« F2 », « F11 »)."""
     found = set()
     for _title, rows in SHORTCUTS:
         for key, _what in rows:
-            for piece in key.replace("+", " ").replace("/", " ").split():
+            for piece in re.split(r"[\s+/,]+", key):
                 if len(piece) == 1 and piece.isalpha():
                     found.add(piece.upper())
+                elif re.fullmatch(r"F\d{1,2}", piece):
+                    found.add(piece)
     return found

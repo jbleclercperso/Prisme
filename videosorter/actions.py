@@ -412,6 +412,71 @@ def move_to(src: Path, dest_dir: Path) -> Path:
     return target
 
 
+# Ce que Windows refuse dans un nom de fichier, et les noms qu'il se reserve
+# (« CON.mp4 » compris) : un renommage qui les contient echoue sur le NAS avec
+# un message obscur, ou cree un fichier qu'on ne peut plus ouvrir.
+FORBIDDEN_CHARS = '<>:"/\\|?*'
+RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL",
+                  *(f"COM{n}" for n in range(1, 10)),
+                  *(f"LPT{n}" for n in range(1, 10))}
+
+
+def name_problem(name: str) -> str:
+    """Ce qui empeche `name` d'etre un nom de fichier Windows, dit en francais.
+
+    Vide si le nom convient. Rien n'est demande au disque : la question vaut
+    avant meme d'envoyer le renommage.
+    """
+    if not name or not name.strip():
+        return "Le nom ne peut pas être vide."
+    bad = sorted({char for char in name
+                  if char in FORBIDDEN_CHARS or ord(char) < 32})
+    if bad:
+        shown = " ".join(char if ord(char) >= 32 else "(contrôle)" for char in bad)
+        return f"Caractère interdit sous Windows : {shown}"
+    if name != name.rstrip(" ."):
+        return "Un nom ne peut pas finir par un point ou une espace."
+    if name.split(".")[0].strip().upper() in RESERVED_NAMES:
+        return f"« {name.split('.')[0]} » est un nom réservé par Windows."
+    if len(name) > 255:
+        return "Nom trop long : 255 caractères au plus."
+    return ""
+
+
+def rename_to(src: Path, new_name: str) -> Path:
+    """Renomme sur place, dans le meme dossier. Rend le nouveau chemin.
+
+    Jamais « (2) » comme pour un rangement : un nom deja pris est un refus,
+    pas un nom voisin qu'on n'aurait pas choisi. Changer la seule casse
+    (« clip » en « Clip ») reste permis, bien que Windows y voie le meme nom.
+    Sondages, empreintes et « deja vu » suivent (`_relocate`).
+    """
+    src = Path(src)
+    problem = name_problem(new_name)
+    if problem:
+        raise ActionError(problem, retry=False)
+    target = src.with_name(new_name)
+    if str(target) == str(src):
+        return src
+    _require(src)
+    same = os.path.normcase(str(target)) == os.path.normcase(str(src))
+    if not same and _taken(target):
+        raise ActionError(f"« {new_name} » existe déjà dans ce dossier.",
+                          retry=False)
+    try:
+        # os.rename ne remplace jamais un fichier existant sous Windows : un
+        # homonyme apparu entre-temps fait echouer, il n'est pas ecrase.
+        _relocate(src, target)
+    except ActionError:
+        raise
+    except FileExistsError as exc:
+        raise ActionError(f"« {new_name} » existe déjà dans ce dossier.",
+                          retry=False) from exc
+    except (OSError, shutil.Error) as exc:
+        raise ActionError(f"Renommage impossible : {describe(exc)}") from exc
+    return target
+
+
 def delete(path: Path, mode: str = "recycle") -> tuple[Path | None, bool]:
     """Supprime selon le mode choisi.
 
@@ -485,25 +550,18 @@ def undo(entry: HistoryEntry) -> Path:
     src = Path(entry.src)
     try:
         src.parent.mkdir(parents=True, exist_ok=True)
-        target = unique_target(src.parent, src.name)
+        if os.path.normcase(str(dst)) == os.path.normcase(str(src)):
+            # Un renommage de la seule casse : pour Windows, c'est le meme
+            # nom -- le croire pris donnait « clip (2).mp4 ».
+            target = src
+        else:
+            target = unique_target(src.parent, src.name)
         _relocate(dst, target)
     except ActionError:
         raise
     except (OSError, shutil.Error) as exc:
         raise ActionError(f"Restauration impossible : {describe(exc)}") from exc
     return target
-
-
-def reveal(path: Path) -> None:
-    """Ouvre l'explorateur sur l'élément."""
-    path = Path(path)
-    if sys.platform != "win32":
-        return
-    flags = subprocess.CREATE_NO_WINDOW
-    if path.exists():
-        subprocess.Popen(["explorer", "/select,", str(path)], creationflags=flags)
-    elif path.parent.exists():
-        subprocess.Popen(["explorer", str(path.parent)], creationflags=flags)
 
 
 def open_recycle_bin() -> None:

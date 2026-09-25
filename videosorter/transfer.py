@@ -28,7 +28,7 @@ _IDS = itertools.count(1)
 class Transfer:
     """Une opération disque en attente, en cours ou terminée."""
 
-    kind: str                       # "move" | "delete" | "undo"
+    kind: str                       # "move" | "delete" | "undo" | "rename"
     # "move" range l'element, "delete" l'ecarte dans la corbeille de session :
     # meme operation disque, consequences differentes sur les compteurs.
     purpose: str = "move"
@@ -38,6 +38,8 @@ class Transfer:
     dest: Path | None = None
     mode: str = ""                  # mode de suppression
     entry: object = None            # HistoryEntry, pour une annulation
+    # Pour un renommage : le nouveau nom, dans le meme dossier.
+    new_name: str = ""
     id: int = field(default_factory=lambda: next(_IDS))
     state: str = "pending"          # pending | running | done | failed
     result: Path | None = None
@@ -85,6 +87,16 @@ class _Runner(QRunnable):
                     _count_others(job)
                 else:
                     _carry_thumbs(job.src, job.result)
+            elif job.kind == "rename":
+                # Dans la meme file que les rangements : sur le NAS, un
+                # renommage est un aller-retour reseau, et l'ordre des
+                # decisions reste celui de l'historique (Ctrl+Z).
+                job.result = actions.retry(
+                    actions.rename_to, job.src, job.new_name,
+                    attempts=RETRY_ATTEMPTS, delay=RETRY_DELAY,
+                )
+                job.reversible = True
+                _carry_thumbs(job.src, job.result)
             elif job.kind == "delete":
                 job.result, job.reversible = actions.retry(
                     actions.delete, job.src, job.mode,

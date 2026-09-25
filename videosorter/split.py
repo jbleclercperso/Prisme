@@ -47,6 +47,70 @@ ORIENTATIONS = (("vertical", "▯ Verticales"), ("horizontal", "▭ Horizontales
                 ("any", "▯▭ Tous formats"))
 
 
+class Deck:
+    """Le hasard sans remise : chaque video sort une fois avant qu'aucune ne revienne.
+
+    `random.choice` ramenait la meme video trois fois en vingt tirages, et en
+    laissait d'autres de cote pour toujours. Un paquet melange d'avance aurait
+    coute un melange de cent mille chemins a chaque fois que le vivier change
+    (collection, filtre, orientation) : on tire donc au hasard dans le vivier
+    tel qu'il est, et l'on rejette ce qui est deja sorti. Quelques essais
+    suffisent tant que le paquet est plein ; la liste exacte de ce qui reste
+    ne se dresse que lorsqu'il s'epuise, et un nouveau tour commence quand
+    tout est passe.
+
+    Ce qui est sorti est retenu par chemin, et non par position : un vivier
+    refait garde la memoire des tirages, et ne remontre pas ce qu'on vient de
+    voir.
+    """
+
+    # Au-dela, le paquet est presque vide : on dresse la liste des restes.
+    TRIES = 24
+
+    def __init__(self):
+        self.drawn: set = set()
+        self.rounds = 0
+
+    def draw(self, pool, avoid=()) -> str:
+        """Une video de `pool` jamais sortie dans ce tour, hors `avoid` ("" sinon)."""
+        if not pool:
+            return ""
+        return self.draw_with(lambda: random.choice(pool), lambda: pool, avoid)
+
+    def draw_with(self, pick, everything, avoid=(), accept=None) -> str:
+        """Le meme tirage, quand le vivier ne se donne pas en liste.
+
+        `pick()` rend un candidat au hasard (a poids egaux sur les videos) ;
+        `everything()` rend tout le vivier, et n'est appele que lorsque le
+        paquet s'epuise. `accept` ecarte ce qui ne doit pas sortir du tout.
+        """
+        if not isinstance(avoid, (set, frozenset)):
+            avoid = set(avoid)
+        drawn = self.drawn
+        for _ in range(self.TRIES):
+            video = pick()
+            if (video and video not in drawn and video not in avoid
+                    and (accept is None or accept(video))):
+                drawn.add(video)
+                return video
+        rest = [video for video in everything()
+                if video not in drawn and video not in avoid
+                and (accept is None or accept(video))]
+        if not rest:
+            # Tout le vivier est passe : un nouveau tour. Ce qui est deja a
+            # l'ecran compte pour ce tour-ci, et ne revient pas aussitot.
+            self.rounds += 1
+            drawn.clear()
+            drawn.update(avoid)
+            rest = [video for video in everything()
+                    if video not in avoid and (accept is None or accept(video))]
+            if not rest:
+                return ""
+        video = random.choice(rest)
+        drawn.add(video)
+        return video
+
+
 def grid_for(count: int, orientation: str, width: int = 0,
              height: int = 0) -> tuple:
     """(rangees, colonnes) qui montrent le plus d'image possible.
@@ -448,6 +512,9 @@ class SplitWall(QWidget):
         super().__init__(parent)
         self.setStyleSheet(SPLIT_STYLE)
         self.pool: list = []
+        # Le hasard du mur est sans remise (▸, remaniement, panneau a
+        # remplir) : une video vue ne revient qu'une fois tout le vivier passe.
+        self.deck = Deck()
         self.favorite_of = lambda _path: False
         # Les demarrages echelonnes : une seule minuterie, et non une chaine
         # de minuteries a usage unique. Chaque remaniement en lancait une de
@@ -735,11 +802,21 @@ class SplitWall(QWidget):
         self.stagger.stop()
         self._starting = None
         busy = {pane.video_path for pane in self.panes if pane.video_path}
-        free = [video for video in self.pool if video not in busy]
-        random.shuffle(free)
-        self._queue = [(at, free.pop()) for at, pane in enumerate(self.panes)
-                       if not pane.video_path and free]
+        empty = [at for at, pane in enumerate(self.panes) if not pane.video_path]
+        self._queue = list(zip(empty, self._draw_many(len(empty), busy)))
         self._start_one()
+
+    def _draw_many(self, count: int, avoid=()) -> list:
+        """`count` videos distinctes, sans remise, hors `avoid`."""
+        avoid = set(avoid)
+        picks = []
+        for _ in range(max(0, count)):
+            video = self.deck.draw(self.pool, avoid)
+            if not video:
+                break
+            picks.append(video)
+            avoid.add(video)
+        return picks
 
     def set_favorite_of(self, lookup) -> None:
         """Comment savoir si une video est en favori : la fenetre le sait."""
@@ -892,10 +969,14 @@ class SplitWall(QWidget):
         self.caption.setText(text + " — le mur y pioche au hasard" if count else "")
 
     # -- vivier ----------------------------------------------------------
-    def set_pool(self, videos: list) -> None:
-        """Remplace le vivier et relance les panneaux."""
+    def set_pool(self, videos: list, first=None) -> None:
+        """Remplace le vivier et relance les panneaux.
+
+        `first` : les videos a reprendre, panneau par panneau -- celles d'avant
+        une fiche ouverte depuis le mur. Y revenir tirait un mur tout neuf.
+        """
         self.pool = [str(video) for video in videos]
-        self.shuffle_all()
+        self.shuffle_all(first)
 
     def grow_pool(self, videos: list) -> None:
         """Le vivier s'est etoffe : les panneaux gardent leur video, seuls les
@@ -911,7 +992,7 @@ class SplitWall(QWidget):
         self.row.setVisible(has)
         self.fill_empty()
 
-    def shuffle_all(self) -> None:
+    def shuffle_all(self, first=None) -> None:
         self.stagger.stop()
         self._queue = []
         self._starting = None
@@ -922,18 +1003,25 @@ class SplitWall(QWidget):
             for pane in self.panes:
                 pane.clear()
             return
-        picks = random.sample(self.pool, min(len(self.panes), len(self.pool)))
+        # Les videos a reprendre gardent leur panneau ; les autres se tirent
+        # sans remise, autant que le vivier en a.
+        kept = [str(path) if path else "" for path in (first or ())]
+        kept = (kept + [""] * len(self.panes))[:len(self.panes)]
+        taken = {path for path in kept if path}
+        wanted = min(len(self.panes), len(self.pool)) - len(taken)
+        fresh = iter(self._draw_many(wanted, taken))
+        picks = [path or next(fresh, "") for path in kept]
         # Un panneau a la fois, pas six d'un coup : six ouvertures simultanees
         # sur le partage, six decodages qui demarrent ensemble, et l'interface
         # ne respire plus. Echelonnes, chacun a la ligne pour lui un instant.
         # Ceux qui vont recevoir une video sont liberes sans rien decharger
         # (vacate) ; seul un panneau qui restera vide rend son fichier.
         for at, pane in enumerate(self.panes):
-            if at < len(picks):
+            if picks[at]:
                 pane.vacate()
             else:
                 pane.clear()
-        self._queue = list(enumerate(picks))
+        self._queue = [(at, path) for at, path in enumerate(picks) if path]
         self._start_one()
 
     def _start_one(self) -> None:
@@ -967,10 +1055,11 @@ class SplitWall(QWidget):
         """Remplace la vidéo d'un seul panneau, sans toucher aux autres."""
         if not self.pool or not (0 <= index < len(self.panes)):
             return
-        # On evite de reposer ce qui est deja a l'ecran, tant qu'il y a le choix.
+        # Sans remise, et jamais ce qui est deja a l'ecran tant qu'il y a le
+        # choix : ▸ ramenait souvent une video vue deux minutes plus tot.
         busy = {pane.video_path for pane in self.panes if pane.video_path}
-        choices = [video for video in self.pool if video not in busy] or self.pool
-        self.panes[index].play(random.choice(choices))
+        video = self.deck.draw(self.pool, busy) or random.choice(self.pool)
+        self.panes[index].play(video)
 
     def stop(self) -> None:
         self.stagger.stop()

@@ -373,10 +373,15 @@ class BoardCard(QFrame):
         self.set_picked(False)
         self.set_stars(stars)
         self._show_head()
-        self.meta.set_full_text(item.name)
+        # Ce que la fenetre veut dire de cet element sur sa carte : dans les
+        # doublons, « ✓ à garder » ou ce qui le distingue du meilleur
+        # exemplaire. Avant le nom, qui s'abrege le premier.
+        note = getattr(item, "board_note", "")
+        self.meta.set_full_text(f"{note} · {item.name}" if note else item.name)
         count = (f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}\n"
                  if item.kind == MODE_FOLDERS else "")
-        self.meta.setToolTip(f"{item.path}\n{count}{human_size(item.size)}")
+        self.meta.setToolTip((f"{note}\n" if note else "")
+                             + f"{item.path}\n{count}{human_size(item.size)}")
         if item.kind == MODE_FOLDERS:
             # Le seul chiffre : sur une pastille posee au coin d'une image, le
             # mot « videos » ne dit rien que la vignette ne montre deja, et il
@@ -601,10 +606,6 @@ class BoardView(QWidget):
     # position. La planche n'enregistre rien elle-meme ; on lui renvoie la
     # nouvelle valeur par set_stars.
     favoriteToggled = Signal(int)
-    # Jamais emis : la croix « ecarter » des cartes a ete retiree, et la note
-    # passe par favoriteToggled. Gardes tant que la fenetre s'y branche.
-    discardRequested = Signal(int)
-    rateRequested = Signal(int, int)
 
     def __init__(self, preview_seconds: int = 10, columns: int = DEFAULT_COLUMNS,
                  parent=None):
