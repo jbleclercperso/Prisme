@@ -1775,6 +1775,23 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           f"l'analyse rend groupes et exclusions ({groups}, {excluded})")
     check("sans" in describe("plage -hiver"), "et se résume en clair")
 
+    # La recherche préparée une fois court sur des noms déjà repliés : c'est
+    # ce qui évite de replier cent mille noms à chaque frappe.
+    from videosorter.query import matches as _matches_q, tester as _tester_q
+    from videosorter.tagging import fold as _fold_q
+    _noms_q = ["Plage Été 2019.mp4", "plage hiver.mp4", "Mer du Nord.mp4",
+               "saison 2 final.mp4", "Montagne.mp4"]
+    _pareil = True
+    for _texte in ("plage", "plage ete", "plage or mer -hiver", '"saison 2"',
+                   "mer -nord", ""):
+        _p = parse(_texte)
+        _t = _tester_q(_p)
+        _pareil &= ([n for n in _noms_q if _t(_fold_q(n))]
+                    == [n for n in _noms_q if _matches_q(n, _p)])
+    check(_pareil, "la recherche préparée trouve exactement la même chose")
+    check(matches_text("plage.mp4", "plage -~"),
+          "un « -~ » seul n'écarte plus tout")
+
     # La selection au clavier porte sur toute la liste, pas sur la page.
     window.set_tab(TAB_FOLDERS)
     window.start_root(tri, MODE_FOLDERS)
@@ -2919,6 +2936,19 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         inside = _json_web.loads(body.decode("utf-8"))
         check(code == 200 and inside.get("videos"), "un dossier rend ses vidéos")
 
+        # -- le catalogue part par pages, et ne repart pas s'il n'a pas changé --
+        code, body, head = ask("/api/folders?start=0&count=1", token)
+        page = _json_web.loads(body.decode("utf-8"))
+        check(code == 200 and len(page["folders"]) == 1
+              and page["total"] == len(listed["folders"]),
+              f"une page à la fois ({len(page['folders'])} sur {page.get('total')})")
+        code, body, _h = ask("/api/folders?start=0&count=1", token,
+                             headers={"If-None-Match": head.get("ETag", "")})
+        check(code == 304 and not body, f"et rien si le navigateur l'a déjà ({code})")
+        code, _body, head = ask("/login")
+        check("script-src 'sha256-" in head.get("Content-Security-Policy", ""),
+              "la page n'exécute que ses propres scripts")
+
         # -- la lecture par morceaux : c'est elle qui permet de sauter --------
         code, body, head = ask("/video/" + one, token,
                                headers={"Range": "bytes=0-99"})
@@ -2930,6 +2960,22 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
               "il annonce qu'on peut lui demander n'importe quel passage")
         code, body, _h = ask("/video/" + one, token)
         check(code == 200 and len(body) > 100, "sans demande, il rend tout")
+        code, _body, head = ask("/video/" + one, token,
+                                headers={"Range": "bytes=999999999999-"})
+        check(code == 416 and head.get("Content-Range", "").startswith("bytes */"),
+              f"au-delà de la fin : demande impossible, pas un faux morceau ({code})")
+
+        # -- derrière le tunnel, un intrus ne bloque que lui-même ---------------
+        served.guard.tries[_web.bucket("203.0.113.9")] = (
+            _web.MAX_TRIES, time.time() + 300, time.time())
+        code, _body, _h = ask("/login", method="POST", data=b"password=x",
+                              headers={"X-Forwarded-For": "203.0.113.9"})
+        check(code == 429, f"l'intrus bloqué reste bloqué ({code})")
+        code, _body, _h = ask(
+            "/login", method="POST",
+            data=f"password={_q('un mot de passe convenable')}".encode(),
+            headers={"X-Forwarded-For": "198.51.100.7"})
+        check(code == 303, f"et le propriétaire, venu d'ailleurs, entre ({code})")
 
         # -- on ne sort pas du catalogue --------------------------------------
         for sortie in ("/video/" + "0" * 16, "/video/..%2F..%2Fwindows",
@@ -2944,6 +2990,33 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     finally:
         served.stop()
     check(not served.running, "et le serveur s'arrête proprement")
+
+    # -- le verrou des essais : réservé avant de vérifier, compté par visiteur --
+    garde = _web.Guard()
+    admis = sum(1 for _ in range(40) if garde.admit("a") == 0)
+    check(admis == _web.MAX_TRIES,
+          f"quarante essais simultanés n'en font passer que {admis}")
+    for _ in range(admis):
+        garde.settle("a", False)
+    check(garde.admit("a") > 0 and garde.admit("b") == 0,
+          "le bloqué attend, les autres non")
+    check(_web.visitor("127.0.0.1", "6.6.6.6, 203.0.113.9") == "203.0.113.9"
+          and _web.visitor("192.168.1.9", "203.0.113.9") == "192.168.1.9",
+          "l'adresse vue par le tunnel compte, celle qu'écrit un voisin non")
+    check(_web.byte_range("bytes=0-", 0) is None
+          and _web.byte_range("bytes=5-abc", 100) is None
+          and _web.byte_range("bytes=-10", 100) == (90, 99),
+          "les demandes de morceaux bizarres ne trompent plus le lecteur")
+
+    # -- la recherche web ne sort pas du web -----------------------------------
+    from videosorter import websearch as _ws
+    check(_ws.web_url("https://site.example/page", "file://evil.example/share/x.jpg") == ""
+          and _ws.web_url("https://site.example/page", "/img/a.jpg")
+          == "https://site.example/img/a.jpg",
+          "une vignette « file:// » est ignorée, une vignette du site gardée")
+    check("SECRET123" not in _ws.without_key(
+        "HTTPSConnectionPool: /search.json?q=x&api_key=SECRET123&start=0", "SECRET123"),
+        "la clé SerpAPI ne paraît pas dans les messages d'erreur")
 
     # -- le journal : qui est venu, et ce qu'il a regardé --------------------
     from videosorter.access import Journal, describe, spell
@@ -3040,6 +3113,69 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         _tun.find_fixed = kept_fixed
         window.set_tunnel_kind("cloudflare")
     check(window.cfg["tunnel_kind"] == "cloudflare", "et l'on revient en arrière")
+
+    # Tailscale lent ne fige plus rien : l'état vient d'un fil à part.
+    kept_fixed, kept_run = _tun.find_fixed, _tun._run
+    appels = []
+
+    def _tailscale_lent(args, timeout=60):
+        appels.append(list(args))
+        time.sleep(0.5)
+        if args[:2] == ["status", "--json"]:
+            return 0, _json_web.dumps({"BackendState": "Running",
+                                       "Self": {"DNSName": "essai.tail0.ts.net."}}), ""
+        return 1, "", "refusé"
+
+    _tun.find_fixed = lambda: "tailscale.exe"
+    _tun._run = _tailscale_lent
+    try:
+        _tun._STATE.update(value=None, at=0.0)
+        depart = time.perf_counter()
+        _tun.fixed_state()
+        check(time.perf_counter() - depart < 0.1,
+              "l'état de Tailscale se lit sans attendre Tailscale")
+        check(wait_for(app, lambda: _tun.fixed_state()[0], 10),
+              f"puis arrive de lui-même ({_tun.fixed_state()})")
+        appels.clear()
+        _tun.close_fixed()
+        check(not any("reset" in a for a in appels),
+              f"fermer l'adresse fixe n'efface jamais toute la configuration ({appels})")
+    finally:
+        _tun.find_fixed, _tun._run = kept_fixed, kept_run
+        _tun._STATE.update(value=None, at=0.0, published={})
+
+    # Un tunnel qu'on ferme ne crie pas à l'échec ; un tunnel qui tombe le dit.
+    class _FauxProcessus:
+        def __init__(self, lignes):
+            self.stdout = iter(lignes)
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            pass
+
+    plaintes = []
+    ferme = _tun.Tunnel(1)
+    ferme.failed.connect(plaintes.append)
+    faux = _FauxProcessus(["INF | https://a-b.trycloudflare.com |\n"])
+    ferme.process = faux
+    ferme.stop()
+    ferme._listen(faux)
+    pump(app, 0.1)
+    check(not plaintes, f"fermer le tunnel n'annonce pas d'échec ({plaintes})")
+    tombe = _tun.Tunnel(1)
+    tombe.RETRY = ()
+    tombe.failed.connect(plaintes.append)
+    faux = _FauxProcessus(["INF | https://a-b.trycloudflare.com |\n"])
+    tombe.process = faux
+    tombe._listen(faux)
+    pump(app, 0.1)
+    check(plaintes and "tombée" in plaintes[-1],
+          f"une chute, elle, se dit ({plaintes})")
 
     print("\n[75] Un dossier mis de côté, et l'interrupteur qui le révèle")
     from videosorter.scan import (
@@ -3201,6 +3337,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
               f"mais elle se copie entière ({_QGA.clipboard().text()!r})")
         check(board.link.hasSelectedText(),
               "et se montre sélectionnée, pour qu'on voie ce qui est parti")
+        check("Cloudflare" in board.warn.text() and board.beat.isActive(),
+              "l'avertissement parle du chemin choisi, et le journal se relit")
+        # Fermée comme on la ferme : « Fermer », Échap ou la croix.
+        board.reject()
+        check(not board.beat.isActive(),
+              "fermée, la fenêtre du partage ne relit plus rien toutes les quatre secondes")
     finally:
         board.close()
 
