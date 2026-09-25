@@ -54,7 +54,8 @@ SHORTCUTS = [
         ("Ctrl+D", "modifier les destinations"),
         ("Ctrl+T", "afficher ou masquer l'arborescence"),
         ("Ctrl+F", "aller au champ de recherche"),
-        ("Ctrl+R", "tout réanalyser"),
+        ("Ctrl+R", "réanalyser ce dossier en entier — à la racine, toute la "
+                   "collection, après confirmation"),
         ("Ctrl+K", "passer à autre chose — Échap ou un double-clic pour revenir"),
         ("Chip « Note »", "n'afficher que les éléments notés ainsi — exactement, pas « au moins »"),
         ("Chip « Non vus »", "ne garder que ce qui n'a été ni décidé ni regardé"),

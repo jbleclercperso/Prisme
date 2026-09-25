@@ -496,9 +496,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     QTest.keyClick(window, Qt.Key_Down, Qt.ControlModifier)
     wait_for(app, lambda: not window.scanning and window.root == parent_item.path, 60)
     check(len(window.levels) == 1, "Ctrl+↓ entre aussi dans le dossier")
-    # Echap sort maintenant par etages : de la fiche aux vignettes, puis d'un
-    # niveau de dossier, puis seulement du tri. On n'a jamais l'impression de
-    # tout perdre d'un coup.
+    # Echap sort par etages : de la fiche aux vignettes, puis d'un niveau de
+    # dossier. Au sommet, il le dit et reste la : un Echap de trop menait a
+    # l'accueil et abandonnait la verification du NAS.
     QTest.keyClick(window, Qt.Key_Escape)
     pump(app, 0.4)
     check(window.browsing, "Échap rend d'abord la planche")
@@ -508,10 +508,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(ok, "le suivant remonte d'un niveau")
     check(window.stack.currentIndex() == 1, "on reste dans l'écran de tri")
     check(window.levels == [], "la pile de navigation est vidée")
+    top_before = window.root
     QTest.keyClick(window, Qt.Key_Escape)
     pump(app, 0.4)
-    check(window.stack.currentIndex() == 0,
-          "au niveau racine, Échap quitte bien le tri")
+    check(window.stack.currentIndex() == 1 and window.root == top_before,
+          "au sommet, Échap ne quitte plus le tri pour l'accueil")
+    check("sommet" in window.banner.text(), "et le dit")
 
     print("\n[23] Un dossier sans vidéo directe se parcourt en dossiers")
     window.start_root(root, MODE_FOLDERS)
@@ -1981,20 +1983,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.show_item(0)
     check(sp._blackout, "en arrière, le chemin classique avec son noir")
 
-    wanted = window.items[2].item_id
-    window._resume_id = wanted
-    window._resume_hop = False
-    window.set_tab(TAB_VIDEOS)
-    pump(app, 0.3)
-    check(window._resume_id == "" and window.items[window.index].item_id == wanted,
-          "reprise sur le dernier élément regardé")
-    deep = next(iter(sorted(root.rglob("*.mp4"))))
-    window._resume_id = str(deep)
-    window._resume_hop = False
-    window.start_root(root, MODE_FOLDERS)
-    check(wait_for(app, lambda: not window.scanning and window._resume_id == "", 60),
-          "la racine ne le contient pas : on descend une fois")
-    check(window.root == deep.parent, "dans son dossier")
+    # La reprise au dernier element est partie : on arrive a la racine, comme
+    # demande. Plus rien ne s'ecrit a chaque fleche pour elle.
+    window.cfg["last_item"] = "rien"
+    window.show_item(1)
+    check(window.cfg["last_item"] == "rien" and not hasattr(window, "resume_last"),
+          "une fiche n'écrit plus « last_item », que personne ne relisait")
 
     window.cfg["tab"] = "zzz"
     window.cfg.save_soon()
@@ -5437,6 +5431,255 @@ def check_fluidity(app, window, base, root) -> None:
         pump(app, 0.2)
 
 
+def check_navigation(app, window, base) -> None:
+    """Navigation et etat : ce qu'on ouvre, d'ou l'on revient, ce qui reste."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QMessageBox as _QMB
+    from videosorter.window import PAGE_DONE, PAGE_SORT
+
+    print("\n[94] Navigation et état")
+    # De vraies videos de plusieurs secondes : d'autres etapes laissent des
+    # « .mp4 » de quelques octets.
+    sources = sorted(p for p in base.rglob("*.mp4")
+                     if ".videosorter-corbeille" not in str(p)
+                     and "_appdata" not in str(p) and "nav" not in p.parts
+                     and p.stat().st_size > 20000)
+    nav = base / "nav"
+    shutil.rmtree(nav, ignore_errors=True)
+    layout = {"Feuille": ["plage_a.mp4", "plage_b.mp4", "plage_c.mp4"],
+              "Rayon": [], "Trois": ["t_0.mp4", "t_1.mp4"], "Quatre": ["q_0.mp4"]}
+    for folder, names in layout.items():
+        (nav / folder).mkdir(parents=True, exist_ok=True)
+        for at, name in enumerate(names):
+            shutil.copy2(sources[at % len(sources)], nav / folder / name)
+    (nav / "Rayon" / "interne").mkdir(parents=True, exist_ok=True)
+    for at in range(2):
+        shutil.copy2(sources[at % len(sources)],
+                     nav / "Rayon" / "interne" / f"plage_r{at}.mp4")
+
+    def _key(key, modifiers=Qt.NoModifier, text=""):
+        window.keyPressEvent(QKeyEvent(QEvent.KeyPress, key, modifiers, text))
+
+    def home():
+        window.set_tab(TAB_FOLDERS)
+        window.start_root(nav, MODE_FOLDERS)
+        wait_for(app, lambda: not window.scanning and len(window.items) == 4, 60)
+        window.toggle_board(True)
+        pump(app, 0.2)
+
+    def at(name):
+        return next(i for i, item in enumerate(window.items) if item.name == name)
+
+    window.close_aside()
+    window.set_sort("")
+    home()
+
+    # -- le mode d'un dossier vient de l'onglet, pas du dossier d'avant ------
+    window.show_item(at("Feuille"))
+    window.enter_current()
+    wait_for(app, lambda: not window.scanning and window.root == nav / "Feuille", 30)
+    check(window.mode == MODE_FLAT, "un dossier sans sous-dossier s'ouvre à plat")
+    window.go_home()
+    wait_for(app, lambda: not window.scanning, 30)
+    window._on_tree_folder(str(nav / "Rayon"))
+    wait_for(app, lambda: not window.scanning and window.root == nav / "Rayon", 30)
+    check(window.mode == MODE_FOLDERS and [i.name for i in window.items] == ["interne"],
+          f"le suivant, sous « Dossiers », se liste en dossiers "
+          f"({window.mode}, {[i.name for i in window.items]})")
+
+    # -- Alt+← saute un endroit disparu, sans perdre la racine --------------
+    gone = {"root": nav / "disparu", "mode": MODE_FOLDERS, "levels": [],
+            "board": True, "item_id": ""}
+    window.visited = [dict(gone)]
+    check(not window.go_back() and window.root == nav / "Rayon",
+          "rien de valide avant : on reste où l'on est, la racine intacte")
+    window.visited = [{"root": nav, "mode": MODE_FOLDERS, "levels": [],
+                       "board": True, "item_id": ""}, dict(gone)]
+    check(window.go_back(), "un endroit disparu se saute")
+    wait_for(app, lambda: not window.scanning and window.root == nav, 30)
+    check(window.root == nav and window.visited == [],
+          "on arrive au précédent encore là, sans empiler celui qu'on quitte")
+
+    # -- Echap et Ctrl+↑ : comme le bouton ↑, jamais l'accueil ---------------
+    home()
+    window.on_board_open(at("Trois"))
+    pump(app, 0.2)
+    _key(Qt.Key_Up, Qt.ControlModifier)
+    pump(app, 0.2)
+    check(window.browsing and window.root == nav,
+          "Ctrl+↑ sur une fiche rend la planche, comme le bouton ↑")
+    window.start_root(nav, MODE_FOLDERS)
+    _key(Qt.Key_Escape)
+    check(window.stack.currentIndex() == PAGE_SORT and window.scan_thread is not None,
+          "Échap au sommet n'arrête pas la relecture et ne quitte pas le tri")
+    wait_for(app, lambda: not window.scanning, 30)
+
+    # -- le tri de « Dossiers » survit à un passage par « Vidéos » -----------
+    window.set_sort("random")
+    order = [item.item_id for item in window.items]
+    window.set_tab(TAB_VIDEOS)
+    pump(app, 0.3)
+    check(window.sort_mode == "random", "« Vidéos » part au hasard")
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.3)
+    check([item.item_id for item in window.items] == order,
+          "« Dossiers » garde son ordre d'un retour à l'autre")
+    window.set_sort("")
+    window.set_tab(TAB_VIDEOS)
+    pump(app, 0.3)
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.3)
+    names = [item.sort_name for item in window.items]
+    check(window.sort_mode == "" and names == sorted(names),
+          "et son classement : « Vidéos » ne l'impose plus à tout le reste")
+
+    # -- le lecteur de côté : sa largeur, sa carte, son son ------------------
+    window.cfg["aside_split"] = None
+    window.open_aside(at("Trois"))
+    pump(app, 0.4)
+    check(window.middle.sizes()[2] >= window.ASIDE_MIN_WIDTH,
+          f"sans largeur retenue, il s'ouvre large ({window.middle.sizes()})")
+    wanted = window.items[window.aside_index].item_id
+    window.set_sort("size_desc")
+    check(window.aside_index >= 0
+          and window.items[window.aside_index].item_id == wanted,
+          "après un tri, il suit sa carte et non sa position")
+    muted = window.cfg["muted"]
+    window.toggle_mute()
+    check(window.aside_player.audio.isMuted() == (not muted),
+          "Ctrl+M le fait taire, lui aussi")
+    window.toggle_mute()
+    window.set_sort("")
+    window.start_root(nav / "Quatre", MODE_FLAT)
+    wait_for(app, lambda: not window.scanning, 30)
+    check(window.aside.isHidden() and window.aside_index == -1,
+          "ouvrir un autre dossier le referme")
+    window.open_aside(0)
+    pump(app, 0.2)
+    video = window.aside_current
+    window.aside_fullscreen()
+    pump(app, 0.3)
+    check(window.cinema and window.current is not None
+          and str(window.current.path) == video,
+          "⛶ montre la vidéo qui jouait à côté")
+    window.toggle_cinema(False)
+    pump(app, 0.2)
+
+    # -- une planche vidée par les filtres le dit ----------------------------
+    home()
+    window.apply_filter("zzqqxx", "")
+    pump(app, 0.2)
+    check(not window.board.items and "filtres" in window.board.empty.text(),
+          f"sans résultat : la planche se vide et dit pourquoi "
+          f"({window.board.empty.text()!r})")
+    window.apply_filter("", "")
+    pump(app, 0.2)
+    check(bool(window.board.items)
+          and window.board.empty.text() == "Rien à afficher ici.",
+          "le filtre effacé, les cartes et le message de l'onglet reviennent")
+
+    # -- ← → au clavier font ce que font ◂ ▸ ---------------------------------
+    steps = []
+    kept_step = window.step
+    window.step = lambda delta: steps.append(delta)
+    window.on_board_open(at("Feuille"))
+    _key(Qt.Key_Right)
+    _key(Qt.Key_Left)
+    del window.step
+    check(window.step == kept_step and steps == [1, -1], f"les flèches passent par « rester dans ce dossier » ({steps})")
+
+    # -- « Tri terminé » n'est plus un cul-de-sac ----------------------------
+    window.finish()
+    check(window.stack.currentIndex() == PAGE_DONE
+          and "décision" in window.done_page.summary.text(),
+          "le bilan compte les décisions, pas la longueur de la liste")
+    _key(Qt.Key_Escape)
+    pump(app, 0.2)
+    check(window.stack.currentIndex() == PAGE_SORT and window.browsing,
+          "Échap y ramène aux vignettes")
+    window.finish()
+    window.done_page.back.click()
+    pump(app, 0.2)
+    check(window.stack.currentIndex() == PAGE_SORT, "le bouton aussi")
+
+    # -- la barre d'avancement n'a qu'un auteur ------------------------------
+    window.progress.setRange(0, 10)
+    window.progress.setValue(7)
+    window.update_counter()
+    check(window.progress.value() == 7 and window.progress.maximum() == 10,
+          "recompter ne remet plus la barre de l'analyse à zéro")
+
+    # -- l'instant demandé est celui où la vidéo s'ouvre ---------------------
+    target = nav / "Feuille" / "plage_b.mp4"
+    window.play_in_app(str(target), 3.0)
+    check(wait_for(app, lambda: window._pending_start is None
+                   and window.single.player.position() >= 2500, 15),
+          f"un clic sur un aperçu à 3 s ouvre la vidéo à 3 s "
+          f"({window.single.player.position()} ms)")
+
+    # -- la fin du repérage des plans ne relance pas la vidéo ----------------
+    source = window.single.player.source()
+    plans = window.plans
+    window._told_scenes(1, 0)
+    check(window.plans is plans, "rien de trouvé : les aperçus restent")
+    window._told_scenes(1, 1)
+    check(window.single.player.source() == source
+          and window.single.player.position() >= 2500,
+          "des plans trouvés : la vidéo continue où elle en était")
+
+    # -- les familles de mots-clés, depuis l'intérieur d'un mot-clé ----------
+    home()
+    kept_tags, kept_family = list(window.tags), window.tag_family
+    window.tags = ["plage"]
+    window.tag_family = "mine"
+    window.tag_chips.set_value("mine")
+    window.set_tab(TAB_TAGS)
+    wait_for(app, lambda: any(i.is_tag for i in window.items), 30)
+    tags = [i for i in window.items if i.is_tag]
+    if check(bool(tags), "le mot « plage » réunit des vidéos"):
+        window.open_tag(tags[0])
+        pump(app, 0.2)
+        window.set_tag_family("top")
+        pump(app, 0.3)
+        check(window.mode == MODE_FOLDERS and not window.levels and window.at_home(),
+              "changer de famille depuis un mot-clé rend la liste des mots")
+        window.set_tag_family("mine")
+        wait_for(app, lambda: any(i.is_tag for i in window.items), 30)
+    window.tags = kept_tags
+    window.tag_family = kept_family
+    window.set_tab(TAB_FOLDERS)
+    pump(app, 0.2)
+
+    # -- Ctrl+R : la liste reste, et la collection se demande ----------------
+    home()
+    kept_question = _QMB.question
+    try:
+        _QMB.question = staticmethod(lambda *a, **k: _QMB.No)
+        window.refresh_root()
+        check(not window.scanning, "Ctrl+R à la racine demande d'abord")
+        _QMB.question = staticmethod(lambda *a, **k: _QMB.Yes)
+        window.refresh_root()
+        check(window.scanning and len(window.board.items) == 4,
+              "puis relit tout, vignettes gardées à l'écran")
+        wait_for(app, lambda: not window.scanning, 30)
+    finally:
+        _QMB.question = kept_question
+
+    # -- la fenêtre retrouve sa place ----------------------------------------
+    kept_geometry = window.geometry()
+    kept = window._geometry_to_keep()
+    check({"x", "y", "w", "h", "maximized"} <= set(kept),
+          "la place et l'état agrandi sont retenus, pas seulement la taille")
+    window._restore_geometry({"x": 12, "y": 44, "w": 730, "h": 440,
+                              "maximized": False})
+    spot = window.geometry().topLeft()
+    check((spot.x(), spot.y()) == (12, 44),
+          f"et retrouvés ({spot.x()}, {spot.y()})")
+    window.setGeometry(kept_geometry)
+    pump(app, 0.2)
+
+
 def _transfer_for_test(src, dest):
     from videosorter.transfer import Transfer
     Path(dest).mkdir(parents=True, exist_ok=True)
@@ -5482,10 +5725,15 @@ def main() -> int:
     ])
     from PySide6.QtWidgets import QMessageBox as _QMB
     _QMB.question = staticmethod(lambda *a, **k: _QMB.Yes)
+    # Un tri retenu d'une seance a l'autre s'affichait sans s'appliquer.
+    cfg["sort_mode"] = "duration_desc"
     window = MainWindow(cfg)
     window.resize(1400, 900)
     window.show()
     pump(app, 0.2)
+    check(cfg["sort_mode"] == "random" and window.sort_mode == ""
+          and window.controls.sorts.key == "",
+          "au lancement, aucun tri retenu : ni affiché, ni appliqué")
 
     # ---------------------------------------------------------------- scan
     print("\n[1] Analyse du dossier racine (mode dossiers)")
@@ -5652,6 +5900,7 @@ def main() -> int:
     check_wiring(app, window, base, root)
     check_keys_and_batches(app, window, base)
     check_fluidity(app, window, base, root)
+    check_navigation(app, window, base)
 
     window.close()
     pump(app, 0.3)
