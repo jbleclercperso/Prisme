@@ -34,17 +34,20 @@ from .dupes import (
 from .help import HelpDialog
 from .board import COLUMN_CHOICES, BoardView
 from .actions import HistoryEntry
-from .config import APP_NAME, TRASH_FOLDER_NAME, VIDEO_EXTS, Config
+from .config import (
+    APP_NAME, KIND_PHOTO, KIND_VIDEO, TRASH_FOLDER_NAME, VIDEO_EXTS, Config,
+    kind_paths, media_kind, photo_mode, set_media_kind,
+)
 from .header import (
     CONTENT_FOLDERS, CONTENT_VIDEOS, HEADER_STYLE, TAB_FOLDERS,
     TAB_FAVS, TAB_SPLIT, TAB_TAGS, TAB_VIDEOS, TABS, VIEW_BROWSE, VIEW_EDIT, Breadcrumb, Chips,
-    ControlBar, Segmented,
+    ControlBar, KindToggle, Segmented,
     build_overflow,
 )
 from . import media
 from .media import PreviewManager, Tools, page_count
 from .ratings import Ratings
-from .tagging import TagsThread, iter_tag_items
+from .tagging import TagsThread, iter_tag_items, unreadable_name
 from .split import DEFAULT_PANES, SPLIT_STYLE, Deck, SplitWall
 from .access import JOURNAL
 from .perf import LOG as STALL_LOG, WATCH, mark
@@ -77,14 +80,20 @@ from .index import INDEX
 from .transfer import Transfer, TransferQueue
 from .trash import SessionTrash
 from .tree import TreePanel
-from .icons import dress, icon
+from .floating import FloatingPlayer, covered as _covered
+from .icons import DIM, INK, dress, icon
 from .widgets import (
     Stepper, OverBar, PeekOverlay, RadialMenu, app_icon, draw_icon,
     STYLESHEET, CommandBar, DestinationsDialog, PreviewGrid, SinglePlayer,
-    FavoriteStar, TagsDialog, TrashDialog,
+    FavoriteStar, TagsDialog, TrashDialog, VeilDialog,
 )
 
 PAGE_WELCOME, PAGE_SORT, PAGE_DONE, PAGE_QUIET = 0, 1, 2, 3
+
+# Les dossiers virtuels epingles en tete de la collection : ce qu'aucun
+# nom ne range, et ce qui n'est dans aucun sous-dossier.
+PINNED_UNREAD = "À trier"
+PINNED_LOOSE = "Orphelins"
 
 
 class _RenameField(QLineEdit):
@@ -132,13 +141,9 @@ class WelcomePage(QWidget):
 
         title = QLabel(APP_NAME, self)
         title.setObjectName("title")
-        subtitle = QLabel(
-            "Choisissez un dossier racine. S'il contient des sous-dossiers, ils sont "
-            "triés un par un ; s'il ne contient que des vidéos, elles le sont une par une.",
-            self,
-        )
-        subtitle.setObjectName("subtitle")
-        subtitle.setWordWrap(True)
+        self.subtitle = QLabel("", self)
+        self.subtitle.setObjectName("subtitle")
+        self.subtitle.setWordWrap(True)
 
         self.choose = QPushButton("Choisir un dossier racine…", self)
         self.choose.setObjectName("primary")
@@ -148,12 +153,20 @@ class WelcomePage(QWidget):
         self.recent = QListWidget(self)
 
         layout.addWidget(title)
-        layout.addWidget(subtitle)
+        layout.addWidget(self.subtitle)
         layout.addSpacing(10)
         layout.addWidget(self.choose, 0, Qt.AlignLeft)
         layout.addSpacing(20)
         layout.addWidget(recent_label)
         layout.addWidget(self.recent, 1)
+        self.set_kind(KIND_VIDEO)
+
+    def set_kind(self, kind: str) -> None:
+        noun = "photos" if kind == KIND_PHOTO else "vidéos"
+        self.subtitle.setText(
+            f"Choisissez le dossier racine de vos {noun}. S'il contient des "
+            "sous-dossiers, ils sont triés un par un ; sinon, ses "
+            f"{noun} le sont une par une.")
 
     def set_recent(self, roots: list) -> None:
         self.recent.clear()
@@ -395,8 +408,10 @@ class MainWindow(QMainWindow):
         # filtres oublies d'une session a l'autre (« non vus », « horizontales
         # seules », « 5 videos au plus ») donnaient des ecrans vides qu'on ne
         # savait pas expliquer. Les recherches a garder s'enregistrent.
+        # Et toujours les videos : les photos se choisissent (Vidéos | Photos).
+        set_media_kind(KIND_VIDEO)
+        cfg["media_kind"] = KIND_VIDEO
         self.tab = TAB_FOLDERS
-        cfg["tab"] = TAB_FOLDERS
         cfg["content"] = CONTENT_FOLDERS
         cfg["view"] = VIEW_BROWSE
         # Le tri aussi : la pastille « Durée ▼ » d'hier s'affichait allumee sur
@@ -404,11 +419,11 @@ class MainWindow(QMainWindow):
         # clic l'inversait.
         # La rafale de meme : retenue d'une seance a l'autre, sans rien qui la
         # montre, elle faisait defiler les videos toutes seules au lancement.
-        for key, value in (("filter_include", ""), ("filter_exclude", ""),
-                           ("only_unseen", False), ("orientations", []),
-                           ("folder_min", 0), ("folder_max", 0),
-                           ("sort_mode", "random"), ("burst", False)):
-            cfg[key] = value
+        # Pour les deux collections : les photos gardaient sinon « Non vus »
+        # et « Horizontales » d'une seance a l'autre, et la moitie manquait.
+        for kind in (KIND_VIDEO, KIND_PHOTO):
+            self._reset_filters(cfg, kind)
+        cfg["burst"] = False
         # On arrive toujours sur les vignettes : l'edition se choisit.
         self._editing = False
         # Le reflet de l'onglet, pour la configuration. Il ne decide plus de
@@ -479,7 +494,9 @@ class MainWindow(QMainWindow):
         # les endroits visites, y compris lateralement, pour un vrai « Precedent ».
         self.visited: list = []
 
-        self.ratings = Ratings(parent=self)
+        # Videos ou photos : la collection de la derniere fois. L'index et les
+        # favoris de chacune vivent a part (`config.kind_paths`).
+        self.ratings = Ratings(path=self._enter_kind(cfg["media_kind"]), parent=self)
 
         self.trash = SessionTrash(self)
         self.trash.changed.connect(self.on_trash_changed)
@@ -500,7 +517,7 @@ class MainWindow(QMainWindow):
         self._told_startup = False
 
         self.transfers = TransferQueue(self)
-        set_veiled(cfg["veiled_names"], cfg["show_veiled"])
+        set_veiled(self._active_veil(), cfg["show_veiled"])
         self._commands_signature = None
         self._top_tags = None          # ((racine, nb videos), items) deja calcules
         self._tags_thread = None
@@ -543,6 +560,8 @@ class MainWindow(QMainWindow):
         self._collection_src = None
         self._collection_serial = 0
         self._videos_memo = None       # (cle, videos) de `_videos_from_items`
+        self._pinned_memo = None       # (cle, cartes epinglees « À trier »…)
+        self._pinned_job = None        # cle du calcul en cours
         self._flat_list = None         # (cle, liste a plat de l'onglet Videos)
         self._flat_job = None          # cle de la preparation en cours
         self._flat_show = False        # la poser a l'ecran une fois prete
@@ -663,6 +682,7 @@ class MainWindow(QMainWindow):
             WATCH.start(str(cfg["root"] or ""))
         self._siblings_cache: dict = {}
         self.welcome.set_recent(cfg["recent_roots"])
+        self._apply_kind_ui()
         self.stack.setCurrentIndex(PAGE_WELCOME)
         # Un plancher pose, et non calcule : Qt faisait de la somme des
         # largeurs de la premiere ligne le minimum de la fenetre -- 995 points
@@ -727,6 +747,12 @@ class MainWindow(QMainWindow):
         row_two = QHBoxLayout()
         row_two.setContentsMargins(0, 0, 0, 0)
         row_two.setSpacing(10)
+
+        # Videos ou photos : l'icone dit ou l'on est, un clic, et l'on trie
+        # l'autre collection, a sa derniere racine.
+        self.kind_switch = KindToggle(sort_page)
+        self.kind_switch.chosen.connect(self.pick_kind)
+        row_one.addWidget(self.kind_switch, 0)
 
         self.tabs = Segmented("", [
             (TAB_FOLDERS, "Dossiers", "Chaque dossier comme une carte"),
@@ -844,6 +870,17 @@ class MainWindow(QMainWindow):
         self.mute_button.clicked.connect(self.toggle_mute)
         row_one.addWidget(self.mute_button, 0)
 
+        # Le lecteur flottant automatique, d'un clic : allume, la video passe
+        # par-dessus tout quand Prisme est reduit ou recouvert ; eteint, elle
+        # reste dans Prisme. Le reglage vivait seul au fond du menu ⋯.
+        self.float_button = QPushButton("", sort_page)
+        self.float_button.setIconSize(QSize(20, 20))
+        self.float_button.setFixedWidth(42)
+        self.float_button.setFocusPolicy(Qt.NoFocus)
+        self.float_button.clicked.connect(self.toggle_float_auto)
+        row_one.addWidget(self.float_button, 0)
+        self._dress_float_button()
+
         # L'adresse publique ouverte : un temoin tant qu'elle l'est. Elle
         # s'ouvre d'elle-meme au lancement, et seul un bandeau de quatre
         # secondes le disait -- la bibliotheque restait joignable d'Internet
@@ -900,6 +937,9 @@ class MainWindow(QMainWindow):
                 ("Arborescence des destinations", self.toggle_tree),
                 ("Rafale : passer tout seul après 8 s", self.toggle_burst),
                 ("Passer à la suivante après ★", self.toggle_advance_after_star),
+                ("Lecteur flottant automatique", self.toggle_float_auto),
+                ("Durée du diaporama…", self.edit_slideshow_seconds),
+                ("Dossiers masqués…", self.edit_veiled),
                 ("Afficher les dossiers masqués", self.toggle_veiled),
                 ("Ignorer la mise à l'échelle de Windows", self.toggle_dpi),
             ]),
@@ -975,6 +1015,12 @@ class MainWindow(QMainWindow):
         after_star.setCheckable(True)
         after_star.setChecked(bool(self.cfg["advance_after_star"]))
         after_star.setIcon(icon("star"))
+        floating = self._menu_by_text["Lecteur flottant automatique"]
+        floating.setCheckable(True)
+        floating.setChecked(bool(self.cfg["float_auto"]))
+        floating.setToolTip("Quand Prisme est réduit ou recouvert pendant qu'une "
+                            "vidéo joue, elle continue dans une fenêtre "
+                            "toujours au premier plan")
         self.more_button.setMenu(self.overflow)
         self._name_backfill_action()
         self._name_veil_action()
@@ -1078,8 +1124,8 @@ class MainWindow(QMainWindow):
              "Les groupes des éléments cochés ne sont pas des doublons : ils "
              "quittent la liste et ne reviendront plus", self.not_dupes_picked),
             ("x", "Annuler", "Décoche tout", self.clear_picked),
-            ("trash-2", "Supprimer",
-             "Écarte les éléments cochés dans la corbeille de session "
+            ("trash-2", "Suppr",
+             "Supprime les éléments cochés — ils passent par la corbeille de session "
              "(Ctrl+B) — sur le NAS, détruits à la fermeture", self.delete_picked),
         ):
             button = QPushButton(text, self.picked_bar)
@@ -1226,6 +1272,12 @@ class MainWindow(QMainWindow):
         for deck in self.single.decks:
             deck.player.mediaStatusChanged.connect(self._seek_when_ready)
         self.single.finished.connect(self.on_video_finished)
+        # Le diaporama des photos : ⏯, Entree ou un clic sur l'image.
+        self.single.slideshowToggled.connect(self.toggle_slideshow)
+        self.slideshow_timer = QTimer(self)
+        self.slideshow_timer.setInterval(
+            max(1, int(self.cfg["slideshow_seconds"] or 6)) * 1000)
+        self.slideshow_timer.timeout.connect(self._slideshow_next)
         # Un double-clic sur l'image : le plein ecran, et retour.
         self.single.cinemaRequested.connect(lambda: self.toggle_cinema())
         self.single.radialRequested.connect(self.open_radial)
@@ -1245,12 +1297,14 @@ class MainWindow(QMainWindow):
         self.board.pageChanged.connect(self.on_board_page)
         # L'etoile de la vignette survolee : le favori d'un clic, sans fiche.
         self.board.favoriteToggled.connect(self.on_board_favorite)
+        self.board.flipNeeded.connect(self.on_board_flip)
         self.viewer.addWidget(self.grid)
         self.viewer.addWidget(self.single)
         self.wall = SplitWall(
             self.cfg["wall_panes"] or DEFAULT_PANES, self.cfg["scroll_seconds"],
             self.viewer, self.cfg["wall_orientation"] or "vertical")
         self.wall.opened.connect(self.open_video_path)
+        self.wall.revealRequested.connect(self.reveal_path)
         self.wall.set_muted(bool(self.cfg["muted"]))
         self.wall.set_stay(bool(self.cfg["stay_in_folder"]))
         self.wall.stayChanged.connect(self.set_stay_in_folder)
@@ -1298,10 +1352,45 @@ class MainWindow(QMainWindow):
             ("⏯", "Pause, ou reprendre   (Entrée)", self.single.toggle_pause),
             ("▸", "Suivante   (→)", lambda: self.step(1)),
             ("⌸", "Ouvrir dans l'explorateur   (Ctrl+E)", self.reveal_current),
+            ("⧉", "Lecteur flottant : la vidéo par-dessus tout, "
+                  "déplaçable et redimensionnable   (Ctrl+L)", self.open_floating),
             ("⛶", "Cinéma : plein écran   (F11 ou double-clic)", self.toggle_cinema),
         ):
             self.single_bar.add_gesture(text, tip, slot)
         self.single.progressed.connect(self.single_bar.set_progress)
+        self.single.progressed.connect(self._note_sheet_position)
+
+        # Le lecteur flottant : une fenetre a part, toujours devant, qui
+        # reprend la video de la fiche quand Prisme disparait de l'ecran.
+        self.floating = FloatingPlayer(self.cfg["scroll_seconds"])
+        self.floating.returnRequested.connect(
+            lambda: self.leave_floating(activate=True))
+        self.floating.dismissRequested.connect(self.dismiss_floating)
+        # Ferme par ✕ : il ne revient pas tout seul avant qu'on soit repasse
+        # par Prisme.
+        self._float_dismissed = False
+        self._float_resume = ("", 0)
+        self.floating.stepRequested.connect(self.step)
+        self.floating.revealRequested.connect(self.reveal_path)
+        self.floating.radialRequested.connect(self.open_float_radial)
+        self.floating.keyForwarded.connect(self._float_key)
+        self.floating.player.finished.connect(self.on_video_finished)
+        # Les memes destinations sur le lecteur flottant : a lui, et au
+        # premier plan comme lui. Rattachees a la fenetre de Prisme, elles
+        # disparaissaient avec elle quand on la reduit.
+        self.float_radial = RadialMenu(self.floating)
+        self.float_radial.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.float_radial.chosen.connect(self._radial_chosen)
+        self.float_radial.closed.connect(self._radial_closed)
+        self._sheet_position = ("", 0)
+        # Les photos dont on mesure le format (`_measure_photos`).
+        self._photo_prober = None
+        self._photo_tried: set = set()
+        # Prisme est-il encore a l'ecran ? Un coup d'oeil par demi-seconde,
+        # seulement tant qu'il n'a plus le clavier.
+        self.float_timer = QTimer(self)
+        self.float_timer.setInterval(500)
+        self.float_timer.timeout.connect(self._float_check)
         self.single_bar.add_stay(
             "Rester dans ce dossier : ◂ ▸ ne sortent plus du dossier de la vidéo",
             bool(self.cfg["stay_in_folder"]), self.set_stay_in_folder)
@@ -1760,6 +1849,9 @@ class MainWindow(QMainWindow):
             self.root, self.mode, self.cfg["skip_hidden"],
             self.cfg["use_scan_cache"], self.cfg["expand_parents"],
             [item.item_id for item in shown], force, self,
+            # Les fichiers poses a cote des sous-dossiers : une entree
+            # « (sans dossier) » en tete, au lieu de disparaitre.
+            own_loose=True,
         )
         self.scan_thread.progress.connect(self.on_scan_progress)
         self.scan_thread.patch.connect(self.on_patch)
@@ -2980,6 +3072,10 @@ class MainWindow(QMainWindow):
         self.setFocus()
         if answer != QMessageBox.Yes:
             return
+        self._reread_collection(top)
+
+    def _reread_collection(self, top) -> None:
+        """Relit toute la collection, sans se fier aux dates."""
         self.show_banner("Réanalyse complète de la collection…", "info")
         tab = self.tab
         # La collection, c'est la liste des dossiers de la racine : c'est elle
@@ -3198,9 +3294,16 @@ class MainWindow(QMainWindow):
         self._list_leaf = item.name
         self.crumbs.set_path(self.top_root(), self.root)
         self.crumbs.append_leaf(item.name)
-        self.show_banner(
-            f"{len(self.items)} vidéo(s) portant « {item.path.name} »", "info"
-        )
+        noun = "photo(s)" if photo_mode() else "vidéo(s)"
+        if item.path.name == PINNED_UNREAD:
+            told = (f"{len(self.items)} {noun} au nom illisible : à regarder "
+                    "pour les ranger")
+        elif item.path.name == PINNED_LOOSE:
+            told = (f"{len(self.items)} {noun} posée(s) hors de tout "
+                    "sous-dossier")
+        else:
+            told = f"{len(self.items)} {noun} portant « {item.path.name} »"
+        self.show_banner(told, "info")
         if self.browsing:
             self.refresh_board()
         elif self.items:
@@ -3804,6 +3907,9 @@ class MainWindow(QMainWindow):
             # elle a change : leur cle est sa version, et une relecture qui
             # n'a rien trouve ne relance plus rien.
             self._plain_whole = True
+            # La collection est entiere : « À trier » et « Orphelins » se
+            # (re)calculent, et se posent en tete une fois prets.
+            self._pin_refresh()
             if (self.browsing and not self.levels and not self._transient
                     and self.all_items is not self._plain_items):
                 # L'onglet affiche a pu s'ouvrir avant la fin de la lecture :
@@ -3996,7 +4102,7 @@ class MainWindow(QMainWindow):
         """Maj maintenue : neuf instants, et les neuf premieres destinations."""
         item = self.current
         if (self.browsing or item is None or item.kind == MODE_FOLDERS
-                or item.locked or self.single.peeking):
+                or item.locked or self.single.peeking or photo_mode()):
             return
         key = f"peek@{item.item_id}"
         plan = self.plans.get(key) or []
@@ -4054,6 +4160,11 @@ class MainWindow(QMainWindow):
         """
         if self._quiet or self._closing:
             return
+        # Le lecteur flottant avant tout : il est par-dessus tout le reste,
+        # et c'est lui qu'on verrait. La video retourne a la fiche, en pause.
+        if self.floating.active:
+            self.leave_floating(activate=False)
+        self.float_timer.stop()
         # Les menus et les dialogues ouverts d'abord : ils restaient par-dessus
         # la page neutre, noms de fichiers compris.
         self._close_overlays()
@@ -4265,7 +4376,60 @@ class MainWindow(QMainWindow):
         wanted = not self.cfg["show_veiled"]
         self.cfg["show_veiled"] = wanted
         self.cfg.save()
-        set_veiled(self.cfg["veiled_names"], wanted)
+        self._refresh_veil()
+        names = ", ".join(self._active_veil()) or "—"
+        self.show_banner(
+            f"Dossiers masqués affichés : {names}." if wanted
+            else f"Dossiers masqués de nouveau cachés : {names}.",
+            "info" if wanted else "quiet")
+
+    def _active_veil(self) -> list:
+        """Les noms de la liste qui masquent vraiment : les cochés."""
+        off = {str(n).casefold() for n in (self.cfg["veiled_off"] or [])}
+        return [n for n in self.cfg["veiled_names"] or []
+                if str(n).casefold() not in off]
+
+    def edit_veiled(self) -> None:
+        """La liste des dossiers masqués : ajouter, retirer, réafficher."""
+        before = [n.casefold() for n in self._active_veil()]
+        dialog = VeilDialog(self.cfg["veiled_names"] or [],
+                            self.cfg["veiled_off"] or [], self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return self.setFocus()
+        names, off = dialog.result_veil()
+        self.cfg["veiled_names"] = names
+        self.cfg["veiled_off"] = off
+        self.cfg.save()
+        after = [n.casefold() for n in self._active_veil()]
+        if after == before:
+            return self.setFocus()
+        self._refresh_veil()
+        shown = ", ".join(self._active_veil()) or "aucun"
+        self.show_banner(f"Dossiers masqués : {shown}.", "info")
+        # Ce qui etait masque n'a jamais ete lu : l'analyse passait a cote.
+        # Le reafficher demande donc de relire ces dossiers-la.
+        freed = [n for n in before if n not in after]
+        if freed and not self.cfg["show_veiled"] and self.root is not None:
+            self._rescan_for_unveiled()
+        self.setFocus()
+
+    def _rescan_for_unveiled(self) -> None:
+        """Propose de relire la collection pour y trouver ce qu'on réaffiche."""
+        top = self.top_root()
+        if top is None:
+            return
+        answer = QMessageBox.question(
+            self, "Relire la collection ?",
+            "Les dossiers que vous réaffichez n'avaient jamais été lus : ils "
+            f"n'apparaîtront qu'après une réanalyse de « {top} ».\n\n"
+            "Sur le NAS, cela prend plusieurs minutes. La lancer maintenant ?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if answer == QMessageBox.Yes:
+            self._reread_collection(top)
+
+    def _refresh_veil(self) -> None:
+        """Pose le masque en cours et refait tout ce qui en dépend."""
+        set_veiled(self._active_veil(), self.cfg["show_veiled"])
         self._name_veil_action()
         self._touch()
         self._top_tags = None
@@ -4281,15 +4445,10 @@ class MainWindow(QMainWindow):
             if self.browsing:
                 self.refresh_board()
             self._show_counts()
-        names = ", ".join(self.cfg["veiled_names"]) or "—"
-        self.show_banner(
-            f"Dossiers masqués affichés : {names}." if wanted
-            else f"Dossiers masqués de nouveau cachés : {names}.",
-            "info" if wanted else "quiet")
 
     def _name_veil_action(self) -> None:
         """L'entrée du menu dit ce qu'elle fera, et sur quoi."""
-        names = ", ".join(self.cfg["veiled_names"]) or "aucun"
+        names = ", ".join(self._active_veil()) or "aucun"
         label = ("Masquer de nouveau les dossiers mis de côté"
                  if self.cfg["show_veiled"]
                  else f"Afficher les dossiers masqués ({names})")
@@ -4790,6 +4949,23 @@ class MainWindow(QMainWindow):
             return
         self.radial.open_at(QCursor.pos(), entries)
 
+    def open_float_radial(self) -> None:
+        """Clic droit sur le lecteur flottant : les destinations, pour ranger
+        la video qu'il montre -- la video courante de la fiche."""
+        item = self.current
+        if (item is None or item.locked or not self.floating.path
+                or os.path.normcase(str(item.path))
+                != os.path.normcase(self.floating.path)):
+            return
+        if not self.float_radial.isHidden():
+            return self.float_radial.close_menu()
+        entries = [(d.get("key", "?"), d.get("label") or Path(d["path"]).name)
+                   for d in list(self.cfg.destinations)[:RadialMenu.MAX]]
+        if not entries:
+            self.show_banner("Aucune destination : ⋯ → Destinations…", "quiet")
+            return
+        self.float_radial.open_at(QCursor.pos(), entries)
+
     def _radial_chosen(self, index: int) -> None:
         destinations = list(self.cfg.destinations)
         if not (0 <= index < len(destinations)):
@@ -4958,6 +5134,10 @@ class MainWindow(QMainWindow):
             self.grid.set_item(self._plan_key(item, self.page_of(item)), "…")
             if not item.videos:
                 self.grid.set_no_videos("aucune vidéo")
+        elif self.floating.active:
+            # La video se lit dans le lecteur flottant : la fiche ne charge
+            # rien, sans quoi on l'entendrait deux fois.
+            self.floating.load(str(item.path), item.name)
         else:
             self.single.set_item(str(item.path), "…")
             # Deja prete (la reserve) : l'instant demande se pose tout de
@@ -4970,6 +5150,9 @@ class MainWindow(QMainWindow):
             self.burst_timer.start()
         else:
             self.burst_timer.stop()
+        if self.slideshow_timer.isActive():
+            # Une photo choisie a la main a droit a sa pleine duree.
+            self.slideshow_timer.start()
 
         self._sort_videos(item)
         self._request_previews(item, current=True)
@@ -4981,11 +5164,13 @@ class MainWindow(QMainWindow):
                 keep.add(self._plan_key(nxt, self.page_of(nxt)))
                 self._request_previews(nxt, current=False)
                 if (offset == 1 and not spare and item.kind != MODE_FOLDERS
-                        and nxt.kind != MODE_FOLDERS and not nxt.locked):
+                        and nxt.kind != MODE_FOLDERS and not nxt.locked
+                        and not self.floating.active):
                     # La suivante se charge des maintenant dans le lecteur de
                     # reserve : la fleche ne montrera plus de noir.
                     self.single.preload(str(nxt.path))
-        if spare and item.kind != MODE_FOLDERS and spare != str(item.path):
+        if (spare and item.kind != MODE_FOLDERS and spare != str(item.path)
+                and not self.floating.active):
             self.single.preload(spare)
         # Uniquement hors planche : les vignettes de la planche portent des
         # cles « board@… » que cet ensemble ne contient jamais, et les annuler
@@ -5112,7 +5297,9 @@ class MainWindow(QMainWindow):
                 self.board.set_source(position, plan[0])
                 self.preview.request_thumb(key, 0, plan[0][0], plan[0][1],
                                            keyframe=True)
-                if not plan[0][2]:
+                # Duree et hauteur inconnues : on sonde. Une photo n'a jamais
+                # de duree ; sa hauteur connue suffit.
+                if not plan[0][2] and not plan[0][3]:
                     self.preview.request_info(key, 0, plan[0][0])
             return
         current = self.current
@@ -5130,7 +5317,7 @@ class MainWindow(QMainWindow):
         for slot, entry in enumerate(plan):
             self.preview.request_thumb(key, slot, entry[0], entry[1], urgent,
                                        keyframe=keyframe)
-            if not entry[2]:
+            if not entry[2] and not entry[3]:
                 # Duree inconnue : l'image part d'abord, le sondage suivra.
                 self.preview.request_info(key, slot, entry[0])
 
@@ -5170,6 +5357,11 @@ class MainWindow(QMainWindow):
             if position >= 0:
                 self.board.set_thumb(position, path)
             return
+        if key.startswith("flip@"):
+            position = self._board_position_of(key)
+            if position >= 0:
+                self.board.add_flip(position, path)
+            return
         current = self.current
         if current is None or key != self._current_key():
             return
@@ -5177,7 +5369,7 @@ class MainWindow(QMainWindow):
         viewer.set_thumb(slot, path)
 
     def on_thumb_failed(self, key: str, slot: int) -> None:
-        if key.startswith("board@") or key.startswith("peek@"):
+        if key.startswith(("board@", "peek@", "flip@")):
             return
         current = self.current
         if current is None or key != self._current_key():
@@ -5256,6 +5448,84 @@ class MainWindow(QMainWindow):
             self.show_item(min(self.index, len(self.items) - 1))
 
     def apply_sort(self) -> None:
+        """Reclasse la liste visible selon le mode choisi ; les dossiers
+        epingles restent en tete."""
+        self.items = [item for item in self.items if not item.pinned]
+        self._sort_items()
+        if self._pin_here():
+            pinned = self._pinned_items()
+            if pinned:
+                self.items[:0] = pinned
+
+    # -- « À trier » et « Orphelins », epingles en tete de la collection ------
+    def _pin_here(self) -> bool:
+        """La liste affichee est-elle la collection, sous « Dossiers », sans
+        recherche ? C'est la seulement que les dossiers epingles ont leur place."""
+        return (self.tab == TAB_FOLDERS and not self._transient
+                and self.mode == MODE_FOLDERS and self._collection_known()
+                and self.all_items is self._plain_items
+                and not (self.criteria or {}).get("include", self.cfg["filter_include"]))
+
+    def _pinned_items(self) -> list:
+        """Les cartes epinglees, si elles sont pretes ; sinon on les calcule a
+        cote, et elles se posent en tete une fois faites."""
+        key = self._collection_key()
+        memo = self._pinned_memo
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        if self._pinned_job == key:
+            return memo[1] if memo is not None else []
+        self._pinned_job = key
+        from .tunnel import Chore
+        videos = list(self._videos_from_items())
+        loose = [video for item in self._collection()
+                 if item.loose_only and not item.processed
+                 for video in item.videos if not under_veiled(str(video))]
+
+        def work():
+            unread = [video for video in videos if unreadable_name(str(video))]
+            return unread, loose
+
+        Chore(work, self, fallback=([], []),
+              then=lambda found: self._pinned_ready(key, *found)).start()
+        return memo[1] if memo is not None else []
+
+    def _pinned_ready(self, key, unread: list, loose: list) -> None:
+        if self._pinned_job == key:
+            self._pinned_job = None
+        cards = []
+        for name, found in ((PINNED_UNREAD, unread), (PINNED_LOOSE, loose)):
+            if not found:
+                continue
+            item = Item(path=Path(name), kind=MODE_FOLDERS, videos=list(found),
+                        video_count=len(found), file_count=len(found))
+            item.is_tag = True
+            item.pinned = True
+            cards.append(item)
+        self._pinned_memo = (key, cards)
+        if self._closing or not self._pin_here():
+            return
+        if key != self._collection_key():
+            # La collection a bouge pendant le calcul : on recommence.
+            self._pinned_items()
+            return
+        self._pin_refresh()
+
+    def _pin_refresh(self) -> None:
+        """Pose les cartes epinglees en tete si elles n'y sont pas, ou plus a jour."""
+        if not self._pin_here():
+            return
+        cards = self._pinned_items()
+        shown = [item for item in self.items if item.pinned]
+        if ([i.item_id for i in shown] == [c.item_id for c in cards]
+                and all(a.video_count == b.video_count for a, b in zip(shown, cards))):
+            return
+        self.apply_sort()
+        if self.browsing:
+            self.refresh_board()
+        self._show_counts()
+
+    def _sort_items(self) -> None:
         """Reclasse la liste visible selon le mode choisi."""
         import random
         if self._transient == "dupes":
@@ -5530,6 +5800,7 @@ class MainWindow(QMainWindow):
                 player.stop()
                 player.setSource(QUrl())
             self.single.release()
+            self.floating.release()
             # Un panneau arrete garde son fichier ouvert : le deplacer
             # echouait alors apres vingt secondes d'essais. On les vide — sauf
             # si le mur est a l'ecran, qu'on ne veut pas voir s'eteindre.
@@ -5558,7 +5829,7 @@ class MainWindow(QMainWindow):
                 player.stop()
                 player.setSource(QUrl())
                 video.hide()
-        for single in (self.single, self.aside_player):
+        for single in (self.single, self.aside_player, self.floating.player):
             decks = getattr(single, "decks", ())
             if any(deck.path and _within(deck.path, target) for deck in decks) \
                     or shows(single.player):
@@ -5850,7 +6121,9 @@ class MainWindow(QMainWindow):
         if self.tab != TAB_SPLIT or self._wall_pinned:
             return
         wanted = self.cfg["wall_orientation"] or "vertical"
-        heavy_cut = len(self.wall.panes) >= 4
+        # Une photo se lit reduite a la taille de l'ecran : sa definition ne
+        # pese rien, contrairement a une video 4K a decoder.
+        heavy_cut = len(self.wall.panes) >= 4 and not photo_mode()
         known = set()
         fresh = []
         for key in batch:
@@ -6092,7 +6365,7 @@ class MainWindow(QMainWindow):
             self.wall.set_shape(None)
             pool, unknown = self.vertical_pool()
             heavy = 0
-            if len(self.wall.panes) >= 4:
+            if len(self.wall.panes) >= 4 and not photo_mode():
                 # A quatre panneaux et plus, chacun fait 300 pixels de large :
                 # une source 4K n'y apporte rien, et six decodages 4K a la fois
                 # mettent n'importe quel processeur a genoux — c'etait le gel
@@ -6117,7 +6390,7 @@ class MainWindow(QMainWindow):
         self.wall.orient_button.setToolTip(
             (self.wall.caption.text() or "Le mur") + " — cliquer pour changer")
         self.item_title.setText(self.wall.caption.text()
-                                or f"{len(self.wall.pool)} vidéo(s) pour le mur")
+                                or f"{len(self.wall.pool)} {self.wall.noun}(s) pour le mur")
         self.item_subtitle.setText("")
         # L'entete se regle sur ce qu'on voit : le mur est maintenant a l'ecran.
         self._apply_selectors()
@@ -7144,6 +7417,30 @@ class MainWindow(QMainWindow):
         self.preview.request_thumb(key, 0, plan[0][0], plan[0][1],
                                    keyframe=True)
 
+    FLIP_COUNT = 10
+
+    def on_board_flip(self, position: int) -> None:
+        """Un dossier de photos survole : dix de ses photos, au hasard, a
+        feuilleter sur sa carte."""
+        if not (0 <= position < len(self.board.items)):
+            return
+        item = self.board.items[position]
+        photos = [str(p) for p in item.videos]
+        if len(photos) < 2:
+            return
+        import random
+        picked = random.sample(photos, min(self.FLIP_COUNT, len(photos)))
+        key = f"flip@{item.item_id}"
+        self.preview.cancel_prefix("flip@", keep={key})
+        width = self.cfg["thumb_width"]
+        for slot, photo in enumerate(picked):
+            ready = media.cached_thumb(Path(photo), 0.0, width)
+            if ready is not None:
+                self.board.add_flip(position, str(ready))
+            else:
+                self.preview.request_thumb(key, slot, photo, 0.0, urgent=True,
+                                           keyframe=True)
+
     def _board_position_of(self, key: str) -> int:
         """La carte de la page affichee qui attend cette reponse, ou -1.
 
@@ -7151,7 +7448,7 @@ class MainWindow(QMainWindow):
         carte ou se poser, et la chercher parmi cent mille elements, a chaque
         image recue, coutait plus que l'image elle-meme.
         """
-        item_id = key[len("board@"):]
+        item_id = key.split("@", 1)[1]
         items = self.board.items
         first, last = self.board._page_bounds()
         for position in range(max(0, first), min(last, len(items))):
@@ -7267,10 +7564,14 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _show_pause(bar, player) -> None:
-        """Le bouton du milieu dit ce qu'il fera : pause si ca joue."""
-        button = bar.buttons.itemAt(1).widget()
-        playing = (player.player.playbackState()
-                   == player.player.PlaybackState.PlayingState)
+        """Le bouton du milieu dit ce qu'il fera : pause si ca joue -- pour
+        une photo, si le diaporama tourne."""
+        button = getattr(bar, "pause_button", None) or bar.buttons.itemAt(1).widget()
+        if getattr(player, "still_path", ""):
+            playing = bool(getattr(player, "slideshow_on", False))
+        else:
+            playing = (player.player.playbackState()
+                       == player.player.PlaybackState.PlayingState)
         wanted = "pause" if playing else "play"
         if button.property("glyph") != wanted:
             button.setProperty("glyph", wanted)
@@ -7292,7 +7593,8 @@ class MainWindow(QMainWindow):
                    and not self.isMinimized() and area.isVisible()
                    and self.viewer.currentWidget() is self.single
                    and item is not None and item.kind != MODE_FOLDERS
-                   and not self.single.peeking)
+                   and not self.single.peeking
+                   and not self.floating.active)
         if not playing:
             self.single_bar.hide()
             self.single.marks.hide()
@@ -7374,11 +7676,434 @@ class MainWindow(QMainWindow):
             if not self.isMinimized() and not self._quiet:
                 # Ce qui s'est dit pendant que la fenetre etait reduite.
                 QTimer.singleShot(0, self._show_held_banners)
+            if self.isMinimized():
+                # Reduite pendant qu'une video joue : le lecteur flottant.
+                QTimer.singleShot(0, self._float_check)
         elif event.type() == QEvent.ActivationChange:
             self._wake_watch()
             # Un dialogue modal prend le clavier : Ctrl+K doit y repondre
             # aussi, le temps qu'il est ouvert (`_QuietKeys`).
             self._quiet_keys.follow()
+            self._float_follow()
+
+    # ------------------------------------------------------------------
+    # Le lecteur flottant
+    # ------------------------------------------------------------------
+    # Une video dont la position a avance il y a moins que cela jouait
+    # encore : reduite, la fiche s'arrete avant qu'on ait pu le lui demander.
+    FLOAT_PLAYING_S = 1.5
+
+    def _note_sheet_position(self, position: int, _duration: int) -> None:
+        """Ou en est la fiche : c'est de la que repartira le lecteur flottant,
+        meme si la reduction de la fenetre l'a deja arretee."""
+        if position > 0:
+            deck = self.single.decks[self.single._active]
+            self._sheet_position = (deck.path, position, time.monotonic())
+
+    def _sheet_can_float(self) -> bool:
+        """Une video est-elle ouverte dans la fiche ?"""
+        item = self.current
+        return (not self._quiet and not self._closing
+                and self.stack.currentIndex() == PAGE_SORT
+                and not self.browsing
+                and self.viewer.currentWidget() is self.single
+                and item is not None and item.kind != MODE_FOLDERS
+                and not item.locked)
+
+    def _sheet_playing(self) -> bool:
+        if (self.single.player.playbackState()
+                == QMediaPlayer.PlaybackState.PlayingState):
+            return True
+        noted = self._sheet_position
+        return len(noted) == 3 and time.monotonic() - noted[2] < self.FLOAT_PLAYING_S
+
+    def open_floating(self, auto: bool = False) -> None:
+        """La video de la fiche passe dans le lecteur flottant, a son instant."""
+        if self.floating.active:
+            self.floating.raise_()
+            return
+        if not self._sheet_can_float():
+            if not auto:
+                self.show_banner("Ouvrez d'abord une vidéo : le lecteur flottant "
+                                 "reprend celle de la fiche.", "quiet")
+            return
+        item = self.current
+        path = str(item.path)
+        key = os.path.normcase(path)
+        deck = self.single.decks[self.single._active]
+        position = 0
+        if deck.path and os.path.normcase(deck.path) == key:
+            position = self.single.player.position()
+        if position <= 0 and os.path.normcase(self._sheet_position[0]) == key:
+            position = self._sheet_position[1]
+        wanted = self._pending_start
+        if wanted is not None and wanted[0] == key:
+            position = wanted[1]
+            self._pending_start = None
+        self.single.release()
+        self.single_bar.hide()
+        self.single.marks.hide()
+        self.floating.auto = auto
+        self.floating.open(path, item.name, position, muted=self.cfg["muted"],
+                           geometry=self.cfg["float_geometry"])
+        if not auto:
+            self.show_banner("Lecteur flottant : déplacez-le, agrandissez-le. "
+                             "↩ ou Échap le ramène dans Prisme.", "info")
+
+    def leave_floating(self, activate: bool = True) -> None:
+        """Referme le lecteur flottant ; la fiche reprend au meme instant."""
+        if not self.floating.isVisible():
+            return
+        path = self.floating.path
+        position = self.floating.position()
+        self.cfg["float_geometry"] = self.floating.geometry_to_keep()
+        self.cfg.save_soon()
+        self.floating.close_quietly()
+        if activate:
+            if self.isMinimized():
+                self.setWindowState(
+                    (self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        self._resume_sheet(path, position)
+
+    def dismiss_floating(self) -> None:
+        """✕ sur le lecteur flottant : il se retire, la video s'arrete, et
+        Prisme reste ou il est. La fiche reprendra a cet instant quand on y
+        reviendra ; d'ici la, le lecteur ne se rouvre pas tout seul."""
+        if not self.floating.isVisible():
+            return
+        self._float_dismissed = True
+        self._float_resume = (self.floating.path, self.floating.position())
+        self.cfg["float_geometry"] = self.floating.geometry_to_keep()
+        self.cfg.save_soon()
+        self.float_timer.stop()
+        self.floating.close_quietly()
+
+    def _resume_sheet(self, path: str, position: int) -> None:
+        """La fiche reprend la video du lecteur flottant, a son instant."""
+        item = self.current
+        if (not path or item is None or item.kind == MODE_FOLDERS
+                or os.path.normcase(str(item.path)) != os.path.normcase(path)
+                or not self._sheet_can_float()):
+            return
+        self._pending_start = ((os.path.normcase(path), int(position), time.monotonic())
+                               if position > 0 else None)
+        self.single.set_muted(self.cfg["muted"])
+        self.single.set_item(path, "…")
+        self._seek_when_ready()
+        self._request_previews(item, current=True)
+        self._wake_watch()
+
+    def _float_follow(self) -> None:
+        """Prisme reprend le clavier : le lecteur ouvert tout seul se retire.
+        Il le perd : on guette s'il disparait de l'ecran."""
+        if self._closing or not hasattr(self, "float_timer"):
+            return
+        if self.isActiveWindow():
+            self.float_timer.stop()
+            if self.floating.active and self.floating.auto:
+                self.leave_floating(activate=False)
+            elif self._float_dismissed:
+                self._float_dismissed = False
+                self._resume_sheet(*self._float_resume)
+            return
+        if (self.cfg["float_auto"] and not self.floating.active and not self._quiet
+                and not self._float_dismissed):
+            self.float_timer.start()
+            QTimer.singleShot(250, self._float_check)
+
+    def _float_check(self) -> None:
+        """Prisme est-il encore visible ? Sinon, la video passe au premier plan."""
+        if (not self.cfg["float_auto"] or self._quiet or self._closing
+                or self._float_dismissed
+                or self.floating.active or self.isActiveWindow()):
+            self.float_timer.stop()
+            return
+        if not self._sheet_can_float() or not self._sheet_playing():
+            return
+        if self.isMinimized() or _covered(self.single.video_area):
+            self.float_timer.stop()
+            self.open_floating(auto=True)
+
+    def toggle_float_auto(self) -> None:
+        self.cfg["float_auto"] = not self.cfg["float_auto"]
+        self.cfg.save_soon()
+        action = self._menu_by_text.get("Lecteur flottant automatique")
+        if action is not None:
+            action.setChecked(bool(self.cfg["float_auto"]))
+        self._dress_float_button()
+        self.show_banner(
+            "Lecteur flottant automatique : quand Prisme est réduit ou "
+            "recouvert, la vidéo continue par-dessus tout." if self.cfg["float_auto"]
+            else "Lecteur flottant automatique désactivé (Ctrl+L l'ouvre à la "
+                 "demande).", "info" if self.cfg["float_auto"] else "quiet")
+
+    def _dress_float_button(self) -> None:
+        """Allume, l'icone en clair ; eteint, grisee."""
+        on = bool(self.cfg["float_auto"])
+        self.float_button.setIcon(icon("picture-in-picture-2", INK if on else DIM))
+        self.float_button.setToolTip(
+            "Lecteur flottant automatique : activé.\nQuand Prisme est réduit ou "
+            "recouvert, la vidéo continue par-dessus tout.\nCliquer pour le "
+            "désactiver." if on else
+            "Lecteur flottant automatique : désactivé.\nLa vidéo reste dans "
+            "Prisme (Ctrl+L l'ouvre quand même à la demande).\nCliquer pour "
+            "l'activer.")
+
+    def _float_key(self, event) -> None:
+        """Une touche pressee dans le lecteur flottant : les destinations, les
+        notes, Suppr, Espace… font ici ce qu'elles font dans Prisme."""
+        self.keyPressEvent(event)
+
+    # ------------------------------------------------------------------
+    # L'accueil, et le choix entre videos et photos
+    # ------------------------------------------------------------------
+    # Ce qui, dans le menu ⋯, ne parle que de videos : cache en mode photo.
+    VIDEO_ONLY_MENU = (
+        "Analyser les titres des métadonnées",
+        "Repérer les plans (vignettes plus parlantes)",
+        "Empreintes : sonder ce qui manque",
+        "Doublons d'après les empreintes",
+        "Recherche vidéo sur le web…",
+        "Lecteur flottant automatique",
+    )
+
+    SESSION_FILTERS = (("filter_include", ""), ("filter_exclude", ""),
+                       ("only_unseen", False), ("orientations", []),
+                       ("folder_min", 0), ("folder_max", 0),
+                       ("sort_mode", "random"), ("tab", TAB_FOLDERS))
+
+    @classmethod
+    def _reset_filters(cls, cfg, kind: str) -> None:
+        """Les filtres d'une collection repartent de zero."""
+        for key, value in cls.SESSION_FILTERS:
+            cfg.set_of_kind(kind, key, value)
+
+    # L'index des videos tel qu'on l'a trouve : c'est lui qu'on retrouve en
+    # revenant des photos (un bac a sable, un cache portable l'ont peut-etre
+    # place ailleurs que le chemin par defaut).
+    _video_index = None
+
+    def _enter_kind(self, kind: str):
+        """Pose le type de media et ouvre son index ; rend le fichier de ses
+        favoris."""
+        set_media_kind(kind)
+        photo_index, _ = kind_paths(KIND_PHOTO)
+        index_path, ratings_path = kind_paths(media_kind())
+        here = Path(INDEX.path)
+        if media_kind() == KIND_PHOTO:
+            if here != Path(photo_index):
+                MainWindow._video_index = here
+                INDEX.reopen(photo_index, migrate=False)
+        elif here == Path(photo_index):
+            INDEX.reopen(MainWindow._video_index or index_path, migrate=False)
+        return ratings_path
+
+    def _apply_kind_ui(self) -> None:
+        """Ce qui change a l'ecran entre videos et photos."""
+        photo = photo_mode()
+        self.tabs.buttons[TAB_VIDEOS].setText("Photos" if photo else "Vidéos")
+        self.tabs.buttons[TAB_VIDEOS].setToolTip(
+            "Toutes les photos en vrac, au hasard" if photo
+            else "Toutes les vidéos en vrac, au hasard")
+        self.tabs.buttons[TAB_TAGS].setToolTip(
+            "Les photos réunies par les mots de leurs noms" if photo
+            else "Les vidéos réunies par les mots de leurs noms")
+        self.tabs.buttons[TAB_SPLIT].setToolTip(
+            "Plusieurs photos à la fois, chacune en diaporama" if photo
+            else "Plusieurs vidéos à la fois")
+        self.kind_switch.set_value(media_kind())
+        self.welcome.set_kind(media_kind())
+        # Ni duree ni taille a trier pour des photos.
+        self.controls.set_photo(photo)
+        if photo and (self.cfg["sort_mode"] or "").startswith(("duration", "size")):
+            self.cfg["sort_mode"] = "random"
+            self.controls.set_sort("random")
+        # Une photo n'a pas d'instants a parcourir : pas de pellicule.
+        if photo:
+            self.single.hide_strip()
+        else:
+            self.single.show_strip()
+        self.wall.set_photo(photo, float(self.cfg["slideshow_seconds"] or 6))
+        for text in self.VIDEO_ONLY_MENU:
+            action = self._menu_by_text.get(text)
+            if action is not None:
+                action.setVisible(not photo)
+        self.random_button.setToolTip(
+            ("Une photo au hasard" if photo else "Une vidéo au hasard")
+            + ", dans toute la collection — jamais deux fois la même avant "
+              "que toutes soient sorties   (Ctrl+H)")
+        self.setWindowTitle(f"{APP_NAME} — Photos" if photo else APP_NAME)
+
+    # -- le diaporama des photos --------------------------------------------
+    def _photo_sheet(self) -> bool:
+        """Une photo est-elle a l'ecran, dans sa fiche ?"""
+        item = self.current
+        return (self.stack.currentIndex() == PAGE_SORT and not self.browsing
+                and self.viewer.currentWidget() is self.single
+                and item is not None and item.kind != MODE_FOLDERS
+                and bool(self.single.still_path))
+
+    def toggle_slideshow(self) -> None:
+        if self.slideshow_timer.isActive():
+            self.slideshow_stop()
+            self.show_banner("Diaporama en pause.", "quiet")
+        elif self._photo_sheet():
+            self.slideshow_timer.start()
+            self.single.slideshow_on = True
+            self.show_banner(
+                f"Diaporama : une photo toutes les {self.cfg['slideshow_seconds']} s"
+                + (", dans ce dossier" if self._stays_in_folder() else "")
+                + ". ⏯, Entrée ou un clic l'arrête.", "info")
+        self._wake_watch()
+
+    def edit_slideshow_seconds(self) -> None:
+        """Combien de temps chaque photo reste, au diaporama comme au mur."""
+        seconds, ok = QInputDialog.getInt(
+            self, "Durée du diaporama",
+            "Secondes par photo (diaporama et mur) :",
+            int(self.cfg["slideshow_seconds"] or 6), 1, 120, 1)
+        self.setFocus()
+        if not ok:
+            return
+        self.cfg["slideshow_seconds"] = seconds
+        self.cfg["slideshow_chosen"] = True
+        self.cfg.save()
+        self.slideshow_timer.setInterval(seconds * 1000)
+        self.wall.set_slideshow_seconds(float(seconds))
+        self.show_banner(f"Diaporama : une photo toutes les {seconds} s.", "info")
+
+    def slideshow_stop(self) -> None:
+        self.slideshow_timer.stop()
+        self.single.slideshow_on = False
+
+    def _slideshow_next(self) -> None:
+        """La photo suivante -- du meme dossier si la case est cochee."""
+        if self._quiet:
+            return
+        if not self._photo_sheet():
+            return self.slideshow_stop()
+        if self._stays_in_folder():
+            return self.step(1)
+        if self.index + 1 < len(self.items):
+            self.show_item(self.index + 1)
+        else:
+            self.slideshow_stop()
+            self.show_banner("Fin du diaporama : dernière photo de la liste.", "quiet")
+
+    def pick_kind(self, kind: str) -> None:
+        """Vidéos | Photos : on passe a l'autre collection, a sa derniere
+        racine, sur « Dossiers ». Sans racine encore, on la demande."""
+        if kind == media_kind():
+            self.kind_switch.set_value(kind)
+            return
+        if not self.switch_kind(kind):
+            self.kind_switch.set_value(media_kind())
+            return
+        root = self.cfg["root"]
+        if root:
+            self.open_root_async(canon_root(root), MODE_FOLDERS)
+        else:
+            self._goto_page(PAGE_WELCOME)
+            self.choose_root()
+
+    def switch_kind(self, kind: str) -> bool:
+        """Passe de la collection de videos a celle de photos, ou l'inverse.
+
+        Tout ce qui tourne s'arrete, l'index et les favoris changent de
+        fichier, et la fenetre oublie la collection quittee : elle repart de
+        la derniere racine de l'autre, filtres a zero. Refuse pendant un
+        transfert, qui doit finir chez lui.
+        """
+        if kind == media_kind():
+            return True
+        if self.transfers.busy:
+            self.show_banner("Un transfert est en cours : attendez qu'il se "
+                             "termine pour changer de collection.", "error")
+            return False
+        if self.floating.isVisible():
+            self.floating.close_quietly()
+        self.close_aside()
+        self.stop_scan()
+        self._stop_background()
+        self.preview.stop_harvest()
+        self._release_media()
+        self.preview.quiesce(3000)
+        self._wait_threads(3.0)
+        for pane in self.wall.panes:
+            pane.clear()
+        self.ratings.flush()
+        INDEX.commit(force=True)
+        self.slideshow_stop()
+        self.cfg["media_kind"] = kind
+        ratings_path = self._enter_kind(kind)
+        self.ratings.switch(ratings_path)
+        # Des filtres d'une seance precedente masquaient la moitie des photos.
+        self._reset_filters(self.cfg, kind)
+        self.controls.set_unseen(False)
+        self.controls.set_orientations(("vertical", "horizontal"))
+        self.cfg.save_soon()
+        self._reset_collection_state()
+        self._apply_kind_ui()
+        return True
+
+    def _reset_collection_state(self) -> None:
+        """Oublie la collection quittee : listes, apercus, et tout ce qui en
+        etait tire. La suivante repart de sa derniere racine."""
+        self.root = None
+        self.origin = Path(self.cfg["root"]) if self.cfg["root"] else None
+        self.tags = list(self.cfg["tags"] or [])
+        self.all_items, self.items, self.index = [], [], 0
+        self._plain_items, self._plain_root, self._plain_whole = [], None, False
+        self.levels, self.visited, self.history = [], [], []
+        self.plans, self.pages, self.peek_thumbs = {}, {}, {}
+        self._flat_cache = {}
+        self._siblings_cache = {}
+        self._siblings_gen = -1
+        self._collection_gen += 1
+        self._rebuild_gen += 1
+        self._sortable_memo = {}
+        self._collection_src = None
+        self._videos_memo = None
+        self._pinned_memo = None
+        self._pinned_job = None
+        self._flat_list = None
+        self._flat_job = None
+        self._mine_tags = None
+        self._mine_key = None
+        self._top_tags = None
+        self._tags_key = None
+        self._pool_memo = None
+        self._wall_batch = []
+        self._random_memo = None
+        self._random_deck = Deck()
+        self._here_deck = Deck()
+        self._harvest_key = None
+        self._harvest_src = None
+        self._harvest_complete = None
+        self._harvest_token += 1
+        self._tab_sorts = {}
+        self.criteria = {}
+        self._narrow_items = None
+        self._narrow_source = None
+        self._narrow_context = None
+        self._narrow_query = ""
+        self._transient = ""
+        self._dupe_members = {}
+        self._back_to_wall = None
+        self._wall_return = None
+        self._restore_id = ""
+        self._pending_start = None
+        self._commands_signature = None
+        self._photo_tried = set()
+        if self.tab == TAB_SPLIT:
+            self.tab = TAB_FOLDERS
+            self.tabs.set_value(TAB_FOLDERS)
+        self.board.set_items([], self.ratings.get)
+        self.welcome.set_recent(self.cfg["recent_roots"])
+        self._refresh_state()
 
     def aside_fullscreen(self) -> None:
         """Donne tout l'ecran a la video ouverte a cote, et sait en revenir.
@@ -7630,6 +8355,20 @@ class MainWindow(QMainWindow):
         rien — ce que Ctrl+E faisait depuis toujours.
         """
         return f'explorer /select,"{target}"'
+
+    def reveal_path(self, path: str) -> None:
+        """Ouvre l'explorateur sur ce fichier precis, deja selectionne — le
+        ⌸ d'un panneau du mur, qui sait quelle video il montre."""
+        target = Path(path)
+        state = actions.probe(target)
+        if state != "ok":
+            return self.show_banner(
+                f"Introuvable : {target.name}" if state == "absent" else
+                f"NAS injoignable : « {target.name} »", "error")
+        try:
+            subprocess.Popen(self.reveal_command(target))
+        except OSError as exc:
+            self.show_banner(f"Explorateur indisponible : {exc}", "error")
 
     def reveal_current(self) -> None:
         """Ouvre l'explorateur sur l'element courant, deja selectionne."""
@@ -7988,6 +8727,11 @@ class MainWindow(QMainWindow):
             return self.open_video_path(str(self.items[position].path))
         self.index = position
         item = self.items[position]
+        if (photo_mode() and item.kind == MODE_FOLDERS and not item.locked):
+            # Un dossier de photos s'ouvre comme dans l'explorateur : ses
+            # sous-dossiers et ses photos en vignettes. Sa fiche n'en montrait
+            # que quelques-unes, en grand, et l'on n'y voyait « que des photos ».
+            return self.enter_current()
         self.browsing = False
         self._apply_selectors()
         self.viewer.setCurrentWidget(
@@ -8594,6 +9338,7 @@ class MainWindow(QMainWindow):
         self._narrow_query = include
         self._narrow_items = self.items
         self._show_counts()
+        self._measure_photos()
 
         if not self.items:
             # Rien d'exact : l'a-peu-pres attend que la frappe se pose.
@@ -8633,6 +9378,54 @@ class MainWindow(QMainWindow):
             self.refresh_board()
         else:
             self.show_item(self.index)
+
+    # Photos mesurees par lot : assez pour avancer vite, assez peu pour que
+    # la liste se complete sous les yeux.
+    MEASURE_BATCH = 1500
+
+    def _measure_photos(self) -> None:
+        """« Verticales » ou « Horizontales » sur des photos : on mesure celles
+        dont on ignore encore le format.
+
+        Le filtre ecarte ce qu'il ne connait pas (sans quoi « Verticales »
+        montrait des horizontales). Pour des videos, c'est un ffprobe par
+        fichier ; une photo, elle, se mesure en lisant son en-tete -- quelques
+        millisecondes. On le fait donc tout de suite, par lots, en tache de
+        fond, et la liste se complete a chaque lot.
+        """
+        if not photo_mode() or getattr(self, "_photo_prober", None) is not None:
+            return
+        wanted = (self.criteria or {}).get("orientations")
+        if not wanted or len(wanted) != 1:
+            return
+        probe = INDEX.probe
+        tried = self._photo_tried
+        batch = []
+        for item in self.all_items:
+            if item.kind == MODE_FOLDERS:
+                continue
+            key = str(item.path)
+            if key in tried or (probe(item.path) or {}).get("width"):
+                continue
+            batch.append(key)
+            if len(batch) >= self.MEASURE_BATCH:
+                break
+        if not batch:
+            return
+        tried.update(batch)
+        prober = InfoScan(batch, self)
+        prober.done.connect(self._photos_measured)
+        self._photo_prober = prober
+        prober.start(QThread.LowPriority)
+        self.show_banner(f"Mesure du format des photos… ({len(batch)} de plus)",
+                         "quiet")
+
+    def _photos_measured(self, _count: int) -> None:
+        self._photo_prober = None
+        if self._closing or not photo_mode():
+            return
+        # Refiltre avec ce qu'on sait de plus, puis le lot suivant.
+        self.apply_filter(self.cfg["filter_include"], self.cfg["filter_exclude"])
 
     def focus_filter(self) -> None:
         self.controls.focus_search()
@@ -10010,6 +10803,12 @@ class MainWindow(QMainWindow):
                 return self.reveal_current()
             if key == Qt.Key_J:
                 return self.toggle_full_view()
+            if key == Qt.Key_L:
+                if event.isAutoRepeat():
+                    return
+                if self.floating.active:
+                    return self.leave_floating(activate=True)
+                return self.open_floating()
             if key == Qt.Key_M:
                 return self.toggle_mute()
             if key == Qt.Key_O:
@@ -10265,7 +11064,7 @@ class MainWindow(QMainWindow):
         # Tous les lecteurs, celui de cote et l'apercu de la planche compris :
         # Ctrl+M laissait le lecteur de droite parler.
         for player in (self.grid, self.single, self.board, self.aside_player,
-                       self.wall):
+                       self.wall, self.floating.player):
             player.set_muted(muted)
         self._refresh_mute()
         self.show_banner("Son coupé" if muted else "Son activé", "quiet")
@@ -10386,6 +11185,10 @@ class MainWindow(QMainWindow):
         # Ce qui est local et rapide d'abord : reglages et favoris ne doivent
         # jamais dependre d'un NAS qui repond.
         self.cfg["window"] = self._geometry_to_keep()
+        self.float_timer.stop()
+        if self.floating.isVisible():
+            self.cfg["float_geometry"] = self.floating.geometry_to_keep()
+        self.floating.close_quietly()
         self.cfg.save()
         self.ratings.flush()
         # La fenetre disparait tout de suite : ce qui suit peut durer, et

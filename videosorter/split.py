@@ -22,9 +22,21 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+import time
+
+from PySide6.QtCore import QThreadPool
+
+from .config import is_photo
 from .perf import mark
 from .icons import dress, filled, icon
-from .widgets import GOLD, OverBar, PeekOverlay, PlayMarks, Stepper
+from .widgets import (
+    GOLD, OverBar, PeekOverlay, PlayMarks, Stepper, _Still, _StillLoader,
+    _StillSignals,
+)
+
+# Le diaporama d'un panneau photo, par defaut : le mur le regle
+# (`SplitWall.set_photo`) d'apres la configuration.
+SLIDESHOW_MS = 6000
 
 # Trois panneaux : sur un ecran large, trois videos verticales le remplissent
 # presque exactement. Quatre les amincissent au point qu'on ne distingue plus
@@ -181,6 +193,7 @@ class SplitPane(QFrame):
     wants_next = Signal(int)          # une autre, au hasard, n'importe ou
     wants_sibling = Signal(int, str)  # la suivante du meme dossier
     opened = Signal(str)
+    revealRequested = Signal(str)     # ⌸ : le fichier, dans l'explorateur
     peekRequested = Signal(int, str)  # Maj + clic droit : les neuf instants
     sortRequested = Signal(int, str)  # clic droit : les destinations, pour ranger
     peekChosen = Signal(int, int)     # une case cliquee : (panneau, case)
@@ -225,8 +238,9 @@ class SplitPane(QFrame):
         self.name = self.bar.name
         self.name.setText("—")
         # Le bandeau pilote tout : revenir a la precedente, pause, la
-        # suivante du meme dossier, une autre au hasard, sa fiche, et elle
-        # seule en grand.
+        # suivante du meme dossier, une autre au hasard, son fichier dans
+        # l'explorateur, et elle seule en grand. La fiche reste a portee de
+        # la touche F.
         self.history: list = []
         self.stay = False
         for text, tip, slot in (
@@ -234,7 +248,7 @@ class SplitPane(QFrame):
             ("⏯", "Pause, ou reprendre", self.toggle_pause),
             ("▸", "Une autre : au hasard, ou dans ce dossier si la case est cochée",
              self._forward),
-            ("⤢", "Ouvrir cette vidéo dans sa fiche", self._open),
+            ("⌸", "Montrer ce fichier dans l'explorateur", self._reveal),
             ("⛶", "Cette vidéo seule, en grand — Échap pour revenir",
              self._solo),
         ):
@@ -267,10 +281,64 @@ class SplitPane(QFrame):
         self.audio = None
         self.player = QMediaPlayer(self)
         self.player.setVideoOutput(self.video)
+        # Les photos : une image fixe, et un diaporama a chaque panneau, qui
+        # tourne des qu'il se remplit. ⏯ ou un clic l'arrete.
+        self.still = _Still(self.stage)
+        self.still_signals = _StillSignals(self)
+        self.still_signals.loaded.connect(self._still_loaded)
+        self.slideshow_ms = SLIDESHOW_MS
+        self.slideshow_on = True
+        self.slideshow = QTimer(self)
+        self.slideshow.setSingleShot(True)
+        self.slideshow.timeout.connect(self._forward)
+        self._slide_started = 0.0
+        self.zoom = 1.0
+        self.zoom_focus = (0.5, 0.5)
         self.player.playbackStateChanged.connect(self._show_pause)
         self._show_pause()
         self.player.positionChanged.connect(self._on_position)
         self.player.mediaStatusChanged.connect(self._on_status)
+
+    # -- photos ------------------------------------------------------------
+    @property
+    def photo(self) -> bool:
+        return bool(self.video_path) and is_photo(self.video_path)
+
+    def _show_photo(self, path: str) -> None:
+        """Une photo dans le panneau : le lecteur video se tait."""
+        if self.player.source().isValid():
+            self._pause()
+            self.player.setSource(QUrl())
+        self.video.hide()
+        self.zoom, self.zoom_focus = 1.0, (0.5, 0.5)
+        self.still.set_image(None)
+        self.still.show()
+        self.still.raise_()
+        self._place()
+        screen = self.screen()
+        longest = 1600
+        if screen is not None:
+            size = screen.size() * screen.devicePixelRatio()
+            longest = max(800, min(2560, max(size.width(), size.height())))
+        QThreadPool.globalInstance().start(
+            _StillLoader(path, longest, self.still_signals))
+        self._restart_slide()
+
+    def _still_loaded(self, path: str, image) -> None:
+        if path == self.video_path:
+            self.still.set_image(image)
+
+    def _restart_slide(self) -> None:
+        self.slideshow.stop()
+        if self.photo and self.slideshow_on:
+            self._slide_started = time.monotonic()
+            self.slideshow.start(self.slideshow_ms)
+        self._show_pause()
+
+    def _hide_photo(self) -> None:
+        self.slideshow.stop()
+        self.still.hide()
+        self.still.set_image(None)
 
     # -- contenu ---------------------------------------------------------
     def play(self, path: str, remember: bool = True) -> None:
@@ -281,6 +349,10 @@ class SplitPane(QFrame):
         self.bar.set_name(path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1])
         self.name.setToolTip(path)
         self.set_favorite(self.favorite_of(path))
+        if is_photo(path):
+            self._show_photo(path)
+            return
+        self._hide_photo()
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
         if self.video.isHidden() and not self.peeking:
@@ -320,6 +392,18 @@ class SplitPane(QFrame):
             self.bar.hide()
             self.marks.hide()
             return
+        # Sur une photo, le trait suffit : le compte a rebours des secondes
+        # n'apprenait rien et chargeait l'image.
+        self.marks.with_left = not self.photo
+        if self.photo:
+            # Le trait d'une photo : ce qui reste avant la suivante.
+            if self.slideshow.isActive():
+                done = int((time.monotonic() - self._slide_started) * 1000)
+                self.marks.set_progress(min(done, self.slideshow_ms), self.slideshow_ms)
+                self.bar.set_progress(min(done, self.slideshow_ms), self.slideshow_ms)
+            else:
+                self.marks.set_progress(0, 0)
+                self.bar.set_progress(0, 0)
         if hovered:
             self.marks.with_rail = False
             self.bar.place_on(self.stage)
@@ -336,6 +420,7 @@ class SplitPane(QFrame):
 
     def clear(self) -> None:
         self.peek_end()
+        self._hide_photo()
         self.video_path = ""
         self.name.setText("—")
         # Une pause, puis la source videe -- sans stop(). Sur un lecteur qui
@@ -359,6 +444,7 @@ class SplitPane(QFrame):
         demarrages, ils se perdent entre deux images.
         """
         self.peek_end()
+        self._hide_photo()
         self.video_path = ""
         self.name.setText("—")
         # Pause seulement s'il jouait : sur un lecteur arrete, pause()
@@ -372,6 +458,7 @@ class SplitPane(QFrame):
 
     def stop(self) -> None:
         """Arrete le panneau : une pause, jamais stop() (voir `clear`)."""
+        self.slideshow.stop()
         self._pause()
 
     def _pause(self) -> None:
@@ -402,15 +489,33 @@ class SplitPane(QFrame):
             self.play(self.history.pop(), remember=False)
 
     def toggle_pause(self) -> None:
+        if self.photo:
+            # Une photo : le diaporama de ce panneau s'arrete, ou repart.
+            self.slideshow_on = not self.slideshow_on
+            self._restart_slide()
+            return
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
             self.player.play()
 
+    def resume(self) -> None:
+        """Reprend apres un arret du mur : le diaporama, s'il tournait."""
+        if self.photo:
+            self._restart_slide()
+        elif self.video_path:
+            self.player.play()
+
     def _show_pause(self, *_args) -> None:
-        playing = (self.player.playbackState()
-                   == QMediaPlayer.PlaybackState.PlayingState)
+        if self.photo:
+            playing = self.slideshow_on
+        else:
+            playing = (self.player.playbackState()
+                       == QMediaPlayer.PlaybackState.PlayingState)
         self.pause_button.setIcon(icon("pause" if playing else "play"))
+        self.pause_button.setToolTip(
+            ("Arrêter le diaporama" if playing else "Relancer le diaporama")
+            if self.photo else "Pause, ou reprendre")
 
     def _sibling(self) -> None:
         if self.video_path:
@@ -420,6 +525,10 @@ class SplitPane(QFrame):
         if self.video_path:
             self.opened.emit(self.video_path)
 
+    def _reveal(self) -> None:
+        if self.video_path:
+            self.revealRequested.emit(self.video_path)
+
     def _solo(self) -> None:
         self.soloRequested.emit(self.index)
 
@@ -428,6 +537,11 @@ class SplitPane(QFrame):
         area = self.stage.rect()
         self.video.setGeometry(area)
         self.peek.setGeometry(area)
+        # La photo s'agrandit dans son cadre, autour du point vise.
+        width, height = int(area.width() * self.zoom), int(area.height() * self.zoom)
+        fx, fy = self.zoom_focus
+        self.still.setGeometry(int(fx * (area.width() - width)),
+                               int(fy * (area.height() - height)), width, height)
 
     def _on_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -472,6 +586,18 @@ class SplitPane(QFrame):
         notches = event.angleDelta().y() / 120.0
         if not notches or not self.video_path:
             return super().wheelEvent(event)
+        if self.photo:
+            # Une photo n'a pas de temps a parcourir : la molette zoome la ou
+            # pointe la souris ; revenue a x1, elle se recadre entiere.
+            area = self.stage
+            local = area.mapFromGlobal(QCursor.pos())
+            if area.width() > 0 and area.height() > 0:
+                self.zoom_focus = (max(0.0, min(1.0, local.x() / area.width())),
+                                   max(0.0, min(1.0, local.y() / area.height())))
+            self.zoom = max(1.0, min(6.0, self.zoom * (1.25 ** notches)))
+            self._place()
+            event.accept()
+            return
         step = int(notches * self.scroll_seconds * 1000)
         duration = self.player.duration()
         target = self.player.position() - step
@@ -487,7 +613,8 @@ class SplitPane(QFrame):
             # accessibles, mais avec Maj — on les consulte, on ne les
             # utilise pas pour decider.
             if event.modifiers() & Qt.ShiftModifier:
-                self.peekRequested.emit(self.index, self.video_path)
+                if not self.photo:      # une photo n'a pas d'instants
+                    self.peekRequested.emit(self.index, self.video_path)
             else:
                 self.sortRequested.emit(self.index, self.video_path)
             event.accept()
@@ -495,10 +622,8 @@ class SplitPane(QFrame):
         if event.button() == Qt.LeftButton and self.video_path:
             # Un clic sur l'image met en pause ou reprend : on regarde trois
             # videos, il faut pouvoir en retenir une sans perdre les autres.
-            if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-                self.player.pause()
-            else:
-                self.player.play()
+            # Sur une photo, c'est son diaporama.
+            self.toggle_pause()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -510,6 +635,7 @@ class SplitWall(QWidget):
     STAGGER_MS = STAGGER_MS
 
     opened = Signal(str)
+    revealRequested = Signal(str)
     siblingRequested = Signal(int, str)
     countChanged = Signal(int)
     orientationChanged = Signal(str)
@@ -788,6 +914,7 @@ class SplitWall(QWidget):
             for pane in self.panes:
                 pane.peek_end()
                 pane.hide_overlays()
+                pane.slideshow.stop()
                 if (pane.player.playbackState()
                         == QMediaPlayer.PlaybackState.PlayingState):
                     pane.player.pause()
@@ -798,7 +925,9 @@ class SplitWall(QWidget):
         """Au retour du repli : reprend les panneaux qui jouaient, et les
         demarrages restes en attente."""
         for pane in self.panes:
-            if pane.player in playing and pane.video_path:
+            if pane.photo:
+                pane.resume()
+            elif pane.player in playing and pane.video_path:
                 pane.player.play()
         if self._queue:
             self._start_one()
@@ -896,13 +1025,32 @@ class SplitWall(QWidget):
             pane.set_stay(self.stay)
             pane.peekChosen.connect(self.peekChosen)
             pane.opened.connect(self.opened)
+            pane.revealRequested.connect(self.revealRequested)
             pane.favoriteToggled.connect(self.favoriteToggled)
             pane.favorite_of = self.favorite_of
             pane.player.mediaStatusChanged.connect(
                 lambda status, p=pane: self._pane_status(p, status))
             pane.set_bare(self.panes[0].bare if self.panes else False)
+            pane.slideshow_ms = self.slideshow_ms
             self.panes.append(pane)
         self._lay_out()
+
+    # Le diaporama de chaque panneau photo (`set_photo`).
+    slideshow_ms = SLIDESHOW_MS
+    noun = "vidéo"
+
+    def set_photo(self, on: bool, seconds: float = SLIDESHOW_MS / 1000) -> None:
+        """Des photos : chaque panneau les fait defiler en diaporama."""
+        self.noun = "photo" if on else "vidéo"
+        self.set_slideshow_seconds(seconds)
+        for pane in self.panes:
+            pane.slideshow_on = True
+
+    def set_slideshow_seconds(self, seconds: float) -> None:
+        """La duree de chaque photo, sans relancer les panneaux en pause."""
+        self.slideshow_ms = max(1000, int(seconds * 1000))
+        for pane in self.panes:
+            pane.slideshow_ms = self.slideshow_ms
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -972,7 +1120,7 @@ class SplitWall(QWidget):
         for at, pane in enumerate(self.panes):
             if at == index:
                 continue
-            pane.player.pause()
+            pane.stop()
         self._lay_out()
 
     def unsolo(self) -> None:
@@ -981,7 +1129,7 @@ class SplitWall(QWidget):
         self.solo = -1
         for pane in self.panes:
             if pane.video_path:
-                pane.player.play()
+                pane.resume()
         self._lay_out()
 
     def set_bare(self, bare: bool) -> None:
@@ -993,12 +1141,13 @@ class SplitWall(QWidget):
 
     def set_caption(self, count: int, unknown: int = 0, pinned: bool = False,
                     heavy: int = 0) -> None:
+        noun = self.noun
         if pinned:
-            self.caption.setText(f"{count} vidéo(s) choisie(s) — lues ensemble")
+            self.caption.setText(f"{count} {noun}(s) choisie(s) — lues ensemble")
             return
         kind = {"vertical": "verticales", "horizontal": "horizontales"}.get(
             self.orientation, "")
-        text = f"{count} vidéo(s) {kind}".replace("  ", " ")
+        text = f"{count} {noun}(s) {kind}".replace("  ", " ")
         if unknown:
             text += f" (dont {unknown} d'orientation encore inconnue)"
         if heavy:

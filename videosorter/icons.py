@@ -25,6 +25,7 @@ GLYPHS = {
     "◂": "chevron-left", "▸": "chevron-right", "⛶": "maximize",
     "✕": "x", "⚄": "dices", "⤢": "external-link", "⌸": "folder-open",
     "−": "minus", "+": "plus", "⋯": "ellipsis", "⏯": "pause",
+    "⧉": "picture-in-picture-2", "↩": "undo-2",
 }
 
 

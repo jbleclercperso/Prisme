@@ -189,6 +189,32 @@ def fold(text: str) -> str:
     return without_marks.casefold()
 
 
+# Un nom qui ne dit rien : « 0x56b4787xb7 », « a8f3c2d1-9e… », « IMG_2041 »,
+# « 20230512_184455 ». Aucun mot n'y range la video : il faut la regarder.
+# Les memes coupures que `words_of` -- ponctuation, chiffre, majuscule qui
+# suit une minuscule -- en une seule passe : on la fait sur toute la
+# collection, et `words_of` + `fold` coutaient 150 µs par nom.
+_WORD_RUN = re.compile(r"[A-ZÀ-Þ]+[a-zß-ÿ]*|[a-zß-ÿ]+")
+_VOWELS = re.compile(r"[aeiouyà-æè-ïò-öù-ýÿ]")
+_CONSONANTS = re.compile(r"[bcdfghjklmnpqrstvwxz]{5,}")
+
+
+def unreadable_name(name: str) -> bool:
+    """Vrai quand le nom du fichier ne porte aucun vrai mot."""
+    name = str(name)
+    cut = max(name.rfind("\\"), name.rfind("/"))
+    stem = name[cut + 1:]
+    dot = stem.rfind(".")
+    if dot > 0:
+        stem = stem[:dot]
+    for run in _WORD_RUN.findall(stem):
+        word = run.lower()
+        if (MIN_WORD <= len(word) <= MAX_WORD and word not in STOP_WORDS
+                and _VOWELS.search(word) and not _CONSONANTS.search(word)):
+            return False
+    return True
+
+
 def build_tag_items(tags: list, videos: list, minimum: int = 1) -> list:
     """Une catégorie par mot-clé, **chaque vidéo n'allant que dans une seule**.
 

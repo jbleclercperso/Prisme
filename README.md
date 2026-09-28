@@ -5,6 +5,77 @@ présente ce qu'il contient **un élément à la fois** : infos en haut, dix ape
 milieu, commandes en bas. Une touche = une décision, et l'élément suivant s'affiche
 aussitôt.
 
+Au lancement, Prisme rouvre toujours la dernière racine des **vidéos**, sur
+l'onglet **Dossiers**, sans filtre : ni « Non vus », ni format, ni recherche
+d'une séance précédente.
+
+## Photos
+
+Le même tri, pour des collections de photos : JPEG, PNG, WebP, GIF, BMP, TIFF
+et HEIC. Le sélecteur **Vidéos | Photos**, en haut à gauche, bascule tout
+Prisme et ouvre la dernière racine de l'autre collection :
+
+- l'analyse ne voit plus que les images ;
+- l'onglet « Vidéos » devient « Photos » ;
+- les tris par durée et par taille disparaissent.
+
+Les vignettes et les dimensions sont lues par Qt, sans ffmpeg, et redressées
+selon l'orientation EXIF. Seul le HEIC, que Qt ne sait pas lire, passe par
+ffmpeg.
+
+- **La fiche** affiche la photo en grand, lue hors du fil de l'interface. La
+  molette y zoome ; le clic droit ramène à la taille normale et propose les
+  destinations.
+- **Le diaporama** : ⏯, `Entrée` ou un clic sur la photo le lance et
+  l'arrête. Une photo toutes les 4 s (`slideshow_seconds`), dans le dossier de
+  la photo si « rester dans ce dossier » est cochée.
+- **Le Mur** : 2 à 10 photos côte à côte, chacune en diaporama dès
+  l'ouverture. ⏯ ou un clic arrête le panneau, la molette zoome, et le clic
+  droit range.
+- **Survoler un dossier** sur la planche fait défiler une dizaine de ses
+  photos, tirées au hasard.
+- **Verticales / Horizontales** : les photos dont on ignore encore le format
+  sont mesurées en tâche de fond, par lots (seul l'en-tête est lu), et la liste
+  se complète à mesure.
+
+Destinations, notes, touches et corbeille marchent comme pour les vidéos.
+
+**Les deux collections vivent à part.** Chacune a sa racine, ses
+destinations, ses filtres, ses mots-clés, ses notes (`ratings-photos.json`) et
+son index (`index-photos.db`). On ne range pas une photo dans le dossier des
+films. Le cache des vignettes, lui, est commun.
+
+## Lecteur flottant
+
+La vidéo continue par-dessus tout le reste, dans une fenêtre toujours au
+premier plan. On l'ouvre de deux façons :
+
+- à la demande : le bouton ⧉ du bandeau de la fiche, ou `Ctrl+L` ;
+- tout seul, quand Prisme est réduit ou recouvert par une autre application
+  (un dossier, une page web) pendant qu'une vidéo joue. Le réglage est
+  « Lecteur flottant automatique », dans le menu ⋯ › Affichage. Ouvert tout
+  seul, le lecteur ne prend pas le clavier.
+
+La fenêtre est sans cadre, et toute la place va à l'image :
+
+- elle prend les proportions de chaque vidéo, sans bandes noires ;
+- le titre, discret, est posé en haut à gauche de l'image ; on l'attrape
+  pour déplacer la fenêtre ;
+- on l'agrandit par ses bords ;
+- le double-clic la passe en plein écran.
+
+Elle reprend à l'instant où l'on en était :
+
+- le clic met en pause, la molette avance, clic maintenu + molette zoome ;
+- le temps restant et le trait d'avancement sont affichés ;
+- le bandeau ◂ ⏯ ▸ ⌸ ⛶ ↩ paraît au survol ;
+- le clic droit ouvre les destinations autour du pointeur, comme sur la
+  fiche ;
+- les touches de tri, de note et Suppr marchent depuis la fenêtre flottante.
+
+Revenir dans Prisme (↩, `Échap`, ou simplement cliquer dans sa fenêtre s'il
+s'était ouvert tout seul) le referme, et la fiche reprend au même instant.
+
 ## Les deux modes
 
 L'application regarde ce que contient la racine et choisit toute seule :
@@ -84,6 +155,8 @@ déjà vu est instantané.
 | `Ctrl+↑`, ou le bouton `↑` | Remonter au dossier parent, d'où qu'on soit |
 | `Ctrl+T` | Afficher ou masquer l'arborescence |
 | `Ctrl+M` | Couper ou remettre le son |
+| `Ctrl+L` | Lecteur flottant : ouvrir, ou revenir dans Prisme |
+| `Entrée` (photo) | Lancer ou arrêter le diaporama |
 | `Ctrl+O` | Ouvrir l'élément courant dans l'explorateur |
 | `Ctrl+D` | Ouvrir la configuration des destinations |
 | `Entrée` | Pause / reprise (mode fichier) |
@@ -434,6 +507,16 @@ d'attendre indéfiniment. Une interface graphique arrêtée sur une boîte de
 dialogue modale ne le signale pas autrement.
 
 ```bash
+python tests/test_floating.py
+python tests/test_photos.py
+```
+
+Le lecteur flottant (passage de relais au même instant, gestes, touches,
+ouverture automatique), le ⌸ du mur et la touche « Suppr » ; puis le mode
+photo (lancement sur les vidéos, bascule, index et réglages séparés,
+vignettes sans ffmpeg, diaporama, mur, feuilletage, mesure du format).
+
+```bash
 python tests/test_network.py
 ```
 
@@ -465,6 +548,7 @@ Vérifie la corbeille Windows réelle et exporte une capture de la fenêtre.
 | Fichier | Rôle |
 |---|---|
 | `main.py` | Démarrage |
+| `videosorter/floating.py` | Lecteur flottant, toujours au premier plan |
 | `videosorter/config.py` | Configuration persistante, emplacements |
 | `videosorter/scan.py` | Inventaire de la racine, et sa relecture en tâche de fond |
 | `videosorter/index.py` | Index persistant : ce qu'on sait déjà du disque |

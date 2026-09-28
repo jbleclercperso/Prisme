@@ -111,7 +111,14 @@ check(patches == [], f"et la relecture n a rien corrige ({patches})")
 check(window.scan_thread.rescanned == 0,
       f"aucun dossier reparcouru ({window.scan_thread.rescanned})")
 
+pinned = [i for i in window.items if i.pinned]
+check([i.name for i in pinned] == ["Orphelins"] and window.items[0].pinned
+      and [Path(v).name for v in pinned[0].videos] == ["vrac beach z.mp4"],
+      f"« Orphelins », épinglé en tête, réunit les vidéos hors sous-dossier "
+      f"({[(i.name, i.video_count) for i in pinned]})")
+
 print("\n[3] Les onglets repartent de la racine")
+window.index = next(n for n, i in enumerate(window.items) if not i.pinned)
 window.enter_current()
 settle()
 check(window.root != root, f"on peut descendre dans un dossier ({window.root.name})")

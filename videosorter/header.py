@@ -128,6 +128,43 @@ class Segmented(QWidget):
             button.style().polish(button)
 
 
+class KindToggle(QPushButton):
+    """Une seule icone, celle du mode en cours : la pellicule en videos,
+    l'image en photos. Un clic passe a l'autre collection.
+
+    Deux boutons « Vidéos | Photos » prenaient une place qu'un choix qu'on
+    fait rarement ne merite pas.
+    """
+
+    chosen = Signal(str)
+
+    # (cle, icone, ce que le bouton dit quand ce mode est le courant)
+    KINDS = {
+        "video": ("clapperboard", "Mode vidéos — cliquer pour trier les photos"),
+        "photo": ("image", "Mode photos — cliquer pour trier les vidéos"),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setObjectName("kindToggle")
+        self.setFixedWidth(38)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.value = ""
+        self.clicked.connect(
+            lambda _c=False: self.chosen.emit("photo" if self.value == "video" else "video"))
+        self.set_value("video")
+
+    def set_value(self, key: str) -> None:
+        key = "photo" if key == "photo" else "video"
+        if key == self.value:
+            return
+        self.value = key
+        glyph, tip = self.KINDS[key]
+        dress(self, glyph, 20)
+        self.setToolTip(tip)
+
+
 class Chips(QWidget):
     """Petits boutons ronds, un seul actif : deux familles de mots-cles."""
 
@@ -834,6 +871,18 @@ class ControlBar(QWidget):
         self.count.setVisible(not wall and bool(self.count.text()))
         if wall:
             self.clear.hide()
+
+    def set_photo(self, on: bool) -> None:
+        """Des photos : ni duree, ni taille a trier -- la resolution suffit."""
+        for key in ("duration", "size"):
+            self.sorts.buttons[key].setVisible(not on)
+        noun = "photos" if on else "vidéos"
+        self.folder_min.setPlaceholderText(f"≥ {noun}")
+        self.folder_max.setPlaceholderText(f"≤ {noun}")
+        for field in (self.folder_min, self.folder_max):
+            field.setToolTip("Ne garder que les dossiers qui comptent au moins, "
+                             f"au plus, ce nombre de {noun}")
+        self.random_here.setToolTip(f"Une {noun[:-1]} au hasard, parmi celles affichées")
 
     def set_wall(self, on: bool) -> None:
         """Conserve pour les appels existants : « wall » ou l'onglet courant."""

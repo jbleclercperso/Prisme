@@ -131,6 +131,9 @@ class Item:
     # Vrai pour un dossier virtuel batit sur un mot-cle : il n'existe pas sur
     # le disque, on le parcourt mais on ne le deplace pas.
     is_tag: bool = False
+    # Un dossier virtuel epingle en tete de la collection (« À trier »,
+    # « Orphelins ») : il porte son nom tel quel, sans le # des mots-cles.
+    pinned: bool = False
     # Un sous-dossier n'a pas pu etre lu : les comptes sont en dessous de la
     # verite. Ils ne doivent ni rassurer la garde de suppression, ni rester
     # en l'etat dans l'index -- on relira.
@@ -141,10 +144,13 @@ class Item:
 
     @property
     def name(self) -> str:
+        if self.pinned:
+            return self.path.name
         if self.is_tag:
             return f"# {self.path.name}"
         if self.loose_only:
-            return f"{self.path.name} {LOOSE_LABEL}"
+            # La racine d'un partage (\\serveur\volume\) n'a pas de nom.
+            return f"{self.path.name or str(self.path).rstrip(chr(92) + '/')} {LOOSE_LABEL}"
         return self.path.name
 
     @cached_property
@@ -713,7 +719,8 @@ def expand_parents(entries: list, skip_hidden: bool = True,
 def list_entries(root: Path, mode: str, skip_hidden: bool = True,
                  expand_parent_folders: bool = False,
                  stamps: dict | None = None, cache=None,
-                 strict: bool = False, unreadable: list | None = None) -> list:
+                 strict: bool = False, unreadable: list | None = None,
+                 own_loose: bool = False) -> list:
     """Liste, sans les analyser, les chemins de premier niveau à traiter.
 
     `stamps`, s'il est fourni, se remplit des dates de modification relevées au
@@ -722,6 +729,10 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
 
     `strict` : une racine illisible lève `RootUnreadable` au lieu de rendre une
     liste vide ; `unreadable` recueille les rayonnages qui n'ont pas répondu.
+
+    `own_loose` : les fichiers posés à même la racine, à côté de ses
+    sous-dossiers, ne se perdent plus -- la racine elle-même vient en tête,
+    comme l'entrée « (sans dossier) » d'un rayonnage.
     """
     if mode == MODE_FLAT:
         return list_all_videos(root, skip_hidden, stamps=stamps, strict=strict)
@@ -732,6 +743,7 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
         if strict:
             raise RootUnreadable(f"{root} : {exc}") from exc
         listing = []
+    has_loose = False
     for entry in listing:
         try:
             if skip_hidden and _is_hidden(entry):
@@ -740,6 +752,9 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
                 entries.append(fast_path(entry.path))
                 if stamps is not None:
                     stamps[entry.path] = _stamp(entry)
+            elif mode == MODE_FOLDERS and own_loose and not has_loose:
+                dot = entry.name.rfind(".")
+                has_loose = dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS
             elif mode == MODE_FILES and entry.is_file():
                 dot = entry.name.rfind(".")
                 if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
@@ -763,6 +778,9 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
             # c'est la qu'on range les autres. Le laisser dans la liste revenait
             # a proposer de ranger le rangement.
             entries = [path for path in entries if not is_parent_folder(path)]
+        # Sans sous-dossier, la racine s'ouvre a plat : rien ne s'y perd.
+        if has_loose and entries:
+            entries.insert(0, fast_path(str(root)))
     return entries
 
 
@@ -899,9 +917,12 @@ class RefreshThread(QThread):
     def __init__(self, root: Path, mode: str = "", skip_hidden: bool = True,
                  use_cache: bool = True, expand_parents: bool = False,
                  known_ids: list | None = None, force: bool = False,
-                 parent=None):
+                 parent=None, own_loose: bool = False):
         super().__init__(parent)
         self.root = Path(root)
+        # Les fichiers poses a meme la racine, a cote de ses sous-dossiers :
+        # une entree « (sans dossier) » en tete (voir `list_entries`).
+        self.own_loose = own_loose
         self.mode = mode
         self.skip_hidden = skip_hidden
         self.use_cache = use_cache
@@ -938,6 +959,18 @@ class RefreshThread(QThread):
         if is_network_path(self.root):
             return 8
         return max(2, min(6, os.cpu_count() or 4))
+
+    def _is_own(self, path: Path) -> bool:
+        """Cette entree est-elle la racine elle-meme, pour ses fichiers en vrac ?"""
+        if not self.own_loose:
+            return False
+        same = os.path.normcase(os.path.normpath(str(path)))
+        return same == os.path.normcase(os.path.normpath(str(self.root)))
+
+    def _id_of(self, path: Path, mode: str) -> str:
+        if mode == MODE_FOLDERS and self._is_own(path):
+            return f"{path}|vrac"
+        return item_id_for(path, mode, self.expand_parents)
 
     def _signature_of(self, path: Path, key: str, mode: str, stamps) -> str:
         if mode != MODE_FOLDERS:
@@ -976,8 +1009,9 @@ class RefreshThread(QThread):
         try:
             paths = list_entries(self.root, mode, self.skip_hidden,
                                  self.expand_parents, stamps, cache,
-                                 strict=True, unreadable=unreadable)
-            ids = [item_id_for(path, mode, self.expand_parents) for path in paths]
+                                 strict=True, unreadable=unreadable,
+                                 own_loose=self.own_loose)
+            ids = [self._id_of(path, mode) for path in paths]
             present = set(ids)
             gone = [key for key in self.known_ids if key not in present]
             if (len(gone) > max(20, len(self.known_ids) // 2)
@@ -988,11 +1022,11 @@ class RefreshThread(QThread):
                 again: list = []
                 second = list_entries(self.root, mode, self.skip_hidden,
                                       self.expand_parents, stamps, cache,
-                                      strict=True, unreadable=again)
+                                      strict=True, unreadable=again,
+                                      own_loose=self.own_loose)
                 if len(second) > len(paths):
                     paths, unreadable = second, again
-                    ids = [item_id_for(path, mode, self.expand_parents)
-                           for path in paths]
+                    ids = [self._id_of(path, mode) for path in paths]
                     present = set(ids)
                     gone = [key for key in self.known_ids if key not in present]
         except RootUnreadable as exc:
@@ -1082,7 +1116,7 @@ class RefreshThread(QThread):
                 return None
             if mode != MODE_FOLDERS:
                 return scan_file(path, stamps.get(str(path)) if stamps else None)
-            if self.expand_parents and is_parent_folder(path):
+            if (self.expand_parents and is_parent_folder(path)) or self._is_own(path):
                 return scan_loose(path, self.skip_hidden)
             return scan_folder(path)
 

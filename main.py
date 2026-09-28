@@ -124,6 +124,36 @@ def _leave_now_if_stuck(app, window, code: int, wait: float = 2.0) -> None:
         time.sleep(0.05)
 
 
+def _leave_now(app, window, code: int) -> None:
+    """La fenetre fermee, le processus s'en va -- vraiment.
+
+    `_leave_now_if_stuck` ne guette que les fils Qt de la fenetre. Restaient
+    ceux qu'il ne voit pas : un groupe de lectures du NAS (les rayonnages se
+    lisent de front), un apercu de la reserve commune, un fil Python ordinaire.
+    La sortie normale de Python les attend tous, sans limite : la fenetre
+    avait disparu, le processus restait, invisible, avec le verrou -- et
+    chaque relance repondait « Prisme finit de se fermer ». Tout ce qui compte
+    est ecrit par `closeEvent` (reglages, favoris, index referme, corbeille) :
+    on s'en va sans attendre personne. Sauf un transfert encore en vol.
+    """
+    import os
+    try:
+        if window.transfers.busy:
+            return
+    except (AttributeError, RuntimeError):
+        return
+    try:
+        app._prisme_lock.unlock()
+    except (AttributeError, RuntimeError):
+        pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except (AttributeError, OSError, ValueError):
+        pass
+    os._exit(code)
+
+
 # ---------------------------------------------------------------------------
 # Les erreurs de la séance
 # ---------------------------------------------------------------------------
@@ -492,6 +522,7 @@ def run() -> int:
     app.aboutToQuit.connect(lambda: INDEX.commit(force=True))
     code = app.exec()
     _leave_now_if_stuck(app, window, code)
+    _leave_now(app, window, code)
     return code
 
 

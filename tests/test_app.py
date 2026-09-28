@@ -199,7 +199,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     long_bar.resize(4000, 40)
     long_bar._fit()
     shown = [c.text.text() for c in long_bar.caps()]
-    check(shown[0] == "Supprimer définitivement"
+    # La touche rouge ne dit que « Suppr » : son effet est dans l'infobulle.
+    check(shown[0] == "" and long_bar.caps()[0].text.isHidden()
+          and "Supprimer définitivement" in long_bar.caps()[0].toolTip()
           and shown[2] == "Une destination au nom très long",
           f"avec de la place, les libellés sont entiers ({shown})")
     natural = sum(c.sizeHint().width() + 6 for c in long_bar.caps())
@@ -2898,7 +2900,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     from PySide6.QtWidgets import QPushButton as _QPB
     gestes = window.wall.panes[1].bar.findChildren(_QPB)
     check(len(gestes) == 6 and window.wall.panes[1].bar.stay is not None,
-          f"le bandeau d'un panneau pilote tout : ★ ◂ ⏯ ▸ ⤢ ⛶ et la coche "
+          f"le bandeau d'un panneau pilote tout : ★ ◂ ⏯ ▸ ⌸ ⛶ et la coche "
           f"« rester dans ce dossier » ({len(gestes)})")
     pane = window.wall.panes[1]
     first_video = pane.video_path
@@ -3485,8 +3487,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(window.aside_bar.buttons.count() == 6,
           f"il porte ses cinq gestes, précédente et pause compris "
           f"({window.aside_bar.buttons.count()})")
-    check(window.single_bar.buttons.count() == 6,
-          "le bandeau de la fiche aussi : la coche, ◂ ⏯ ▸ ⌸ ⛶")
+    check(window.single_bar.buttons.count() == 7,
+          "le bandeau de la fiche aussi : la coche, ◂ ⏯ ▸ ⌸ ⧉ ⛶")
     gestes = window.aside_bar.skin.findChildren(QPushButton)
     check(gestes and all(b.width() >= 28 and b.height() >= 22 for b in gestes),
           "dont les signes ont la place de se voir")
@@ -6022,7 +6024,7 @@ def check_quiet_and_header(app, window, base, root) -> None:
     order = [row.itemAt(n).widget().text() for n in range(row.count())
              if row.itemAt(n).widget() is not None and row.itemAt(n).widget().text()]
     check(window.picked_delete.objectName() == "danger"
-          and order[-1] == "Supprimer" and order[-2] == "Annuler",
+          and order[-1] == "Suppr" and order[-2] == "Annuler",
           f"« Supprimer » en rouge, en dernier, à l'écart d'« Annuler » ({order})")
     check(window.minimumSize().width() <= 640,
           f"la fenêtre peut descendre à {window.minimumSize().width()} points")
@@ -6267,7 +6269,7 @@ def check_chosen_features(app, window, base, tri) -> None:
     check(len(seen) == 4 and len(set(seen)) == 4,
           f"Ctrl+H ne remontre pas une vidéo déjà tirée ({len(set(seen))}/4)")
 
-    print("\n[104] Le mur : ⤢ puis Échap y ramène")
+    print("\n[104] Le mur : F puis Échap y ramène")
     orientation = window.cfg["wall_orientation"]
     window.set_tab(TAB_SPLIT)
     window.set_wall_orientation("any")
@@ -6280,7 +6282,7 @@ def check_chosen_features(app, window, base, tri) -> None:
         pump(app, 0.2)
         check(window.tab == TAB_FOLDERS and not window.browsing
               and str(window.current.path) == shown[0],
-              "⤢ ouvre la fiche de la vidéo")
+              "F ouvre la fiche de la vidéo")
         QTest.keyClick(window, Qt.Key_Escape)
         wait_for(app, lambda: [p.video_path for p in window.wall.panes] == shown, 10)
         check(window.tab == TAB_SPLIT
@@ -6944,11 +6946,12 @@ def check_reported_fixes(app, window, base, tri) -> None:
         QTest.keyClick(window._rename_field, Qt.Key_Return)
     settle(app, window)
     moved = shelf / "Album bis"
-    check(moved.is_dir() and not (shelf / "Album").exists()
-          and Path(album.path) == moved
-          and all(Path(v).parent == moved for v in album.videos)
-          and window.ratings.get(moved / "Album_0.mp4") == 1,
-          "F2 sur un dossier : renommé, ses vidéos et leur favori suivent")
+    parts = (moved.is_dir(), not (shelf / "Album").exists(),
+             Path(album.path) == moved,
+             all(Path(v).parent == moved for v in album.videos),
+             window.ratings.get(moved / "Album_0.mp4") == 1)
+    check(all(parts),
+          f"F2 sur un dossier : renommé, ses vidéos et leur favori suivent {parts}")
     QTest.keyClick(window, Qt.Key_Z, Qt.ControlModifier)
     settle(app, window)
     check((shelf / "Album").is_dir() and not moved.exists()

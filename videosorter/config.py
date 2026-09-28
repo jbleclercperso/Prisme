@@ -188,11 +188,56 @@ LOCAL_TRASH = APP_DIR / "_TRASH"
 # Le dossier de session, pose sous la racine triee (voir trash.py).
 TRASH_FOLDER_NAME = ".videosorter-corbeille"
 
-VIDEO_EXTS = {
+VIDEO_FILE_EXTS = frozenset({
     ".mp4", ".m4v", ".mov", ".mkv", ".avi", ".wmv", ".flv", ".webm",
     ".mpg", ".mpeg", ".m2ts", ".mts", ".ts", ".vob", ".3gp", ".ogv",
     ".rm", ".rmvb", ".asf", ".divx", ".f4v",
-}
+})
+PHOTO_EXTS = frozenset({
+    ".jpg", ".jpeg", ".jfif", ".png", ".webp", ".gif", ".bmp", ".tif",
+    ".tiff", ".heic", ".heif",
+})
+ALL_MEDIA_EXTS = VIDEO_FILE_EXTS | PHOTO_EXTS
+
+# Ce que l'on trie en ce moment : des videos, ou des photos. Tout Prisme
+# demande « est-ce un media ? » a cet ensemble-ci ; choisir les photos sur
+# l'accueil le remplit sur place (`set_media_kind`), et chaque module qui l'a
+# importe voit aussitot le changement. Il garde son nom d'origine : c'est
+# celui qu'emploient l'analyse, l'index, les doublons et la fenetre.
+VIDEO_EXTS = set(VIDEO_FILE_EXTS)
+KIND_VIDEO, KIND_PHOTO = "video", "photo"
+_KIND = [KIND_VIDEO]
+
+
+def media_kind() -> str:
+    return _KIND[0]
+
+
+def photo_mode() -> bool:
+    return _KIND[0] == KIND_PHOTO
+
+
+def is_photo(path) -> bool:
+    name = str(path)
+    dot = name.rfind(".")
+    return dot > 0 and name[dot:].lower() in PHOTO_EXTS
+
+
+def set_media_kind(kind: str) -> None:
+    """Bascule tout Prisme sur les videos ou sur les photos."""
+    kind = KIND_PHOTO if kind == KIND_PHOTO else KIND_VIDEO
+    VIDEO_EXTS.clear()
+    VIDEO_EXTS.update(PHOTO_EXTS if kind == KIND_PHOTO else VIDEO_FILE_EXTS)
+    _KIND[0] = kind
+
+
+def kind_paths(kind: str) -> tuple:
+    """L'index et les favoris de chaque collection : un dossier deja analyse
+    pour ses videos ne doit pas passer pour « a jour » quand on y cherche des
+    photos, et une etoile de photo n'a rien a faire parmi les videos."""
+    if kind == KIND_PHOTO:
+        return PRIVATE_DIR / "index-photos.db", PRIVATE_DIR / "ratings-photos.json"
+    return INDEX_PATH, RATINGS_PATH
 
 # Ordre d'attribution automatique des touches : les chiffres d'abord, puis les
 # lettres dans l'ordre du clavier AZERTY. Les commandes de l'application sont
@@ -220,6 +265,10 @@ DEFAULTS = {
     # cle etait oubliee au lancement suivant malgre l'enregistrement.
     "advance_after_star": False,
     "aside_split": None,         # largeurs planche / lecteur de droite
+    # Le lecteur flottant : il prend le relais, toujours au premier plan, des
+    # que Prisme est reduit ou recouvert pendant qu'une video joue.
+    "float_auto": True,
+    "float_geometry": None,      # [x, y, largeur, hauteur] du lecteur flottant
     # Ou prendre l'image d'une carte : le reglage le plus cher de tous.
     # 0 = le plus rapide, 6 = des images plus parlantes et deux fois plus lentes.
     "preview_start": 2.0,
@@ -250,6 +299,9 @@ DEFAULTS = {
     # Des dossiers masques par choix — leur contenu n'apparait nulle part
     # tant que l'interrupteur est leve.
     "veiled_names": ["BIN"],
+    # Ceux de la liste qu'on a reaffiches un par un, sans les oublier : une
+    # case a recocher suffit a les masquer de nouveau.
+    "veiled_off": [],
     "show_veiled": False,
     "quiet_explained": False,    # le repli s'est-il deja explique une fois ?
     "skip_hidden": True,
@@ -283,7 +335,24 @@ DEFAULTS = {
     "web_search_strict_keywords": True, # tous les mots-cles requis, pas un seul
     "web_search_known_domains": "",     # domaines de confiance, pour restreindre la recherche
     "web_search_discover_new_sites": False,  # completer par SerpAPI (quota limite)
+    # L'accueil : ce qu'on a trie la derniere fois (video | photo), et les
+    # reglages propres a la collection de photos (voir PER_KIND).
+    "media_kind": "video",
+    "photo": {},
+    "slideshow_seconds": 6,      # diaporama des photos : une image toutes les…
+    # La duree a-t-elle ete choisie ? Sinon, les 4 s d'avant passent a 6.
+    "slideshow_chosen": False,
 }
+
+# Ce qui appartient a une collection et non a Prisme : la racine, ses
+# destinations, ses filtres. En mode photo, ces reglages vivent a part, sous
+# « photo » : on ne range pas une photo dans le dossier des films.
+PER_KIND = frozenset({
+    "root", "recent_roots", "destinations", "tree_root", "filter_include",
+    "filter_exclude", "tab", "tags", "last_item", "collection", "searches",
+    "thumbs_last_run", "sort_mode", "stars_pick", "only_unseen",
+    "folder_min", "folder_max", "orientations",
+})
 
 
 class Config:
@@ -342,6 +411,10 @@ class Config:
             if key in DEFAULTS:
                 self.data[key] = value
         self._migrate_reserved_keys()
+        # Quatre secondes, l'ancien defaut, passaient trop vite : qui ne l'a
+        # pas choisi passe a six.
+        if not self.data.get("slideshow_chosen") and self.data.get("slideshow_seconds") == 4:
+            self.data["slideshow_seconds"] = DEFAULTS["slideshow_seconds"]
 
     def _migrate_reserved_keys(self) -> None:
         """Deplace les destinations posees sur une touche devenue reservee.
@@ -402,33 +475,56 @@ class Config:
         if problem:
             self.problem = f"Réglages non enregistrés : {problem}"
 
+    def _slot(self, key, kind: str | None = None) -> dict:
+        """Le dictionnaire ou vit `key` : celui des photos, en mode photo,
+        pour ce qui appartient a la collection."""
+        kind = kind or media_kind()
+        if kind == KIND_PHOTO and key in PER_KIND:
+            slot = self.data.get("photo")
+            if not isinstance(slot, dict):
+                slot = self.data["photo"] = {}
+            if key not in slot:
+                # Une copie : les listes par defaut ne doivent jamais etre
+                # modifiees sur place.
+                slot[key] = json.loads(json.dumps(DEFAULTS.get(key)))
+            return slot
+        return self.data
+
     def __getitem__(self, key):
-        return self.data.get(key, DEFAULTS.get(key))
+        return self._slot(key).get(key, DEFAULTS.get(key))
 
     def __setitem__(self, key, value):
-        self.data[key] = value
+        self._slot(key)[key] = value
 
     def get(self, key, default=None):
-        return self.data.get(key, default)
+        return self._slot(key).get(key, default)
+
+    def of_kind(self, kind: str, key):
+        """Un reglage de l'autre collection, sans basculer : l'accueil montre
+        les racines recentes des deux."""
+        return self._slot(key, kind).get(key, DEFAULTS.get(key))
+
+    def set_of_kind(self, kind: str, key, value) -> None:
+        self._slot(key, kind)[key] = value
 
     # -- racines recentes ------------------------------------------------
     def push_recent_root(self, root: str) -> None:
         # Windows ne distingue ni la casse ni les separateurs : « x:/Films »
         # et « X:\Films » sont le meme dossier, pas deux lignes des recents.
         same = _same_path_key(root)
-        recents = [r for r in self.data.get("recent_roots", [])
+        recents = [r for r in (self["recent_roots"] or [])
                    if _same_path_key(r) != same]
         recents.insert(0, root)
-        self.data["recent_roots"] = recents[:8]
-        self.data["root"] = root
+        self["recent_roots"] = recents[:8]
+        self["root"] = root
 
     # -- destinations ----------------------------------------------------
     @property
     def destinations(self) -> list[dict]:
-        return self.data.get("destinations", [])
+        return self["destinations"] or []
 
     def set_destinations(self, destinations: list[dict]) -> None:
-        self.data["destinations"] = destinations
+        self["destinations"] = destinations
 
     def destination_for_key(self, key: str) -> dict | None:
         for dest in self.destinations:

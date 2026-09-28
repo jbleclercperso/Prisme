@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QFrame, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from .config import is_photo
 from .perf import mark
 from .scan import MODE_FOLDERS, human_duration, human_resolution, human_size
 from .widgets import Expiring, PlayMarks, VideoWake
@@ -627,6 +628,8 @@ class BoardView(QWidget):
     # position. La planche n'enregistre rien elle-meme ; on lui renvoie la
     # nouvelle valeur par set_stars.
     favoriteToggled = Signal(int)
+    # Un dossier de photos survole : ses images a feuilleter (`add_flip`).
+    flipNeeded = Signal(int)
 
     def __init__(self, preview_seconds: int = 10, columns: int = DEFAULT_COLUMNS,
                  parent=None):
@@ -754,6 +757,14 @@ class BoardView(QWidget):
         self.settle_timer.setSingleShot(True)
         self.settle_timer.setInterval(HOVER_SETTLE_MS)
         self.settle_timer.timeout.connect(self._play_settled)
+        # Le feuilletage d'un dossier de photos survole (`_flip_start`).
+        self.flip_timer = QTimer(self)
+        self.flip_timer.setInterval(self.FLIP_MS)
+        self.flip_timer.timeout.connect(self._flip_step)
+        self._flip_card = None
+        self._flip_home = ""
+        self._flip_paths: list = []
+        self._flip_at = 0
 
     # -- contenu ---------------------------------------------------------
     def showEvent(self, event):
@@ -1116,6 +1127,7 @@ class BoardView(QWidget):
             return
         if 0 <= self.hovered < len(self.cards):
             self.cards[self.hovered].set_hovered(False)
+        self._flip_stop()
         self._blank()
         self.marks.clear()
         self.hovered = found
@@ -1184,8 +1196,52 @@ class BoardView(QWidget):
             self.video.show()
             self.wake.over(self.video.geometry())
 
+    # -- le feuilletage d'un dossier de photos ----------------------------------
+    FLIP_MS = 650
+
+    def _flip_start(self, card) -> None:
+        """Un dossier de photos survole : ses images defilent sur la carte.
+        La fenetre en tire une dizaine au hasard (`flipNeeded`) et les donne
+        a mesure qu'elles sont pretes (`add_flip`)."""
+        self._flip_stop()
+        self._flip_card = card
+        self._flip_home = card.thumb_path
+        self._flip_paths = [card.thumb_path] if card.thumb_path else []
+        self._flip_at = 0
+        self.flipNeeded.emit(card.index)
+
+    def add_flip(self, position: int, path: str) -> None:
+        card = self._flip_card
+        if card is None or card.index != position or path in self._flip_paths:
+            return
+        self._flip_paths.append(path)
+        if not self.flip_timer.isActive():
+            self.flip_timer.start()
+
+    def _flip_step(self) -> None:
+        card = self._flip_card
+        if card is None or len(self._flip_paths) < 2:
+            return
+        self._flip_at = (self._flip_at + 1) % len(self._flip_paths)
+        card.set_thumb(self._flip_paths[self._flip_at])
+
+    def _flip_stop(self) -> None:
+        """La souris part : la carte reprend son image."""
+        self.flip_timer.stop()
+        card, self._flip_card = self._flip_card, None
+        if card is not None and self._flip_home and card.thumb_path != self._flip_home:
+            card.set_thumb(self._flip_home)
+        self._flip_paths = []
+
     def _play(self, position: int) -> None:
         card = self.cards[position]
+        if card.video and is_photo(card.video):
+            # Une photo n'a rien a lire au survol ; un dossier de photos
+            # feuillette ses images.
+            self._blank()
+            if card.item is not None and card.item.kind == MODE_FOLDERS:
+                self._flip_start(card)
+            return
         if not card.video or card.video in self.unplayable:
             self._blank()
             return
@@ -1258,6 +1314,7 @@ class BoardView(QWidget):
 
     def stop(self) -> None:
         self.settle_timer.stop()
+        self._flip_stop()
         self.player.stop()
         self._blank()
         self.marks.clear()

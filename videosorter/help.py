@@ -19,8 +19,9 @@ SHORTCUTS = [
         ("1 à 5, 0", "1 à 5 : en favori ; 0 : retiré des favoris"),
         ("6, 7, 8… puis A, Z, E…", "l'envoyer vers la destination de cette touche"),
         ("Espace", "passer au suivant sans rien décider"),
-        ("Suppr", "l'écarter dans la corbeille de session — sur le NAS, détruit "
-                  "pour de bon à la fermeture"),
+        ("Suppr", "le supprimer : il passe par la corbeille de session "
+                  "(Ctrl+Z le reprend) — sur le NAS, détruit pour de bon à la "
+                  "fermeture"),
         ("Planche et mur", "Suppr, les destinations, 1 à 5 et 0 visent la vignette "
                            "ou le panneau sous la souris, ou les éléments cochés ; "
                            "sinon, rien"),
@@ -48,11 +49,19 @@ SHORTCUTS = [
         ("Ctrl+H, ou le dé", "une vidéo au hasard dans toute la collection : "
                              "aucune ne revient avant que toutes soient passées"),
         ("« Au hasard ici »", "de même, dans ce dossier ou dans la liste affichée"),
+        ("Vidéos | Photos", "en haut à gauche : passer d'une collection à "
+                            "l'autre, à sa dernière racine, sur « Dossiers »"),
     ]),
     ("Regarder", [
         ("F", "la fiche de la vidéo sous la souris : vignette, aperçu, panneau "
               "du mur"),
         ("Entrée, clic sur l'image", "pause, reprise"),
+        ("Ctrl+L", "lecteur flottant : la vidéo dans une fenêtre toujours "
+                   "devant, sans cadre ; on la déplace par son titre, on "
+                   "l'agrandit par ses bords ; Échap y revient"),
+        ("Photos : ⏯, Entrée, clic", "lancer ou arrêter le diaporama — dans "
+                                     "le dossier si la case est cochée ; sur "
+                                     "le mur, chaque panneau a le sien"),
         ("F11, Alt+Entrée, Ctrl+J", "plein écran : l'image seule, sans rien "
                                     "autour — sur le mur, le mur seul"),
         ("Double-clic sur l'image", "plein écran, et retour ; sur la vidéo "
@@ -92,7 +101,17 @@ SHORTCUTS = [
         ("⋯ → Journal des gels", "quand l'interface s'est figée, combien de temps, après quoi"),
         ("⋯ → Analyser les titres", "lit le titre des métadonnées de chaque vidéo, pour les mots fréquents"),
         ("⋯ → Repérer les plans", "les vignettes se posent sur des changements de plan, non sur des fractions"),
-        ("⋯ → Afficher les dossiers masqués", "montre, ou remasque, « BIN » et ce qu'il contient"),
+        ("« À trier », en tête", "les fichiers dont le nom ne porte aucun vrai mot "
+                                 "(0x56b47…, IMG_2041) : à regarder pour les ranger"),
+        ("« Orphelins », en tête", "les fichiers posés directement dans un dossier « + » "
+                                   "ou à la racine, hors de tout sous-dossier"),
+        ("Bouton ⧉ en haut", "active ou coupe le lecteur flottant automatique ; "
+                            "✕ sur le lecteur le ferme sans ramener Prisme"),
+        ("⋯ → Durée du diaporama…", "combien de secondes chaque photo reste, "
+                                    "au diaporama comme au mur (6 par défaut)"),
+        ("⋯ → Dossiers masqués…","les noms de dossiers cachés de la recherche et des listes ; "
+                                  "en ajouter, ou en décocher un pour le réafficher"),
+        ("⋯ → Afficher les dossiers masqués", "montre, ou remasque, tous ces dossiers d'un coup"),
         ("⋯ → Partage à distance", "le mot de passe, l'adresse publique à scanner, "
                                    "et qui a regardé quoi"),
         ("⋯ → Où sont les vignettes", "leur dossier, et comment le partager avec un autre PC"),
@@ -102,8 +121,9 @@ SHORTCUTS = [
         ("◂ ⏯ ▸", "la précédente du panneau ; pause ; une autre au hasard, sans "
                   "remise — ou la suivante du même dossier si « rester dans ce "
                   "dossier » est cochée"),
-        ("☆ ⤢ ⛶", "en favori ; ouvrir sa fiche (Échap ramène au mur) ; cette "
+        ("☆ ⌸ ⛶", "en favori ; montrer le fichier dans l'explorateur ; cette "
                   "vidéo seule en grand"),
+        ("F sur un panneau", "ouvrir sa fiche (Échap ramène au mur)"),
         ("Clic sur un panneau", "pause, reprise"),
         ("Clic droit sur un panneau", "les destinations, pour le ranger sans quitter le mur"),
         ("Maj + clic droit", "ses neuf instants ; cliquer une case y va"),

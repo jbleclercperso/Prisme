@@ -5,25 +5,29 @@ import os
 import time
 from pathlib import Path
 
+from collections import OrderedDict
+
 from PySide6.QtCore import (
-    QPoint, QPointF, QRect, QSize, QThread, QTimer, QUrl, Qt, Signal,
+    QObject, QPoint, QPointF, QRect, QRunnable, QSize, QThread, QThreadPool,
+    QTimer, QUrl, Qt, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QCursor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen,
-    QPixmap, QPolygonF, QRegion,
+    QColor, QCursor, QGuiApplication, QIcon, QImage, QImageReader, QPainter,
+    QPainterPath, QPen, QPixmap, QPolygonF, QRegion,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout,
-    QListView, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy,
+    QLineEdit, QListView, QListWidget, QListWidgetItem, QMessageBox,
+    QPlainTextEdit, QPushButton, QSizePolicy,
     QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .actions import ActionError
 from .icons import GLYPHS, dress, filled, icon
-from .config import KEY_ORDER, RESERVED_KEYS
+from .config import KEY_ORDER, RESERVED_KEYS, is_photo
 from .scan import human_duration, human_resolution
 
 GRID_COLUMNS = 5
@@ -688,6 +692,10 @@ class PreviewGrid(QWidget):
         if not tile.video:
             self._blank()
             return
+        if is_photo(tile.video):
+            # Une photo n'a rien a lire : sa vignette est deja l'image.
+            self._blank()
+            return
         if tile.video in self.unplayable:
             self._blank()
             return
@@ -752,7 +760,8 @@ class PreviewGrid(QWidget):
 
     def wheelEvent(self, event):
         """La molette avance ou recule dans l'extrait survolé."""
-        if self.hovered_slot == -1 or not self.player.source().isValid():
+        if self.hovered_slot == -1 or not self.player.source().isValid() \
+                or is_photo(self.tiles[self.hovered_slot].video or ""):
             return super().wheelEvent(event)
         step = seek_step(event, self.scroll_seconds)
         position = max(0, self.player.position() + step)
@@ -1216,6 +1225,12 @@ class OverBar(QWidget):
         # le prenait pour « sortir du cinema », et le ⛶ ne faisait rien.
         button.clicked.connect(lambda _checked=False, s=slot: s())
         self.buttons.addWidget(button)
+        if glyph == "⏯":
+            # Retenu par lui-meme, et non par sa place : la coche « rester
+            # dans ce dossier » se pose devant, et c'etait alors ◂ qui prenait
+            # l'icone lecture / pause.
+            self.pause_button = button
+        return button
 
     def set_name(self, text: str) -> None:
         self.name.setText(elide(text, 60))
@@ -1363,6 +1378,72 @@ class PeekOverlay(QWidget):
             self.cells[slot].caption.setText(text)
 
 
+class _Still(QWidget):
+    """Une photo, entiere dans son cadre. Le cadre peut deborder de la zone
+    d'image : c'est ainsi que le zoom de la fiche l'agrandit, comme la video."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.image = None
+        self.hide()
+
+    def set_image(self, image) -> None:
+        self.image = image if image is not None and not image.isNull() else None
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#000000"))
+        if self.image is not None:
+            size = self.image.size().scaled(self.size(), Qt.KeepAspectRatio)
+            spot = QRect(0, 0, size.width(), size.height())
+            spot.moveCenter(self.rect().center())
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            painter.drawImage(spot, self.image)
+        painter.end()
+
+
+class _StillSignals(QObject):
+    loaded = Signal(str, QImage)
+
+
+class _StillLoader(QRunnable):
+    """Lit une photo hors du fil de l'interface, deja reduite a la taille
+    de l'ecran : un JPEG de vingt megapixels lu en entier sur le NAS gelait
+    la fiche une demi-seconde."""
+
+    def __init__(self, path: str, longest: int, signals: _StillSignals):
+        super().__init__()
+        self.path = path
+        self.longest = longest
+        self.signals = signals
+
+    def run(self) -> None:
+        image = QImage()
+        try:
+            reader = QImageReader(self.path)
+            reader.setAutoTransform(True)
+            size = reader.size()
+            if size.isValid() and max(size.width(), size.height()) > self.longest:
+                reader.setScaledSize(size.scaled(self.longest, self.longest,
+                                                 Qt.KeepAspectRatio))
+            image = reader.read()
+            if image.isNull():
+                # HEIC et consorts : ffmpeg sait les lire, Qt non.
+                from . import media
+                made = media.extract_thumb(Path(self.path), 0.0,
+                                           min(self.longest, 2560))
+                if made is not None:
+                    image = QImage(str(made))
+        except Exception:                               # noqa: BLE001
+            image = QImage()
+        try:
+            self.signals.loaded.emit(self.path, image)
+        except RuntimeError:
+            pass                        # la fiche a disparu entre-temps
+
+
 class _Deck:
     """Un lecteur complet : la surface, le moteur, le son.
 
@@ -1411,6 +1492,9 @@ class SinglePlayer(QWidget):
     # premier clic a deja mis en pause, sans attendre de savoir s'il en
     # viendrait un second ; le double-clic defait cette pause.
     cinemaRequested = Signal()
+    # ⏯, Entree ou un clic sur une photo : le diaporama demarre, ou s'arrete.
+    slideshowToggled = Signal()
+    slideshow_on = False
 
     # Cinq reperes suffisent a se reperer dans une video : un cinquieme, deux
     # cinquiemes, et ainsi de suite. Dix prenaient deux fois plus de place pour
@@ -1455,6 +1539,15 @@ class SinglePlayer(QWidget):
         self.decks = [_Deck(self.video_area), _Deck(self.video_area)]
         self._active = 0
         self._muted = False
+        # Les photos : une image fixe a la place des lecteurs, lue hors du
+        # fil de l'interface, et les dernieres gardees en memoire pour que
+        # ◂ ▸ soient immediats.
+        self.still = _Still(self.video_area)
+        self.still_path = ""
+        self._stills: OrderedDict = OrderedDict()
+        self._still_wanted: set = set()
+        self._still_signals = _StillSignals(self)
+        self._still_signals.loaded.connect(self._still_loaded)
         self.peek = PeekOverlay(self.video_area)
         self.peeking = False
         # Le widget video de Windows avale les clics : on lui prend ses gestes
@@ -1576,6 +1669,9 @@ class SinglePlayer(QWidget):
         cents millisecondes sur le fil de l'interface, passait avant la
         peinture de la fiche, et c'etait le clic qui semblait lent.
         """
+        if is_photo(path):
+            self._load_still(path)
+            return
         spare = self.spare
         if spare.path == path:
             self._spare_wanted = ""
@@ -1754,14 +1850,76 @@ class SinglePlayer(QWidget):
         """Retire la pellicule : tout l'espace revient a l'image."""
         self.strip.hide()
 
+    def show_strip(self) -> None:
+        self.strip.show()
+
     def set_muted(self, muted: bool) -> None:
         self._muted = muted
         self.audio.setMuted(muted)
+
+    # -- photos ---------------------------------------------------------------
+    STILLS_KEPT = 8
+
+    def _still_longest(self) -> int:
+        """Assez de pixels pour l'ecran entier, zoom modere compris."""
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return 2560
+        size = screen.size() * screen.devicePixelRatio()
+        return max(1280, min(4096, int(max(size.width(), size.height()) * 1.5)))
+
+    def _load_still(self, path: str) -> None:
+        if path in self._stills or path in self._still_wanted:
+            return
+        self._still_wanted.add(path)
+        QThreadPool.globalInstance().start(
+            _StillLoader(path, self._still_longest(), self._still_signals))
+
+    def _still_loaded(self, path: str, image) -> None:
+        self._still_wanted.discard(path)
+        self._stills[path] = image
+        self._stills.move_to_end(path)
+        while len(self._stills) > self.STILLS_KEPT:
+            self._stills.popitem(last=False)
+        if path == self.still_path:
+            self.still.set_image(image)
+            self.position_label.hide()
+
+    def _show_still(self, path: str) -> None:
+        """Une photo dans la fiche : les lecteurs video se taisent."""
+        for deck in self.decks:
+            if deck.path or deck.player.source().isValid():
+                deck.clear()
+        self.blackout_timer.stop()
+        self._blackout = False
+        self._awaiting_frame = False
+        self._spare_wanted = ""
+        self.reset_zoom()
+        self.still_path = path
+        image = self._stills.get(path)
+        if image is not None:
+            self._stills.move_to_end(path)
+        self.still.set_image(image)
+        self.still.show()
+        self.still.raise_()
+        self.marks.set_progress(0, 0)
+        if image is None:
+            self._load_still(path)
+
+    def _hide_still(self) -> None:
+        if self.still_path:
+            self.still_path = ""
+            self.still.hide()
+            self.still.set_image(None)
 
     def set_item(self, path: str, message: str = "…") -> None:
         for tile in self.tiles:
             tile.reset()
             tile.placeholder.setText(message)
+        if is_photo(path):
+            self._show_still(path)
+            return
+        self._hide_still()
         spare = self.spare
         # Un clic ou un appui d'avant ne vaut plus pour ce fichier.
         self._click_paused = False
@@ -1875,7 +2033,11 @@ class SinglePlayer(QWidget):
 
     def _poll_hover(self) -> None:
         # Survoler une image de la pellicule déplace la lecture à cet instant.
-        if not self.isVisible() or not self.window().isActiveWindow():
+        # Le lecteur flottant repond au survol meme sans avoir le clavier : on
+        # travaille ailleurs pendant qu'il joue.
+        owner = self.window()
+        if not self.isVisible() or not (
+                owner.isActiveWindow() or getattr(owner, "hover_anytime", False)):
             return
         slot = -1
         for index, tile in enumerate(self.tiles):
@@ -1897,8 +2059,10 @@ class SinglePlayer(QWidget):
 
         Bouton gauche maintenu, ou Ctrl : zoomer là où pointe la souris.
         """
-        if event.buttons() & Qt.LeftButton or event.modifiers() & Qt.ControlModifier:
-            self._zoomed_while_held = True
+        if (event.buttons() & Qt.LeftButton or event.modifiers() & Qt.ControlModifier
+                or self.still_path):
+            # Une photo n'a pas de temps a parcourir : la molette zoome.
+            self._zoomed_while_held = bool(event.buttons() & Qt.LeftButton)
             return self._zoom_at(event)
         if not self.player.source().isValid():
             return super().wheelEvent(event)
@@ -1947,6 +2111,7 @@ class SinglePlayer(QWidget):
         # Les deux surfaces, pour que la reserve soit deja en place a l'echange.
         for deck in self.decks:
             deck.video.setGeometry(left, top, width, height)
+        self.still.setGeometry(left, top, width, height)
         self.peek.setGeometry(area)
 
     def reset_zoom(self) -> None:
@@ -2000,6 +2165,11 @@ class SinglePlayer(QWidget):
         super().mouseReleaseEvent(event)
 
     def toggle_pause(self) -> None:
+        if self.still_path:
+            # Une photo ne joue pas : le meme geste lance ou arrete le
+            # diaporama, que la fenetre fait avancer.
+            self.slideshowToggled.emit()
+            return
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
@@ -2057,6 +2227,93 @@ class TagsDialog(QDialog):
             if term and term.lower() not in [t.lower() for t in seen]:
                 seen.append(term)
         return seen
+
+
+class VeilDialog(QDialog):
+    """Les noms de dossiers qu'on ne veut pas voir, et ceux qu'on reaffiche.
+
+    Coche : le dossier est masque partout — listes, recherche, mots-cles,
+    mur, doublons, partage. Decoche : il revient, mais son nom reste dans la
+    liste, pret a etre recoche. Rien ne bouge sur le disque.
+    """
+
+    def __init__(self, names: list, off: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Dossiers masqués")
+        self.resize(460, 420)
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Les dossiers qui portent un de ces noms, où qu'ils soient, et tout "
+            "ce qu'ils contiennent, sont cachés de la recherche et des listes. "
+            "Décochez un nom pour le réafficher sans l'oublier. La casse est "
+            "ignorée ; rien n'est déplacé sur le disque.", self)
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.list = QListWidget(self)
+        low_off = {str(n).casefold() for n in off}
+        for name in names:
+            self._add_row(name, str(name).casefold() not in low_off)
+        layout.addWidget(self.list, 1)
+
+        row = QHBoxLayout()
+        self.entry = QLineEdit(self)
+        self.entry.setPlaceholderText("Nom d'un dossier à masquer, par ex. @eaDir")
+        self.entry.returnPressed.connect(self.add_name)
+        row.addWidget(self.entry, 1)
+        add = QPushButton("Ajouter", self)
+        add.clicked.connect(self.add_name)
+        row.addWidget(add)
+        remove = QPushButton("Retirer", self)
+        remove.setToolTip("Enlève le nom sélectionné de la liste")
+        remove.clicked.connect(self.remove_name)
+        row.addWidget(remove)
+        layout.addLayout(row)
+
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        box.button(QDialogButtonBox.Ok).setText("Enregistrer")
+        box.button(QDialogButtonBox.Cancel).setText("Annuler")
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        # Entree dans le champ ajoute le nom, elle ne ferme pas la fenetre.
+        for button in box.buttons():
+            button.setAutoDefault(False)
+        layout.addWidget(box)
+
+    def _add_row(self, name: str, on: bool) -> None:
+        item = QListWidgetItem(str(name), self.list)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    def _names(self) -> list:
+        return [self.list.item(i).text() for i in range(self.list.count())]
+
+    def add_name(self) -> None:
+        # Un nom de dossier, pas un chemin : c'est ainsi que le masque compare.
+        name = self.entry.text().strip().strip("\\/").split("\\")[-1].split("/")[-1]
+        self.entry.clear()
+        if not name:
+            return
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item.text().casefold() == name.casefold():
+                item.setCheckState(Qt.Checked)
+                self.list.setCurrentItem(item)
+                return
+        self._add_row(name, True)
+        self.list.setCurrentRow(self.list.count() - 1)
+
+    def remove_name(self) -> None:
+        row = self.list.currentRow()
+        if row >= 0:
+            self.list.takeItem(row)
+
+    def result_veil(self) -> tuple:
+        """(tous les noms, ceux qui sont decoches)."""
+        names = self._names()
+        off = [self.list.item(i).text() for i in range(self.list.count())
+               if self.list.item(i).checkState() != Qt.Checked]
+        return names, off
 
 
 class _Restorer(QThread):
@@ -2305,7 +2562,8 @@ class KeyCap(QFrame):
     # avec mille pixels libres.
     LONGEST = 60
 
-    def __init__(self, key: str, label: str, tone: str = "", parent=None):
+    def __init__(self, key: str, label: str, tone: str = "", parent=None,
+                 key_only: bool = False):
         super().__init__(parent)
         self.setObjectName("keycap")
         self.setCursor(Qt.PointingHandCursor)
@@ -2315,9 +2573,12 @@ class KeyCap(QFrame):
         layout.setSpacing(8)
         key_label = QLabel(key, self)
         key_label.setObjectName("keyLetter")
-        self.full = elide(label, self.LONGEST)
+        # La touche seule quand elle dit deja tout (« Suppr ») : le libelle
+        # ne reste qu'en infobulle.
+        self.full = "" if key_only else elide(label, self.LONGEST)
         text = QLabel(self.full, self)
         text.setObjectName("keyLabel")
+        text.setVisible(not key_only)
         layout.addWidget(key_label)
         layout.addWidget(text)
         self.text = text
@@ -2333,7 +2594,7 @@ class KeyCap(QFrame):
     def set_compact(self, on: bool) -> None:
         """La touche seule, son effet en infobulle : quand la ligne manque de
         place, on resserre plutot que d'ouvrir une deuxieme rangee."""
-        self.text.setVisible(not on)
+        self.text.setVisible(not on and bool(self.full))
         self._layout.setContentsMargins(*((8, 4, 8, 4) if on else (9, 4, 11, 4)))
 
     def label_width(self) -> int:
@@ -2468,7 +2729,8 @@ class CommandBar(QWidget):
                 item.widget().hide()
                 item.widget().deleteLater()
 
-        delete_cap = KeyCap("Suppr", delete_label, "danger")
+        delete_cap = KeyCap("Suppr", f"Supprimer — {delete_label}", "danger",
+                            key_only=True)
         delete_cap.clicked.connect(self.deleteRequested)
         self.layout_.addWidget(delete_cap)
 
