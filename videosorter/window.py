@@ -51,6 +51,7 @@ from .tagging import TagsThread, iter_tag_items, unreadable_name
 from .split import DEFAULT_PANES, SPLIT_STYLE, Deck, SplitWall
 from .access import JOURNAL
 from .perf import LOG as STALL_LOG, WATCH, mark
+from .lock import LockPage
 from .quiet import QUIET_TITLE, QuietPage
 # Le dialogue du partage et la recherche sur le web s'importent a leur
 # premiere ouverture : la seconde tirait requests, bs4 et robotparser au
@@ -88,7 +89,7 @@ from .widgets import (
     FavoriteStar, TagsDialog, TrashDialog, VeilDialog,
 )
 
-PAGE_WELCOME, PAGE_SORT, PAGE_DONE, PAGE_QUIET = 0, 1, 2, 3
+PAGE_WELCOME, PAGE_SORT, PAGE_DONE, PAGE_QUIET, PAGE_LOCK = 0, 1, 2, 3, 4
 
 # Les dossiers virtuels epingles en tete de la collection : ce qu'aucun
 # nom ne range, et ce qui n'est dans aucun sous-dossier.
@@ -625,6 +626,9 @@ class MainWindow(QMainWindow):
         self._quiet_timers: tuple = ()  # vu, rafale : lesquels couraient
         self._quiet_full = False       # le mur etait en plein ecran
         self._quiet_icon = None        # (icone, posee par la fenetre ?)
+        # Verrouille des l'ouverture (code PIN) : au retour, le repli n'a
+        # pas a s'expliquer, on ne l'a pas demande.
+        self._quiet_by_lock = False
         # Une touche maintenue au moment du retour ne doit pas continuer sur
         # la page retrouvee (Echap remontait jusqu'en haut).
         self._eat_repeat = False
@@ -697,6 +701,8 @@ class MainWindow(QMainWindow):
         self._quiet_shortcut.setAutoRepeat(False)
         self._quiet_shortcut.activated.connect(self._quiet_key)
         QApplication.instance().focusChanged.connect(self._quiet_keys.follow)
+        # Un code PIN pose : la premiere chose qu'on voit est le cadenas.
+        self.lock_now()
 
     @staticmethod
     def _window_floor() -> tuple:
@@ -941,6 +947,7 @@ class MainWindow(QMainWindow):
                 ("Durée du diaporama…", self.edit_slideshow_seconds),
                 ("Dossiers masqués…", self.edit_veiled),
                 ("Afficher les dossiers masqués", self.toggle_veiled),
+                ("Code PIN…", self.edit_pin),
                 ("Ignorer la mise à l'échelle de Windows", self.toggle_dpi),
             ]),
             ("Collection", [
@@ -1516,6 +1523,11 @@ class MainWindow(QMainWindow):
         self.quiet_page.back.clicked.connect(self.leave_quiet)
         self.quiet_page.leave.connect(self.leave_quiet)
         self.stack.addWidget(self.quiet_page)
+        # Le cadenas du code PIN : entre la page neutre et la collection.
+        self.lock_page = LockPage(self.cfg, self)
+        self.lock_page.unlocked.connect(self._leave_quiet_now)
+        self.lock_page.hide_me.connect(self.show_quiet_page)
+        self.stack.addWidget(self.lock_page)
 
         # Rien ne disait que des apercus etaient en fabrication : devant une
         # planche qui ne se remplit pas, on ne sait pas s'il faut attendre ou
@@ -4230,7 +4242,7 @@ class MainWindow(QMainWindow):
         self.single.peek_end()
         self.wall.end_peeks()
         self._wall_peek = None
-        self.quiet_page.setFocus()
+        self.stack.currentWidget().setFocus()
 
     def _close_overlays(self) -> None:
         """Ferme menus et dialogues ouverts, dans le sens prudent (Annuler).
@@ -4284,10 +4296,58 @@ class MainWindow(QMainWindow):
         self.toggle_quiet()
 
     def leave_quiet(self) -> None:
+        """On revient là où l'on était -- en passant par le code PIN s'il y en a un.
+
+        Sur le cadenas, le même geste (Ctrl+K, Échap) ramène à la page
+        neutre : on ne sort du repli qu'avec le bon code.
+        """
+        if not self._quiet:
+            return
+        if self.pin_set():
+            if self.stack.currentIndex() == PAGE_LOCK:
+                self.show_quiet_page()
+            else:
+                self.show_lock()
+            return
+        self._leave_quiet_now()
+
+    def show_lock(self) -> None:
+        """Le cadenas, a la place de la page neutre."""
+        if not self._quiet:
+            return
+        self.quiet_page.stop()
+        self.lock_page.reset()
+        self.stack.setCurrentIndex(PAGE_LOCK)
+        self.lock_page.setFocus()
+
+    def show_quiet_page(self) -> None:
+        """Retour a la page neutre, depuis le cadenas."""
+        if not self._quiet:
+            return
+        self.lock_page.reset()
+        self.quiet_page.start()
+        self.stack.setCurrentIndex(PAGE_QUIET)
+        self.quiet_page.setFocus()
+
+    def lock_now(self) -> None:
+        """Au lancement, code PIN pose : Prisme s'ouvre sur le cadenas.
+
+        C'est le repli, avec le cadenas devant : le titre et l'icone de la
+        fenetre sont neutres, et ce qui s'ouvre en coulisse (la derniere
+        racine) attend derriere.
+        """
+        if not self.pin_set():
+            return
+        self.enter_quiet()
+        self._quiet_by_lock = True
+        self.show_lock()
+
+    def _leave_quiet_now(self) -> None:
         """On revient là où l'on était, dans l'état où on l'avait laissé."""
         if not self._quiet:
             return
         self.quiet_page.stop()
+        self.lock_page.reset()
         self._quiet = False
         page = self._quiet_from
         self.stack.setCurrentIndex(page)
@@ -4327,9 +4387,10 @@ class MainWindow(QMainWindow):
 
     def _tell_after_quiet(self) -> None:
         """Ce qui s'est dit pendant le repli, puis, une fois, comment on en sort."""
+        by_lock, self._quiet_by_lock = self._quiet_by_lock, False
         if any(tone == "error" for _t, tone, _a, _s in self._held_banners):
             return self._show_held_banners()
-        if not self.cfg["quiet_explained"]:
+        if not self.cfg["quiet_explained"] and not by_lock:
             # Au premier retour, et non a la premiere entree : une boite au
             # milieu de la page neutre annoncait que c'etait un leurre.
             self.cfg["quiet_explained"] = True
@@ -4374,6 +4435,11 @@ class MainWindow(QMainWindow):
         la liste — rien n'est relu sur le disque pour autant.
         """
         wanted = not self.cfg["show_veiled"]
+        # Avec un code PIN, les montrer le demande : sinon le masque ne
+        # tenait qu'a un clic dans le menu.
+        if wanted and self.pin_set() and not self._confirm_pin(
+                "Afficher les dossiers masqués"):
+            return self.setFocus()
         self.cfg["show_veiled"] = wanted
         self.cfg.save()
         self._refresh_veil()
@@ -4382,6 +4448,84 @@ class MainWindow(QMainWindow):
             f"Dossiers masqués affichés : {names}." if wanted
             else f"Dossiers masqués de nouveau cachés : {names}.",
             "info" if wanted else "quiet")
+
+    # ------------------------------------------------------------------
+    # Le code PIN
+    # ------------------------------------------------------------------
+    def pin_set(self) -> bool:
+        return bool(self.cfg["pin_salt"] and self.cfg["pin_digest"])
+
+    def _confirm_pin(self, title: str) -> bool:
+        """Le code actuel, redemande ; faux si l'on renonce ou s'il est faux.
+
+        Les memes erreurs comptent ici que sur le cadenas : sans cela, ce
+        dialogue permettait de deviner le code sans jamais attendre.
+        """
+        from .lock import ask_pin, pin_ok, wait_after
+
+        left = self.lock_page.waiting()
+        if left:
+            self.show_banner(f"Trop d'essais : réessayez dans {left} s.", "error")
+            return False
+        given = ask_pin(self, title, "Code PIN actuel :")
+        if given is None:
+            return False
+        cfg = self.cfg
+        if pin_ok(given, cfg["pin_salt"], cfg["pin_digest"]):
+            cfg["pin_failures"] = 0
+            cfg["pin_wait_until"] = 0
+            cfg.save()
+            return True
+        failures = int(cfg["pin_failures"] or 0) + 1
+        cfg["pin_failures"] = failures
+        wait = wait_after(failures)
+        if wait:
+            cfg["pin_wait_until"] = time.time() + wait
+        cfg.save()
+        self.show_banner("Code incorrect.", "error")
+        return False
+
+    def edit_pin(self) -> None:
+        """Poser, changer ou retirer le code PIN (4 chiffres)."""
+        from .lock import ask_pin, hash_pin
+
+        title = "Code PIN"
+        if self.pin_set():
+            box = QMessageBox(self)
+            box.setWindowTitle(title)
+            box.setText("Un code PIN protège Prisme : il est demandé à "
+                        "l'ouverture et au retour du repli (Ctrl+K).")
+            change = box.addButton("Changer le code…", QMessageBox.AcceptRole)
+            remove = box.addButton("Retirer le code", QMessageBox.DestructiveRole)
+            box.addButton("Annuler", QMessageBox.RejectRole)
+            box.exec()
+            chosen = box.clickedButton()
+            if chosen not in (change, remove) or not self._confirm_pin(title):
+                return self.setFocus()
+            if chosen is remove:
+                self.cfg["pin_salt"] = self.cfg["pin_digest"] = ""
+                self.cfg.save()
+                self.show_banner("Code PIN retiré : Prisme s'ouvre de nouveau "
+                                 "sans code.", "done")
+                return self.setFocus()
+        new = ask_pin(self, title, "Choisissez un code de 4 chiffres :")
+        if new is None:
+            return self.setFocus()
+        again = ask_pin(self, title, "Tapez-le une seconde fois :")
+        if again is None:
+            return self.setFocus()
+        if again != new:
+            self.show_banner("Les deux codes ne correspondent pas : rien n'a "
+                             "changé.", "error")
+            return self.setFocus()
+        salt, digest = hash_pin(new)
+        self.cfg["pin_salt"], self.cfg["pin_digest"] = salt, digest
+        self.cfg["pin_failures"] = 0
+        self.cfg["pin_wait_until"] = 0
+        self.cfg.save()
+        self.show_banner("Code PIN posé : il sera demandé à l'ouverture de "
+                         "Prisme et au retour du repli (Ctrl+K).", "done")
+        self.setFocus()
 
     def _active_veil(self) -> list:
         """Les noms de la liste qui masquent vraiment : les cochés."""

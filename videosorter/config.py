@@ -304,6 +304,10 @@ DEFAULTS = {
     "veiled_off": [],
     "show_veiled": False,
     "quiet_explained": False,    # le repli s'est-il deja explique une fois ?
+    "pin_salt": "",              # le code PIN : sel et empreinte, jamais en clair
+    "pin_digest": "",
+    "pin_failures": 0,           # erreurs de suite, pour l'attente imposee
+    "pin_wait_until": 0,         # pas de nouvel essai avant cet instant
     "skip_hidden": True,
     "use_scan_cache": True,      # reutiliser l analyse precedente
     "sort_mode": "random",       # random | duration_desc | size_asc | …

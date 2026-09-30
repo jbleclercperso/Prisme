@@ -88,7 +88,7 @@ SHORTCUTS = [
         ("Ctrl+R", "réanalyser ce dossier en entier — à la racine, toute la "
                    "collection, après confirmation"),
         ("Ctrl+K", "passer à autre chose — Ctrl+K, Échap ou un double-clic pour "
-                   "revenir"),
+                   "revenir (le code PIN, s'il est posé : ⋯ › Affichage)"),
         ("Ctrl+Alt+K", "la même chose depuis n'importe quelle fenêtre — sans jamais "
                        "ramener Prisme"),
         ("F1", "cette fiche"),

@@ -58,6 +58,10 @@ class QuietPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("quietPage")
+        # Sans cet attribut, le fond clair de la feuille de style ne se peint
+        # pas sur un QWidget : la page restait sur le fond sombre de Prisme,
+        # titre illisible -- l'air d'un utilitaire casse, pas d'un banal.
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(QUIET_STYLE)
 
         box = QVBoxLayout(self)

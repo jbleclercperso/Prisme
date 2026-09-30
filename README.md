@@ -451,6 +451,30 @@ suivent celui de la liste. **Renuméroter** réattribue les touches dans cet ord
   chose. À la fermeture, l'application patiente le temps que tout soit arrivé :
   aucun dossier n'est laissé à moitié copié.
 
+## Code PIN
+
+`⋯ › Affichage › Code PIN…` pose un code de quatre chiffres. Il est alors
+demandé :
+
+- **à l'ouverture de Prisme** : la fenêtre s'ouvre sur le cadenas, titre et
+  icône neutres, et la dernière racine s'ouvre en coulisse ;
+- **au retour du repli** (`Ctrl+K`) : le double-clic, `Échap` ou `Ctrl+K`
+  sur la page neutre mènent au cadenas, et `Échap` sur le cadenas ramène à la
+  page neutre ;
+- **pour afficher les dossiers masqués**.
+
+Le code se tape au clavier, pavé numérique compris, ou à la souris ; le
+quatrième chiffre valide. Seule son empreinte (PBKDF2, deux cent mille tours)
+est écrite, dans `pin_salt` et `pin_digest`. Après cinq erreurs de suite, il
+faut attendre 30 s, puis le double à chaque nouvelle série, jusqu'à dix
+minutes ; `pin_failures` et `pin_wait_until` gardent ce compte d'un lancement
+à l'autre. Changer ou retirer le code redemande l'actuel.
+
+**Code oublié** : Prisme fermé, effacer les valeurs de `pin_salt` et
+`pin_digest` dans `config.json` (voir « Configuration »). C'est la réponse à
+donner au client qui écrit au support : le code protège des regards, pas d'un
+accès au disque.
+
 ## Installation et lancement
 
 Prérequis : **Python 3.10+** et **ffmpeg/ffprobe** accessibles (déjà installés ici
@@ -517,6 +541,14 @@ photo (lancement sur les vidéos, bascule, index et réglages séparés,
 vignettes sans ffmpeg, diaporama, mur, feuilletage, mesure du format).
 
 ```bash
+python tests/test_lock.py
+```
+
+Le code PIN : empreinte, cadenas à l'ouverture et au retour du repli, `Échap`
+vers la page neutre, erreurs comptées et attente imposée, qui survit à un
+redémarrage.
+
+```bash
 python tests/test_network.py
 ```
 
@@ -555,6 +587,7 @@ Vérifie la corbeille Windows réelle et exporte une capture de la fenêtre.
 | `videosorter/board.py` | Vue planche : les éléments en cartes |
 | `videosorter/ratings.py` | Notes de 0 à 5 étoiles |
 | `videosorter/trash.py` | Corbeille de session |
+| `videosorter/lock.py` | Code PIN : empreinte, cadenas, attente après erreurs |
 | `videosorter/media.py` | ffmpeg/ffprobe, cache, vignettes en arrière-plan |
 | `videosorter/actions.py` | Déplacer, supprimer, annuler |
 | `videosorter/transfer.py` | File de transferts en tâche de fond |
