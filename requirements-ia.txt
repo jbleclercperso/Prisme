@@ -1,0 +1,16 @@
+# Labo IA (essai) : facultatif. Prisme fonctionne sans ces paquets.
+# Uniquement pour Prisme lancé depuis les sources (python main.py) : le
+# programme autonome (construire.py) ne les embarque pas.
+#
+#   python -m pip install -r requirements-ia.txt
+#
+# Sur Windows, torch vient alors de PyPI, pour le processeur seul. Avec une
+# carte NVIDIA, installer d'abord torch depuis l'index de PyTorch :
+#
+#   python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#
+# puis ce fichier. Le labo propose les deux installations lui-même.
+torch>=2.1
+open_clip_torch>=2.24
+transformers>=4.38
+numpy>=1.24

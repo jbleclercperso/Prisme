@@ -475,6 +475,135 @@ minutes ; `pin_failures` et `pin_wait_until` gardent ce compte d'un lancement
 donner au client qui écrit au support : le code protège des regards, pas d'un
 accès au disque.
 
+## Labo IA (essai)
+
+⋯ › Collection › **Labo IA (essai)…** : un banc d'essai, à part du reste,
+pour retrouver une scène d'après sa description (« fille rousse sous la
+douche », « en extérieur, plage »). Rien de ce qu'on y fait ne touche à la
+collection : le labo a son propre index, et ses tags ne sont pas des
+mots-clés. C'est un essai — pour juger ce que ces modèles valent sur une
+vraie collection avant de décider d'une intégration.
+
+**Tout est calculé sur la machine.** Un modèle de la famille CLIP
+(`open_clip`) range images et phrases dans un même espace ; il est
+téléchargé une fois depuis Hugging Face, sous `%LOCALAPPDATA%\Prisme\ia\modeles`,
+puis chargé hors ligne. Ni image ni description ne quitte l'ordinateur.
+
+### Installation
+
+Le labo a besoin de `torch`, `open_clip_torch`, `transformers` et `numpy`,
+qui **ne sont pas** dans `requirements.txt` : Prisme démarre et fonctionne
+exactement comme avant sans eux, et ne les importe qu'au chargement d'un
+moteur. S'ils manquent, le labo le dit et propose de les installer
+lui-même (pip en tâche de fond, journal en direct), en version processeur
+(≈ 300 Mo) ou carte NVIDIA (CUDA 12.8, ≈ 3 Go). À la main :
+
+```bash
+python -m pip install -r requirements-ia.txt
+```
+
+Le labo ne marche que **lancé depuis les sources** (`python main.py`) : le
+programme autonome de `construire.py` exclut `numpy` et `PIL`, et ne peut pas
+installer de paquets.
+
+### Les deux moteurs
+
+| Moteur | Modèle open_clip | Téléchargement | Descriptions |
+|---|---|---|---|
+| Multilingue (français) — rapide | `xlm-roberta-base-ViT-B-32` / `laion5b_s13b_b90k` | ≈ 1,5 Go | en français (ou toute langue) |
+| Précis (anglais) | `ViT-L-14` / `laion2b_s32b_b82k` | ≈ 1,7 Go | en anglais |
+
+La carte graphique sert si `torch` en voit une (CUDA), le processeur sinon ;
+le labo affiche lequel. Un seul moteur est en mémoire à la fois (1,5 à 2 Go
+de mémoire vive). Les vecteurs des deux moteurs ne se comparent pas : chacun
+a son index.
+
+### Ce qu'il fait
+
+1. **Analyser** le dossier ouvert (ou toute la racine). Pour chaque vidéo,
+   neuf instants échelonnés — ceux de l'aperçu au survol. Chaque instant
+   prend d'abord la vignette que Prisme a déjà faite, à 4 % de la durée
+   près (les cinq repères de la pellicule en fournissent cinq) ; les autres
+   sont extraites par ffmpeg **dans le cache de vignettes de Prisme**, qui
+   les retrouvera. Les images sont encodées par lots, en tâche de fond,
+   annulable ; les vidéos déjà analysées et inchangées (taille, date) sont
+   sautées, celles qui ont disparu de la portée sont retirées. Les photos
+   (mode Photos) ont une image chacune.
+2. **Décrire la scène** : la phrase est encodée, comparée à toutes les
+   images d'un seul produit matriciel ; une vidéo vaut sa meilleure image, et
+   la grille montre cette image-là. Double-clic ou `Entrée` ouvre la fiche **à
+   cet instant**. Clic droit : **plus comme cette image**, ou comme toute la
+   vidéo (moyenne de ses images).
+3. **Tags IA** : une description par ligne, comptées sur la portée ; un clic
+   montre les vidéos retenues. La liste est gardée par le labo.
+
+### Comment le classement est fait
+
+- **Gabarits** : chaque description est encodée sous quatre tournures
+  (« une photo de … », « une image de … », « une scène de film : … », et
+  telle quelle), dont on fait la moyenne. C'est l'ensemble de gabarits des
+  articles CLIP, un peu plus précis qu'une phrase nue.
+- **Calibrage** (case à cocher, active par défaut) : on retire à chaque image
+  sa ressemblance moyenne avec les mêmes gabarits vides (« une photo »,
+  « une image »…). Certaines images — sombres, floues, très « photo » —
+  ressemblent un peu à toutes les phrases et remontaient partout ; le score
+  devient « combien plus proche de la description que d'une image
+  quelconque ». Comme la moyenne des produits est le produit par la moyenne,
+  cela revient à chercher avec (description − neutre) : aucun coût. Décocher
+  montre le score brut, pour comparer.
+- **Seuil des tags** : les scores bruts de CLIP ne se comparent pas d'une
+  description à l'autre (chacune a son propre niveau). Un tag retient donc
+  les vidéos qui **se détachent** : score z ≥ 1,5 sur la portée (combien
+  d'écarts-types au-dessus de la moyenne, pour cette description), **et**
+  parmi les 10 % meilleures — le plafond écarte les descriptions si vagues
+  qu'elles « trouveraient » la moitié de la collection. Les deux se règlent ;
+  recompter après un réglage ne réencode rien. En dessous d'une trentaine de
+  vidéos, le z n'a pas grand sens, et le labo le signale.
+
+### Performances attendues
+
+Mesuré ici sur quatre cœurs virtuels, poids aléatoires (même calcul que les
+vrais) :
+
+- **ViT-B/32** (moteur multilingue) : 28 images/s pour le modèle seul, 22
+  images/s tout compris (lecture du JPEG, préparation), soit 0,4 s pour les
+  neuf images d'une vidéo et sept minutes pour mille vidéos dont les
+  vignettes existent. Le texte xlm-roberta se paie une fois par nouvelle
+  description (quelques dixièmes de seconde, estimé) : les descriptions déjà
+  encodées sont gardées.
+- **ViT-L/14** (moteur précis) : 2,2 images/s sur le processeur, soit
+  quatre secondes par vidéo et plus d'une heure pour mille vidéos. Sur une
+  carte graphique récente, les deux moteurs encodent des centaines
+  d'images par seconde (estimation, non mesurée ici) : ffmpeg devient seul
+  à compter.
+- **ffmpeg** : quand les vignettes n'existent pas encore, c'est lui qui
+  décide — trois extractions de front, qui cèdent le pas à ce qu'on regarde
+  dans Prisme. Sur un NAS, compter une seconde par image manquante.
+- **Recherche** : 15 ms pour 100 000 images (10 000 vidéos), mesuré. Au-delà
+  de 600 000 images, les vecteurs restent en float16 en mémoire, dix fois
+  plus lents à comparer (de l'ordre de la seconde).
+
+Place prise, pour **1 000 vidéos** à neuf images : **≈ 9 Mo** de vecteurs
+(512 dimensions en float16 ; ≈ 14 Mo pour ViT-L/14 et ses 768), dans
+`ia\labo.db`. Les vignettes manquantes ajoutent jusqu'à ≈ 250 Mo de JPEG au
+cache commun — celles que Prisme fabriquerait de toute façon pour ses
+aperçus. En mémoire, la recherche garde 2 Ko par image jusqu'à 600 000
+images (≈ 66 000 vidéos, 1,2 Go), 1 Ko au-delà.
+
+### Limites connues
+
+- Validé ici **sans les vrais poids** (Hugging Face est inaccessible depuis
+  la machine de développement) : le chemin complet d'open_clip est éprouvé
+  avec un modèle aux poids aléatoires, le classement avec un moteur
+  factice. La qualité réelle des deux moteurs sur une collection reste à
+  juger — c'est l'objet du labo.
+- CLIP recadre chaque image en carré au centre : les bords d'une image 16:9
+  ne sont pas vus.
+- Neuf images par vidéo : une scène brève entre deux instants peut échapper
+  (le réglage va jusqu'à seize).
+- L'index est tenu par chemin : une vidéo rangée ailleurs est réanalysée à
+  son nouvel emplacement (ses vignettes, elles, la suivent).
+
 ## Installation et lancement
 
 Prérequis : **Python 3.10+** et **ffmpeg/ffprobe** accessibles (déjà installés ici
@@ -549,6 +678,18 @@ vers la page neutre, erreurs comptées et attente imposée, qui survit à un
 redémarrage.
 
 ```bash
+python tests/test_labo.py
+```
+
+Le labo IA, sans modèle à télécharger : Prisme n'importe ni torch ni
+open_clip, la page d'installation (pip en tâche de fond), l'analyse avec un
+moteur factice qui lit la couleur des images, la reprise incrémentale, le
+classement et ses instants, le calibrage, « plus comme celle-ci », les tags,
+l'ouverture de la fiche à l'instant trouvé, l'arrêt, Ctrl+K, et une
+recherche sur 100 000 images. Si torch et open_clip sont installés, un
+ViT-B/32 aux poids aléatoires fait en plus tout le vrai chemin.
+
+```bash
 python tests/test_network.py
 ```
 
@@ -594,3 +735,5 @@ Vérifie la corbeille Windows réelle et exporte une capture de la fenêtre.
 | `videosorter/tree.py` | Panneau d'arborescence |
 | `videosorter/widgets.py` | Grille d'aperçus, lecteur, barre de commandes, réglages |
 | `videosorter/window.py` | Fenêtre principale, enchaînement, raccourcis |
+| `videosorter/ia.py` | Labo IA : moteurs CLIP, index des vecteurs, analyse, classement |
+| `videosorter/labo.py` | Labo IA : la fenêtre d'essai |
