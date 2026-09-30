@@ -971,6 +971,7 @@ class MainWindow(QMainWindow):
                 ("Préparer toutes les vignettes", self.toggle_backfill),
                 ("Analyser les titres des métadonnées", self.scan_titles),
                 ("Repérer les plans (vignettes plus parlantes)", self.scan_scenes),
+                ("Labo IA (essai)…", self.open_ai_lab),
                 ("-", None),
                 # « Tout le disque » promettait plus que ce qui se faisait :
                 # seul le dossier affiche etait relu. A la racine, c'est
@@ -10927,6 +10928,17 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
         dialog.exec()
         self.setFocus()
+
+    def open_ai_lab(self) -> None:
+        """Le labo IA : un essai de recherche par description de scene.
+
+        Importe a la premiere ouverture seulement ; torch et open_clip ne le
+        sont qu'au chargement d'un moteur -- Prisme n'en depend pas. La meme
+        fenetre revient a chaque fois : une analyse en cours continue quand
+        on la cache (voir labo.py).
+        """
+        from .labo import open_lab
+        open_lab(self)
 
     # ------------------------------------------------------------------
     # Clavier
