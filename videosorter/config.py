@@ -308,6 +308,10 @@ DEFAULTS = {
     "pin_digest": "",
     "pin_failures": 0,           # erreurs de suite, pour l'attente imposee
     "pin_wait_until": 0,         # pas de nouvel essai avant cet instant
+    "licence_key": "",           # la cle de licence (PRISME1-…), signee par le site
+    "trial_started": 0,          # debut de l'essai de 14 jours
+    "licence_seen": 0,           # l'heure la plus tardive vue : l'horloge ne recule pas
+    "licence_checked": 0,        # derniere demande de prolongation au site
     "skip_hidden": True,
     "use_scan_cache": True,      # reutiliser l analyse precedente
     "sort_mode": "random",       # random | duration_desc | size_asc | …

@@ -701,6 +701,7 @@ class MainWindow(QMainWindow):
         self._quiet_shortcut.setAutoRepeat(False)
         self._quiet_shortcut.activated.connect(self._quiet_key)
         QApplication.instance().focusChanged.connect(self._quiet_keys.follow)
+        self._show_trial()
         # Un code PIN pose : la premiere chose qu'on voit est le cadenas.
         self.lock_now()
 
@@ -906,6 +907,19 @@ class MainWindow(QMainWindow):
         self.share_badge.hide()
         row_one.addWidget(self.share_badge, 0)
 
+        # Les jours d'essai qui restent : discrets, en haut, et un clic mene
+        # a la licence. Caches des qu'une cle est la (ou en developpement).
+        self.trial_badge = QPushButton("", sort_page)
+        self.trial_badge.setObjectName("trialBadge")
+        self.trial_badge.setStyleSheet(
+            "QPushButton#trialBadge { background: transparent; border: 0;"
+            " color: #8b95a1; font-size: 12px; padding: 2px 8px; }"
+            "QPushButton#trialBadge:hover { color: #d7dbe0; }")
+        self.trial_badge.setFocusPolicy(Qt.NoFocus)
+        self.trial_badge.clicked.connect(self.open_licence)
+        self.trial_badge.hide()
+        row_one.addWidget(self.trial_badge, 0)
+
         # Le repli. Un rond gris, sans legende : il ne doit rien annoncer a
         # qui regarde par-dessus l'epaule, et se trouver sans reflechir.
         self.quiet_button = QPushButton("●", sort_page)
@@ -978,6 +992,7 @@ class MainWindow(QMainWindow):
             ]),
             ("Aide", [
                 ("Raccourcis et recherche…", self.show_help),
+                ("Licence…", self.open_licence),
                 ("Journal des gels de l'interface", self.open_stall_log),
             ]),
         ])
@@ -1565,6 +1580,7 @@ class MainWindow(QMainWindow):
         Le raccourci du repli, valable partout, se pose ici aussi.
         """
         self.arm_global_quiet()
+        self.renew_licence()
         root = self.cfg["root"]
         if not root or self.root is not None or self._closing:
             return
@@ -4448,6 +4464,53 @@ class MainWindow(QMainWindow):
             f"Dossiers masqués affichés : {names}." if wanted
             else f"Dossiers masqués de nouveau cachés : {names}.",
             "info" if wanted else "quiet")
+
+    # ------------------------------------------------------------------
+    # L'essai et la licence
+    # ------------------------------------------------------------------
+    def _show_trial(self) -> None:
+        """Les jours d'essai en haut de la fenêtre ; rien avec une licence."""
+        from .licence import status
+
+        state = status(self.cfg)
+        if state.kind == "trial":
+            days = state.days_left
+            self.trial_badge.setText(f"Essai · {days} jour{'s' if days > 1 else ''}")
+            self.trial_badge.setToolTip(
+                "Essai gratuit de 14 jours, toutes fonctionnalités. "
+                "Cliquez pour entrer une clé de licence.")
+            self.trial_badge.show()
+        else:
+            self.trial_badge.hide()
+
+    def open_licence(self) -> None:
+        from .licence_dialog import LicenceDialog
+
+        LicenceDialog(self.cfg, self).exec()
+        self._show_trial()
+        self.setFocus()
+
+    def renew_licence(self) -> None:
+        """Un abonnement dans ses derniers jours : une clé prolongée, sans bruit.
+
+        Une fois par jour au plus, hors du fil de l'interface, en n'envoyant
+        que la clé. Seul un abonnement arrêté se dit.
+        """
+        from .licence import ask_site, renew_due, take_renewal
+        from .tunnel import Chore
+
+        if not renew_due(self.cfg):
+            return
+        self.cfg["licence_checked"] = time.time()
+        self.cfg.save_soon()
+        key = self.cfg["licence_key"]
+        Chore(lambda: ask_site(key), self, fallback={"error": "réseau"},
+              then=lambda answer: self._took_renewal(
+                  take_renewal(self.cfg, answer))).start()
+
+    def _took_renewal(self, message: str) -> None:
+        if message and not self._closing:
+            self.show_banner(message, "info", seconds=10)
 
     # ------------------------------------------------------------------
     # Le code PIN

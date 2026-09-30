@@ -475,6 +475,33 @@ minutes ; `pin_failures` et `pin_wait_until` gardent ce compte d'un lancement
 donner au client qui écrit au support : le code protège des regards, pas d'un
 accès au disque.
 
+## Essai et licence
+
+Au premier lancement, Prisme note la date : **14 jours d'essai**, toutes
+fonctionnalités, sans carte ni compte. Les jours restants s'affichent en haut
+de la fenêtre (« Essai · 9 jours ») ; un clic, ou `⋯ › Aide › Licence…`,
+ouvre le dialogue de licence. L'essai fini, Prisme demande une clé **avant de
+s'ouvrir** : la coller rouvre tout tel quel, « Quitter Prisme » ferme sans rien
+toucher. Réglages, favoris, index et vignettes ne sont jamais effacés.
+
+La clé (`PRISME1-…`) est signée par le site (Ed25519) et vérifiée **sans
+connexion** par `videosorter/licence.py`, qui porte sa propre vérification
+Ed25519 (RFC 8032) : pas de dépendance de cryptographie à installer. Un
+abonnement reçoit une clé valable jusqu'à la fin de la période payée plus
+sept jours ; dans ses dix derniers jours, Prisme demande une fois par jour au
+site (`POST /api/licence`, la clé seule) une clé prolongée. Une licence à
+vie ne se connecte jamais.
+
+- Le début de l'essai est noté dans les réglages et dans le registre
+  (`HKCU\Software\Prisme`, valeur `Essai`) : c'est le plus ancien qui compte.
+  Reculer l'horloge ne rallonge rien (`licence_seen`).
+- **Avant de distribuer Prisme** : coller la clé publique donnée par
+  `npm run licence:keys` (dépôt du site) dans `PUBLIC_KEY`, et l'adresse du
+  site dans `SITE`. **Tant que `PUBLIC_KEY` est vide, c'est la version de
+  développement** : ni essai ni licence, Prisme s'ouvre toujours.
+- Pour vous-même : une licence à vie s'émet à la main depuis le site
+  (`npm run licence:issue -- --email vous@exemple.fr`).
+
 ## Installation et lancement
 
 Prérequis : **Python 3.10+** et **ffmpeg/ffprobe** accessibles (déjà installés ici
@@ -541,6 +568,14 @@ photo (lancement sur les vidéos, bascule, index et réglages séparés,
 vignettes sans ffmpeg, diaporama, mur, feuilletage, mesure du format).
 
 ```bash
+python tests/test_licence.py
+```
+
+L'essai et les clés : le vecteur de la norme Ed25519, des clés fabriquées par
+le code du site, essai et horloge reculée, activation, abonnement échu,
+prolongation auprès d'un faux site, dialogue au lancement.
+
+```bash
 python tests/test_lock.py
 ```
 
@@ -588,6 +623,8 @@ Vérifie la corbeille Windows réelle et exporte une capture de la fenêtre.
 | `videosorter/ratings.py` | Notes de 0 à 5 étoiles |
 | `videosorter/trash.py` | Corbeille de session |
 | `videosorter/lock.py` | Code PIN : empreinte, cadenas, attente après erreurs |
+| `videosorter/licence.py` | Essai de 14 jours, clés de licence (Ed25519), prolongation |
+| `videosorter/licence_dialog.py` | Le dialogue de licence, et la porte au lancement |
 | `videosorter/media.py` | ffmpeg/ffprobe, cache, vignettes en arrière-plan |
 | `videosorter/actions.py` | Déplacer, supprimer, annuler |
 | `videosorter/transfer.py` | File de transferts en tâche de fond |

@@ -495,6 +495,12 @@ def run() -> int:
     cfg = Config()
     Tools.resolve(cfg)
 
+    # L'essai fini, Prisme demande sa cle avant de s'ouvrir. Rien n'est
+    # touche : fermer ce dialogue quitte, tout simplement.
+    from videosorter.licence_dialog import gate
+    if not gate(cfg, before=splash.close):
+        return 0
+
     window = MainWindow(cfg)
     window.show()
     splash.finish(window)
