@@ -9,14 +9,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtGui import QIntValidator, QPainter
+from PySide6.QtGui import QIcon, QIntValidator, QPainter
 from PySide6.QtCore import QSize, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
     QSizePolicy, QStyle, QStyleOptionButton, QStylePainter, QVBoxLayout, QWidget,
 )
 
-from .icons import dress
+from .icons import dress, icon
 from .widgets import FlowLayout
 
 # Trois facons de regarder la meme collection. Ce ne sont pas trois
@@ -120,6 +120,34 @@ class Segmented(QWidget):
             inner.addWidget(button)
             self.buttons[key] = button
         layout.addWidget(frame)
+        self.compact = False
+        self._texts = {key: text for key, text, _tip in choices}
+        self._tips = {key: tip for key, _text, tip in choices}
+        self.glyphs: dict = {}          # cle -> nom d'icone, pour l'etat compact
+
+    def set_compact(self, on: bool) -> None:
+        """Ecran etroit : l'icone seule, le nom passe dans l'infobulle. Le
+        dernier repli de la premiere ligne, apres les boutons ronds."""
+        on = bool(on) and bool(self.glyphs)
+        if on == self.compact:
+            return
+        self.compact = on
+        for key, button in self.buttons.items():
+            name = self.glyphs.get(key)
+            if on and name:
+                button.setText("")
+                button.setIcon(icon(name))
+                button.setIconSize(QSize(17, 17))
+                button.setToolTip(f"{self._texts[key].lstrip('★ ')} — {self._tips[key]}")
+            else:
+                button.setIcon(QIcon())
+                button.setText(self._texts[key])
+                button.setToolTip(self._tips[key])
+
+    def compact_width(self) -> int:
+        """La largeur une fois en icones, sans avoir a basculer pour la
+        mesurer : une case de 36 points par choix, plus le cadre."""
+        return len(self.buttons) * 36 + (len(self.buttons) - 1) * 2 + 6
 
     def set_value(self, key: str) -> None:
         for name, button in self.buttons.items():

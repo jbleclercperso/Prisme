@@ -882,6 +882,10 @@ class MainWindow(QMainWindow):
             (TAB_FAVS, "★ Favoris", "Les dossiers et les vidéos mis en favori"),
         ], sort_page)
         self.tabs.chosen.connect(self.set_tab)
+        # Leurs icones, pour un ecran etroit (`_fit_top_row`).
+        self.tabs.glyphs = {TAB_FOLDERS: "folder-open", TAB_VIDEOS: "film",
+                            TAB_TAGS: "tags", TAB_SPLIT: "layout-grid",
+                            TAB_FAVS: "star"}
         row_one.addWidget(self.tabs, 0)
 
         # Remonter d'un cran, d'ou qu'on soit. `go_up` ne savait revenir que
@@ -1349,6 +1353,19 @@ class MainWindow(QMainWindow):
                             "vidéo joue, elle continue dans une fenêtre "
                             "toujours au premier plan")
         self.more_button.setMenu(self.overflow)
+        # Ecran etroit : les boutons ronds qui n'ont plus leur place sur la
+        # premiere ligne passent en tete de ce menu (`_fit_top_row`).
+        self._folded: list = []
+        self._folded_actions: list = []
+        self._tabs_full = 0
+        self.overflow.aboutToShow.connect(self._show_folded_in_menu)
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.setInterval(0)
+        self._fit_timer.timeout.connect(self._fit_top_row)
+        # Les pastilles (partage, corbeille, mise a jour…) vont et viennent :
+        # on refait le compte avec l'etat de la recherche web, chaque seconde.
+        self._web_status_timer.timeout.connect(self._fit_top_row)
         # Un menu plus court : ces entrees restent la (d'autres parties de
         # Prisme les retrouvent par leur nom), mais ne s'affichent plus.
         for text in self.HIDDEN_MENU:
@@ -9660,9 +9677,19 @@ class MainWindow(QMainWindow):
             self.single.marks.hide()
             self.single.tuck_strip(now=True)
             return
+        self._note_pointer_moves()
         if self.cinema:
             self._watch_cinema_strip(area)
-        if self.isActiveWindow() and self._pointer_on(area):
+        bar = self.single_bar
+        on_bar = bar.isVisible() and bar.geometry().contains(QCursor.pos())
+        # La souris se tait : le bandeau s'en va avec les cinq instants, et
+        # il ne reste que le trait fin. Sur le bandeau, ou en tirant le
+        # trait, il reste.
+        awake = (on_bar or bar.dragging
+                 or (self.cinema and self.single.strip_has_pointer())
+                 or time.monotonic() - getattr(self, "_cine_moved", 0.0)
+                 < self.STRIP_IDLE_S)
+        if self.isActiveWindow() and self._pointer_on(area) and awake:
             self.single.marks.hide()
             self._show_pause(self.single_bar, self.single)
             self.single_bar.set_favorite(self._is_favorite(item.path))
@@ -9689,15 +9716,18 @@ class MainWindow(QMainWindow):
     # La pellicule repart quand la souris se tait depuis tant de secondes.
     STRIP_IDLE_S = 2.5
 
+    def _note_pointer_moves(self) -> None:
+        """Retient quand la souris a bouge pour la derniere fois."""
+        pos = QCursor.pos()
+        if pos != getattr(self, "_cine_pos", None):
+            self._cine_pos = pos
+            self._cine_moved = time.monotonic()
+
     def _watch_cinema_strip(self, area) -> None:
         """Plein ecran : la souris bouge sur l'image, les cinq instants
         arrivent ; elle se tait ou s'en va, ils repartent. Sur eux, ils
         restent."""
         now = time.monotonic()
-        pos = QCursor.pos()
-        if pos != getattr(self, "_cine_pos", None):
-            self._cine_pos = pos
-            self._cine_moved = now
         if self.single.strip_has_pointer() or (
                 self.isActiveWindow() and self._pointer_on(area)
                 and now - getattr(self, "_cine_moved", 0.0) < self.STRIP_IDLE_S):
@@ -10257,6 +10287,111 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if not self.aside.isHidden():
             self._place_aside_bar()
+        if hasattr(self, "_fit_timer"):
+            self._fit_timer.start()
+
+    # ------------------------------------------------------------------
+    # La premiere ligne sur un petit ecran
+    # ------------------------------------------------------------------
+    # Ce qui cede sa place quand la ligne ne tient plus, du premier sacrifie
+    # au dernier : les boutons ronds (retrouves en tete du menu ⋯), puis les
+    # onglets passent en icones, et la lune en tout dernier. Le fil d'Ariane,
+    # lui, s'abrege de lui-meme jusqu'a `CRUMBS_ROOM`.
+    CRUMBS_ROOM = 160
+    FOLD_LABELS = {
+        "labo_button": "Labo IA",
+        "web_button": "Recherche vidéo sur le web",
+        "float_button": "Lecteur flottant automatique",
+        "tree_button": "Panneau des dossiers   (Ctrl+T)",
+        "random_button": "Une vidéo au hasard   (Ctrl+H)",
+        "mute_button": "Couper ou remettre le son",
+        "quiet_button": "S'effacer   (Ctrl+K)",
+    }
+    FOLD_ORDER = ("labo_button", "web_button", "float_button", "tree_button",
+                  "random_button", "mute_button", "tabs", "quiet_button")
+
+    def _row_need(self, widget) -> int:
+        """La place qu'un element de la premiere ligne ne peut pas ceder."""
+        if widget is self.crumbs:
+            return self.CRUMBS_ROOM
+        if widget is self.tabs:
+            return self._tabs_full or widget.sizeHint().width()
+        if widget.minimumWidth() == widget.maximumWidth():
+            return widget.minimumWidth()
+        if widget.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored:
+            return widget.minimumWidth()
+        return max(widget.minimumSizeHint().width(), widget.minimumWidth())
+
+    def _fit_top_row(self) -> None:
+        """Replie ce qu'il faut pour que la premiere ligne tienne en entier :
+        sans cela, sur un 13 pouces ou une demi-fenetre, les onglets se
+        rognaient (« Dossier », « lots-clé ») et le chemin passait dessous."""
+        if not hasattr(self, "_folded") or not self.top_bar.isVisible():
+            return
+        room = self.top_bar.width()
+        if room <= 0:
+            return
+        if not self.tabs.compact:
+            self._tabs_full = self.tabs.sizeHint().width()
+        row = self._row_one
+        folded = set(self._folded)
+        spacing = row.spacing()
+        total, count = 0, 0
+        for index in range(row.count()):
+            item = row.itemAt(index)
+            widget = item.widget()
+            if widget is not None:
+                name = next((n for n in self.FOLD_ORDER
+                             if n != "tabs" and getattr(self, n) is widget), None)
+                if widget.isHidden() and name not in folded:
+                    continue
+                total += self._row_need(widget)
+                count += 1
+            elif item.layout() is not None:
+                width = item.layout().minimumSize().width()
+                if width > 0:
+                    total += width
+                    count += 1
+        total += spacing * max(0, count - 1)
+        fold = []
+        for name in self.FOLD_ORDER:
+            if total <= room:
+                break
+            fold.append(name)
+            if name == "tabs":
+                total -= max(0, self._tabs_full - self.tabs.compact_width())
+            else:
+                total -= self._row_need(getattr(self, name)) + spacing
+        if fold == self._folded:
+            return
+        self._folded = fold
+        self.tabs.set_compact("tabs" in fold)
+        for name in self.FOLD_ORDER:
+            if name != "tabs":
+                getattr(self, name).setVisible(name not in fold)
+
+    def _show_folded_in_menu(self) -> None:
+        """En tete du menu ⋯ : les boutons que la premiere ligne a replies."""
+        for action in self._folded_actions:
+            self.overflow.removeAction(action)
+            action.deleteLater()
+        self._folded_actions = []
+        names = [n for n in self.FOLD_ORDER if n in self._folded and n != "tabs"]
+        if not names:
+            return
+        first = self.overflow.actions()[0] if self.overflow.actions() else None
+        # Dans l'ordre de la ligne, de gauche a droite, comme on les voyait.
+        names.sort(key=lambda n: self._row_one.indexOf(getattr(self, n)))
+        for name in names:
+            button = getattr(self, name)
+            action = QAction(button.icon(), self.FOLD_LABELS[name], self.overflow)
+            action.triggered.connect(lambda _c=False, b=button: b.click())
+            self.overflow.insertAction(first, action)
+            self._folded_actions.append(action)
+        line = QAction(self.overflow)
+        line.setSeparator(True)
+        self.overflow.insertAction(first, line)
+        self._folded_actions.append(line)
 
     def aside_step(self, step: int) -> None:
         """Passe a la vignette voisine, dans l'ordre de la planche."""

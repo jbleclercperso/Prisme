@@ -1521,6 +1521,15 @@ class OverBar(FloatGuard, QWidget):
         # lecteur qui porte le bandeau le donne.
         self.scrub_source = None
         self.scrub = None
+        # Bouton tenu sur le trait : la video suit la souris, comme VLC, sans
+        # poignee a attraper. Les sauts sont espaces (`DRAG_STEP_S`) : un
+        # setPosition a chaque pixel noyait le lecteur, sur le NAS surtout.
+        self.dragging = False
+        self._drag_sent = 0.0
+        self._drag_pending = None
+        self._drag_flush = QTimer(self)
+        self._drag_flush.setSingleShot(True)
+        self._drag_flush.timeout.connect(self._send_drag)
         # Le trait laisse passer la souris : c'est le bandeau qui la lit.
         self.rail.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.done.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -1530,6 +1539,50 @@ class OverBar(FloatGuard, QWidget):
         self.hide()
 
     seekRequested = Signal(float)            # une fraction de la duree
+    DRAG_STEP_S = 0.07
+
+    def _along_rail(self, pos: QPoint) -> float:
+        """La fraction sous la souris pendant qu'on tire : seule la largeur
+        compte, on peut deborder au-dessus ou au-dela du trait."""
+        rail = self.rail.geometry()
+        return max(0.0, min(1.0, (pos.x() - rail.left()) / max(1, rail.width())))
+
+    def _drag_to(self, fraction: float) -> None:
+        """Le trait suit tout de suite ; la video, au plus tous les
+        `DRAG_STEP_S`."""
+        self.done.setGeometry(0, 0, int(self.rail.width() * fraction), self.RAIL)
+        self._drag_pending = fraction
+        wait = self.DRAG_STEP_S - (time.monotonic() - self._drag_sent)
+        if wait <= 0:
+            self._send_drag()
+        elif not self._drag_flush.isActive():
+            self._drag_flush.start(int(wait * 1000) + 1)
+
+    def _send_drag(self) -> None:
+        if self._drag_pending is None:
+            return
+        self._drag_sent = time.monotonic()
+        fraction, self._drag_pending = self._drag_pending, None
+        self.seekRequested.emit(fraction)
+
+    def _stop_drag(self) -> None:
+        if self.dragging:
+            self.dragging = False
+            self._drag_flush.stop()
+            self._send_drag()             # la ou l'on a lache, exactement
+
+    def _preview(self, fraction: float, local: QPoint) -> bool:
+        """L'image a cet instant au-dessus du trait. Faux sans video."""
+        source = self.scrub_source() if self.scrub_source is not None else None
+        if not source or source[1] <= 0:
+            return False
+        if self.scrub is None:
+            self.scrub = ScrubPreview(self)
+        spot = self.skin.mapToGlobal(local)
+        top = self.mapToGlobal(QPoint(0, 0))
+        self.scrub.show_at(source[0], fraction, source[1],
+                           QPoint(spot.x(), top.y()), QRect(top, self.size()))
+        return True
 
     def _on_rail(self, pos: QPoint):
         """La fraction visee si `pos` (coordonnees du bandeau) touche le trait
@@ -1547,27 +1600,36 @@ class OverBar(FloatGuard, QWidget):
         if watched is self.skin:
             kind = event.type()
             if kind == QEvent.MouseMove:
-                fraction = self._on_rail(event.position().toPoint())
-                source = self.scrub_source() if fraction is not None else None
-                if source and source[1] > 0:
-                    if self.scrub is None:
-                        self.scrub = ScrubPreview(self)
-                    spot = self.skin.mapToGlobal(event.position().toPoint())
-                    top = self.mapToGlobal(QPoint(0, 0))
-                    self.scrub.show_at(source[0], fraction, source[1],
-                                       QPoint(spot.x(), top.y()),
-                                       QRect(top, self.size()))
+                local = event.position().toPoint()
+                if self.dragging and event.buttons() & Qt.LeftButton:
+                    fraction = self._along_rail(local)
+                    self._preview(fraction, local)
+                    self._drag_to(fraction)
+                    return True
+                self._stop_drag()
+                fraction = self._on_rail(local)
+                if fraction is not None and self._preview(fraction, local):
                     self.skin.setCursor(Qt.PointingHandCursor)
                 else:
                     self._end_scrub()
             elif kind == QEvent.Leave:
-                self._end_scrub()
+                if not self.dragging:
+                    self._end_scrub()
             elif (kind == QEvent.MouseButtonPress
                   and event.button() == Qt.LeftButton):
                 fraction = self._on_rail(event.position().toPoint())
                 if fraction is not None:
-                    self.seekRequested.emit(max(0.0, min(1.0, fraction)))
+                    self.dragging = True
+                    self._drag_sent = 0.0
+                    self._drag_to(max(0.0, min(1.0, fraction)))
                     return True
+            elif (kind == QEvent.MouseButtonRelease
+                  and event.button() == Qt.LeftButton and self.dragging):
+                self._drag_pending = self._along_rail(event.position().toPoint())
+                self._stop_drag()
+                if self._on_rail(event.position().toPoint()) is None:
+                    self._end_scrub()
+                return True
         return super().eventFilter(watched, event)
 
     def _end_scrub(self) -> None:
@@ -1576,6 +1638,7 @@ class OverBar(FloatGuard, QWidget):
         self.skin.unsetCursor()
 
     def hideEvent(self, event):
+        self._stop_drag()
         self._end_scrub()
         super().hideEvent(event)
 
@@ -1644,8 +1707,11 @@ class OverBar(FloatGuard, QWidget):
     def set_progress(self, position: int, duration: int) -> None:
         fraction = (position / duration) if duration > 0 else 0.0
         width = max(0, self.rail.width())
-        self.done.setGeometry(
-            0, 0, int(width * max(0.0, min(1.0, fraction))), self.RAIL)
+        if not self.dragging:
+            # Pendant qu'on tire, le trait suit la souris : le lecteur, en
+            # retard d'un saut, le ferait trembler en arriere.
+            self.done.setGeometry(
+                0, 0, int(width * max(0.0, min(1.0, fraction))), self.RAIL)
         self.left.setText(
             f"−{human_duration(max(0, duration - position) / 1000.0)}"
             if duration > 0 else "")
@@ -1657,6 +1723,11 @@ class OverBar(FloatGuard, QWidget):
         corner = target.mapToGlobal(QPoint(0, 0))
         width = max(180, target.width())
         self._fit_width(width)
+        # Les gestes caches a l'instant ne comptent plus : sans cela, la
+        # fenetre gardait jusqu'au tour suivant sa largeur minimale d'avant,
+        # et debordait de l'image.
+        self.skin.layout().activate()
+        self.layout().activate()
         height = self.sizeHint().height()
         # Colle au bas de l'image, bord a bord : pose un peu au-dessus, il
         # semblait flotter au milieu de nulle part.
@@ -1671,17 +1742,21 @@ class OverBar(FloatGuard, QWidget):
         panneau voisin."""
         if not self.spare:
             return
-        if getattr(self, "_fitted_for", None) == width:
+        # Le temps restant et la place dans la liste comptent aussi : arrives
+        # apres coup, ils poussaient les gestes hors de l'image.
+        key = (width, len(self.left.text()), self.pos.text() if self.pos.isVisibleTo(self) else "")
+        if getattr(self, "_fitted_for", None) == key:
             return
-        self._fitted_for = width
+        self._fitted_for = key
         def needed() -> int:
             # Les marges du bandeau, le nom (au moins quelques lettres), le
             # temps restant s'il est la, puis chaque geste visible.
             shown = [self.buttons.itemAt(i).widget() for i in range(self.buttons.count())]
             shown = [w for w in shown if w is not None and not w.isHidden()]
             total = 20 + 60 + 8
-            if not self.left.isHidden():
-                total += self.left.sizeHint().width() + 8
+            for label in (self.left, self.pos):
+                if not label.isHidden():
+                    total += label.sizeHint().width() + 8
             total += sum(w.sizeHint().width() for w in shown)
             return total + self.buttons.spacing() * max(0, len(shown) - 1)
         for button in self.spare:

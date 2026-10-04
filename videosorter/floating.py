@@ -126,6 +126,9 @@ class FloatingPlayer(QWidget):
         ):
             self.bar.add_gesture(text, tip, slot)
         self.bar.add_star(self._star)
+        # Lecteur retreci : les gestes s'effacent, du moins utile au plus
+        # utile, plutot que de deborder de l'image. Pause et ✕ restent.
+        self.bar.spare = [self.bar.by_glyph[g] for g in ("⌸", "⛶", "◂", "⏏", "☆", "▸")]
         self.bar.scrub_source = self.player.scrub_source
         self.bar.seekRequested.connect(self.player.seek_fraction)
         self.player.progressed.connect(self.bar.set_progress)
