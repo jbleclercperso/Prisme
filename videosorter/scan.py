@@ -131,6 +131,12 @@ class Item:
     # Vrai pour un dossier virtuel batit sur un mot-cle : il n'existe pas sur
     # le disque, on le parcourt mais on ne le deplace pas.
     is_tag: bool = False
+    # Un mot-cle qui a recu des videos du Labo IA (« Ajouter au mot-clé ») :
+    # marque ✦ au lieu de #, pour le distinguer des mots tires des noms.
+    ai_tag: bool = False
+    # Un dossier virtuel epingle en tete de la collection (« Noms sans aucun mot »
+    # et sa variante en vrac) : il porte son nom tel quel, sans le # des mots-cles.
+    pinned: bool = False
     # Un sous-dossier n'a pas pu etre lu : les comptes sont en dessous de la
     # verite. Ils ne doivent ni rassurer la garde de suppression, ni rester
     # en l'etat dans l'index -- on relira.
@@ -141,10 +147,13 @@ class Item:
 
     @property
     def name(self) -> str:
+        if self.pinned:
+            return self.path.name
         if self.is_tag:
-            return f"# {self.path.name}"
+            return f"{'✦' if self.ai_tag else '#'} {self.path.name}"
         if self.loose_only:
-            return f"{self.path.name} {LOOSE_LABEL}"
+            # La racine d'un partage (\\serveur\volume\) n'a pas de nom.
+            return f"{self.path.name or str(self.path).rstrip(chr(92) + '/')} {LOOSE_LABEL}"
         return self.path.name
 
     @cached_property
@@ -269,8 +278,10 @@ def _stamp(entry) -> int:
 
 def _stamps_are_trustworthy(root) -> bool:
     """Vrai la ou relever les dates au passage vaut mieux que les redemander."""
+    from . import roots
     from .media import is_network_path
-    return is_network_path(root)
+    return all(is_network_path(member) for member in roots.members(root)) \
+        if roots.is_union(root) else is_network_path(root)
 
 
 def is_video(path: Path) -> bool:
@@ -479,6 +490,9 @@ def scan_loose(folder: Path, skip_hidden: bool = True) -> Item:
 
 def detect_mode(root: Path, skip_hidden: bool = True) -> str:
     """Dossiers à l'intérieur -> mode dossier, sinon mode fichier."""
+    from . import roots
+    if roots.is_union(root):
+        return MODE_FOLDERS
     try:
         for entry in os.scandir(root):
             if entry.is_dir(follow_symlinks=False):
@@ -497,7 +511,8 @@ def walk_videos(root: Path, skip_hidden: bool = True):
     sur une collection de cent mille fichiers, c'est plusieurs minutes pendant
     lesquelles l'appelant ne peut rien annoncer.
     """
-    stack = [str(root)]
+    from . import roots
+    stack = roots.starts(root)
     while stack:
         current = stack.pop()
         try:
@@ -542,6 +557,15 @@ def list_all_videos(root: Path, skip_hidden: bool = True, limit: int = 50000,
     `strict` : une racine illisible lève `RootUnreadable` au lieu de passer
     pour vide.
     """
+    from . import roots
+    if roots.is_union(root):
+        found = []
+        for member in roots.members(root):
+            try:
+                found += list_all_videos(member, skip_hidden, limit - len(found), stamps, strict)
+            except RootUnreadable:
+                continue                 # injoignable : ses videos ne se montrent pas
+        return found
     found = []
     top = str(root)
     stack = [top]
@@ -670,7 +694,27 @@ def expand_parents(entries: list, skip_hidden: bool = True,
     répond pas garde ses enfants connus au lieu de les voir disparaître. S'il
     n'en a pas, il est ajouté à `unreadable` : la liste est incomplète.
     """
-    shelves = [path for path in entries if is_parent_folder(path)]
+    expanded = _expand_once(entries, skip_hidden, stamps, cache, unreadable)
+    # Un rayonnage range dans un rayonnage s'ouvre lui aussi : un dossier
+    # « + » n'a jamais sa propre carte, a quelque profondeur qu'il soit. Son
+    # entree « (sans dossier) », deja posee, ne se rouvre pas.
+    for _depth in range(8):
+        opened = {str(path) for path in entries}
+        if not any(is_parent_folder(path) and str(path) not in opened
+                   for path in expanded):
+            break
+        entries, expanded = expanded, _expand_once(
+            expanded, skip_hidden, stamps, cache, unreadable, done=opened)
+    return expanded
+
+
+def _expand_once(entries: list, skip_hidden: bool, stamps, cache, unreadable,
+                 done: set | None = None) -> list:
+    """Un niveau de `expand_parents` ; `done` : les rayonnages deja ouverts,
+    dont il ne reste que l'entree « (sans dossier) »."""
+    done = done or set()
+    shelves = [path for path in entries
+               if is_parent_folder(path) and str(path) not in done]
     read: dict = {}
     if len(shelves) == 1:
         read[shelves[0]] = _read_shelf(shelves[0], skip_hidden)
@@ -683,7 +727,7 @@ def expand_parents(entries: list, skip_hidden: bool = True,
 
     expanded = []
     for path in entries:
-        if not is_parent_folder(path):
+        if not is_parent_folder(path) or str(path) in done:
             expanded.append(path)
             continue
         found = read.get(path)
@@ -713,7 +757,8 @@ def expand_parents(entries: list, skip_hidden: bool = True,
 def list_entries(root: Path, mode: str, skip_hidden: bool = True,
                  expand_parent_folders: bool = False,
                  stamps: dict | None = None, cache=None,
-                 strict: bool = False, unreadable: list | None = None) -> list:
+                 strict: bool = False, unreadable: list | None = None,
+                 own_loose: bool = False, keep_parents: bool = False) -> list:
     """Liste, sans les analyser, les chemins de premier niveau à traiter.
 
     `stamps`, s'il est fourni, se remplit des dates de modification relevées au
@@ -722,7 +767,30 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
 
     `strict` : une racine illisible lève `RootUnreadable` au lieu de rendre une
     liste vide ; `unreadable` recueille les rayonnages qui n'ont pas répondu.
+
+    `own_loose` : les fichiers posés à même la racine, à côté de ses
+    sous-dossiers, ne se perdent plus -- la racine elle-même vient en tête,
+    comme l'entrée « (sans dossier) » d'un rayonnage.
+
+    `keep_parents` : sans les traverser, garder quand même les rayonnages.
+    C'est la question « y a-t-il des dossiers ici » : une racine faite
+    seulement de dossiers « + » passait pour vide, et s'ouvrait à plat.
     """
+    from . import roots
+    if roots.is_union(root):
+        entries = []
+        read = 0
+        for member in roots.members(root):
+            try:
+                entries += list_entries(member, mode, skip_hidden, expand_parent_folders,
+                                        stamps, cache, True, unreadable, own_loose,
+                                        keep_parents)
+                read += 1
+            except RootUnreadable:
+                continue                 # injoignable : ses dossiers ne se montrent pas
+        if strict and not read:
+            raise RootUnreadable("aucune racine ne répond")
+        return entries
     if mode == MODE_FLAT:
         return list_all_videos(root, skip_hidden, stamps=stamps, strict=strict)
     entries = []
@@ -732,6 +800,7 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
         if strict:
             raise RootUnreadable(f"{root} : {exc}") from exc
         listing = []
+    has_loose = False
     for entry in listing:
         try:
             if skip_hidden and _is_hidden(entry):
@@ -740,6 +809,9 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
                 entries.append(fast_path(entry.path))
                 if stamps is not None:
                     stamps[entry.path] = _stamp(entry)
+            elif mode == MODE_FOLDERS and own_loose and not has_loose:
+                dot = entry.name.rfind(".")
+                has_loose = dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS
             elif mode == MODE_FILES and entry.is_file():
                 dot = entry.name.rfind(".")
                 if dot > 0 and entry.name[dot:].lower() in VIDEO_EXTS:
@@ -758,11 +830,14 @@ def list_entries(root: Path, mode: str, skip_hidden: bool = True,
         if expand_parent_folders:
             entries = expand_parents(entries, skip_hidden, stamps, cache,
                                      unreadable)
-        else:
+        elif not keep_parents:
             # Un dossier de tete est une destination, pas quelque chose a trier :
             # c'est la qu'on range les autres. Le laisser dans la liste revenait
             # a proposer de ranger le rangement.
             entries = [path for path in entries if not is_parent_folder(path)]
+        # Sans sous-dossier, la racine s'ouvre a plat : rien ne s'y perd.
+        if has_loose and entries:
+            entries.insert(0, fast_path(str(root)))
     return entries
 
 
@@ -871,7 +946,13 @@ def cached_items(root: Path, mode: str, expand: bool = False) -> list:
     collection presque juste vaut mieux que de n'en presenter aucune pendant
     une minute et demie.
     """
+    from . import roots
     from .index import INDEX
+    if roots.is_union(root):
+        found = []
+        for member in roots.members(root):
+            found += cached_items(member, mode, expand)
+        return found
     ids = INDEX.listing(root, listing_key(mode, expand))
     if not ids:
         return []
@@ -899,9 +980,12 @@ class RefreshThread(QThread):
     def __init__(self, root: Path, mode: str = "", skip_hidden: bool = True,
                  use_cache: bool = True, expand_parents: bool = False,
                  known_ids: list | None = None, force: bool = False,
-                 parent=None):
+                 parent=None, own_loose: bool = False):
         super().__init__(parent)
         self.root = Path(root)
+        # Les fichiers poses a meme la racine, a cote de ses sous-dossiers :
+        # une entree « (sans dossier) » en tete (voir `list_entries`).
+        self.own_loose = own_loose
         self.mode = mode
         self.skip_hidden = skip_hidden
         self.use_cache = use_cache
@@ -934,10 +1018,26 @@ class RefreshThread(QThread):
         ce qui ramene un premier inventaire de six cents dossiers de
         quatre-vingts secondes a une dizaine.
         """
+        from . import roots
         from .media import is_network_path
-        if is_network_path(self.root):
+        if any(is_network_path(member) for member in roots.members(self.root)):
             return 8
         return max(2, min(6, os.cpu_count() or 4))
+
+    def _is_own(self, path: Path) -> bool:
+        """Cette entree est-elle la racine elle-meme, pour ses fichiers en vrac ?
+        (Sous la racine virtuelle : l'une des vraies racines.)"""
+        if not self.own_loose:
+            return False
+        from . import roots
+        same = os.path.normcase(os.path.normpath(str(path)))
+        return any(same == os.path.normcase(os.path.normpath(str(member)))
+                   for member in roots.members(self.root))
+
+    def _id_of(self, path: Path, mode: str) -> str:
+        if mode == MODE_FOLDERS and self._is_own(path):
+            return f"{path}|vrac"
+        return item_id_for(path, mode, self.expand_parents)
 
     def _signature_of(self, path: Path, key: str, mode: str, stamps) -> str:
         if mode != MODE_FOLDERS:
@@ -976,8 +1076,9 @@ class RefreshThread(QThread):
         try:
             paths = list_entries(self.root, mode, self.skip_hidden,
                                  self.expand_parents, stamps, cache,
-                                 strict=True, unreadable=unreadable)
-            ids = [item_id_for(path, mode, self.expand_parents) for path in paths]
+                                 strict=True, unreadable=unreadable,
+                                 own_loose=self.own_loose)
+            ids = [self._id_of(path, mode) for path in paths]
             present = set(ids)
             gone = [key for key in self.known_ids if key not in present]
             if (len(gone) > max(20, len(self.known_ids) // 2)
@@ -988,11 +1089,11 @@ class RefreshThread(QThread):
                 again: list = []
                 second = list_entries(self.root, mode, self.skip_hidden,
                                       self.expand_parents, stamps, cache,
-                                      strict=True, unreadable=again)
+                                      strict=True, unreadable=again,
+                                      own_loose=self.own_loose)
                 if len(second) > len(paths):
                     paths, unreadable = second, again
-                    ids = [item_id_for(path, mode, self.expand_parents)
-                           for path in paths]
+                    ids = [self._id_of(path, mode) for path in paths]
                     present = set(ids)
                     gone = [key for key in self.known_ids if key not in present]
         except RootUnreadable as exc:
@@ -1023,7 +1124,21 @@ class RefreshThread(QThread):
             # defaut qu'on corrige : un premier inventaire interrompu aurait
             # garde ses dossiers sans que rien ne sache plus qu'ils forment
             # cette racine, et le lancement suivant serait reparti de zero.
-            INDEX.put_listing(self.root, listing_key(mode, self.expand_parents), ids)
+            from . import roots
+            if roots.is_union(self.root):
+                # Sous la racine virtuelle, chaque vraie racine lue garde sa
+                # propre composition ; celle d'une racine injoignable n'est
+                # pas touchee.
+                for member in roots.members(self.root):
+                    top = os.path.normcase(os.path.normpath(str(member))).rstrip("\\/")
+                    def inside(key: str) -> bool:
+                        text = os.path.normcase(os.path.normpath(key.split("|")[0]))
+                        return text == top or text.startswith(top + os.sep)
+                    mine = [key for key in ids if inside(key)]
+                    if mine:
+                        INDEX.put_listing(member, listing_key(mode, self.expand_parents), mine)
+            else:
+                INDEX.put_listing(self.root, listing_key(mode, self.expand_parents), ids)
 
         # Ce que la liste affichee porte encore alors que le disque ne le porte
         # plus : on le retire avant meme de verifier le reste. Un dossier disparu
@@ -1082,7 +1197,7 @@ class RefreshThread(QThread):
                 return None
             if mode != MODE_FOLDERS:
                 return scan_file(path, stamps.get(str(path)) if stamps else None)
-            if self.expand_parents and is_parent_folder(path):
+            if (self.expand_parents and is_parent_folder(path)) or self._is_own(path):
                 return scan_loose(path, self.skip_hidden)
             return scan_folder(path)
 

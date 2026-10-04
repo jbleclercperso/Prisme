@@ -1,187 +1,223 @@
-"""Verifie l'extraction et les filtres du module de recherche web, hors ligne.
+"""La recherche video sur le web, contre deux faux sites servis sur le PC.
 
-Lancement : python tests/test_websearch.py
-
-Aucune requete reseau ici : on nourrit les fonctions d'extraction avec du HTML
-fabrique a la main, comme le ferait une vraie page.
+Le premier a un formulaire de recherche et des resultats sur plusieurs pages
+(20 videos par page, lien « suivant ») ; le second n'a pas de formulaire, mais
+repond a l'adresse la plus courante (« /?k=mots »). Rien ne sort sur Internet.
 """
 from __future__ import annotations
 
+import http.server
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 os.environ.setdefault("PRISME_SANDBOX",
-                      os.path.join(tempfile.gettempdir(), "prisme-tests-web"))
+                      os.path.join(tempfile.gettempdir(), "prisme-tests-websearch"))
+sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import videosorter.websearch as ws  # noqa: E402
+from videosorter import websearch  # noqa: E402
 from videosorter.websearch import (  # noqa: E402
-    SearchFilters, build_query, extract_meta_videos, find_direct_video_links,
-    find_links, parse_iso8601_duration,
+    SearchFilters, form_template, parse_duration_text, parse_height_text,
+    parse_iso8601_duration, run_search, split_lines, web_url,
 )
 
-FAILURES: list = []
+FAILS: list = []
 
 
 def check(condition: bool, label: str) -> None:
     print(f"  {'ok  ' if condition else 'FAIL'} {label}")
     if not condition:
-        FAILURES.append(label)
+        FAILS.append(label)
 
 
-JSONLD_PAGE = """
-<html><head>
-<script type="application/ld+json">
-{"@type": "VideoObject", "name": "Course de cote 1987", "duration": "PT5M30S",
- "height": 720, "thumbnailUrl": "/img/thumb.jpg",
- "description": "Une vieille course de cote en Auvergne."}
-</script>
-</head><body></body></html>
-"""
+PER_PAGE, PAGES = 20, 3
 
-OG_PAGE = """
-<html><head>
-<meta property="og:title" content="Rallye regional 1992">
-<meta property="og:video" content="https://exemple.test/video.mp4">
-<meta property="og:video:height" content="1080">
-<meta property="og:image" content="/img/rallye.jpg">
-<meta property="og:description" content="Un rallye d'epoque.">
-</head><body></body></html>
-"""
 
-LINKS_PAGE = """
-<html><body>
-<a href="/a-propos">A propos</a>
-<a href="/categorie/course-de-cote">Course de cote</a>
-<a href="/tag/rallye">#rallye</a>
-<a href="https://autre-domaine.test/x">Externe</a>
-</body></html>
-"""
+def card(number: int, word: str, page: int = 1) -> str:
+    # Une video sur deux dure plus de dix minutes ; une sur trois est en HD.
+    minutes = 14 if number % 2 else 4
+    quality = "<span class='hd'>1080p</span>" if number % 3 == 0 else ""
+    return (f"<div class='thumb-block'><a href='/video/{1000 + number}/{word}-{number}?from=p{page}'>"
+            f"<img data-src='/t/{number}.jpg' src='data:,' alt='{word} numéro {number}'></a>"
+            f"<span class='duration'>{minutes}:05</span>{quality}"
+            f"<p><a href='/video/{1000 + number}/{word}-{number}'>{word} numéro {number}</a></p></div>")
 
-DIRECT_VIDEO_PAGE = """
-<html><body>
-<a href="/videos/finale.mp4">Finale 1987</a>
-<video src="/videos/entrainement.webm" poster="/img/poster.jpg"></video>
-</body></html>
-"""
+
+class TubeA(http.server.BaseHTTPRequestHandler):
+    """Formulaire en page d'accueil, resultats pagines."""
+
+    def log_message(self, *_args):
+        pass
+
+    def _html(self, body: str) -> None:
+        data = f"<!doctype html><html><body>{body}</body></html>".encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        url = urlparse(self.path)
+        if url.path == "/":
+            return self._html("<header><form action='/search' method='get'>"
+                              "<input type='search' name='q'><button>OK</button>"
+                              "</form></header><a href='/tags/plage'>Plage</a>")
+        if url.path == "/search":
+            query = parse_qs(url.query)
+            word = query.get("q", [""])[0].split()[0]
+            page = int(query.get("page", ["1"])[0])
+            if page > PAGES:
+                return self._html("<p>Aucun résultat</p>")
+            start = (page - 1) * PER_PAGE
+            cards = "".join(card(start + i, word, page) for i in range(PER_PAGE))
+            # La meme video « a la une » sur chaque page, sous une adresse de
+            # suivi differente : elle revenait autant de fois qu'il y a de pages.
+            cards += (f"<div><a href='/video/9999/{word}-a-la-une?ref=top{page}'>"
+                      f"<img src='/t/top.jpg' alt='{word} à la une'></a>"
+                      f"<span>9:59</span></div>")
+            following = (f"<a rel='next' href='/search?q={word}&page={page + 1}'>Suivant</a>"
+                         if page < PAGES else "")
+            return self._html(f"<div class='videos'>{cards}</div>{following}")
+        self.send_response(404)
+        self.end_headers()
+
+
+class TubeC(TubeA):
+    """Repond a toute recherche par les memes videos du jour."""
+
+    def do_GET(self):  # noqa: N802
+        url = urlparse(self.path)
+        if url.path == "/":
+            return self._html("<form action='/find'><input type='search' name='q'></form>")
+        if url.path == "/find":
+            cards = "".join(card(700 + i, "populaire") for i in range(10))
+            return self._html(f"<div>{cards}</div>")
+        self.send_response(404)
+        self.end_headers()
+
+
+class TubeB(TubeA):
+    """Pas de formulaire : la recherche est a « /?k=mots »."""
+
+    def do_GET(self):  # noqa: N802
+        url = urlparse(self.path)
+        query = parse_qs(url.query)
+        if url.path == "/" and "k" in query:
+            word = query["k"][0].split()[0]
+            cards = "".join(card(500 + i, word) for i in range(8))
+            return self._html(f"<div>{cards}</div>")
+        if url.path == "/":
+            return self._html("<p>Bienvenue</p>")
+        self.send_response(404)
+        self.end_headers()
+
+
+def serve(handler) -> str:
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"127.0.0.1:{server.server_address[1]}"
+
+
+def search(**kw) -> tuple:
+    found, said = [], []
+    filters = SearchFilters(**kw)
+    templates = run_search(filters, on_status=said.append, on_result=found.append)
+    return found, said, templates
 
 
 def main() -> int:
-    print("\n[1] JSON-LD VideoObject")
-    videos = extract_meta_videos(JSONLD_PAGE, "https://exemple.test/fiche")
-    check(len(videos) == 1, "une video extraite")
-    if videos:
-        v = videos[0]
-        check(v.title == "Course de cote 1987", "titre lu")
-        check(v.duration_s == 330, "duree ISO8601 convertie (5 min 30)")
-        check(v.height == 720, "hauteur lue")
-        check(v.thumbnail_url == "https://exemple.test/img/thumb.jpg", "miniature resolue en absolu")
-        check(v.resolution_label == "720p", "etiquette de resolution")
-        check(v.duration_label == "5:30", "etiquette de duree")
+    websearch.DOMAIN_DELAY = 0.0          # pas de politesse envers soi-meme
+    site_a, site_b = serve(TubeA), serve(TubeB)
+    # Les faux sites parlent http, pas https.
+    real_root = websearch.site_root
+    websearch.site_root = lambda line: real_root(line).replace("https://", "http://")
 
-    print("\n[2] Repli sur Open Graph")
-    videos = extract_meta_videos(OG_PAGE, "https://exemple.test/fiche2")
-    check(len(videos) == 1, "une video extraite via og:")
-    if videos:
-        check(videos[0].title == "Rallye regional 1992", "titre og:title")
-        check(videos[0].height == 1080, "hauteur og:video:height")
+    print("\n[1] Lire ce qu'affiche une vignette")
+    check(parse_duration_text("12:34") == 754, "« 12:34 » : 12 min 34 s")
+    check(parse_duration_text("1:02:03") == 3723, "« 1:02:03 » : une heure")
+    check(parse_duration_text("14 min") == 840, "« 14 min »")
+    check(parse_height_text("HD") == 720 and parse_height_text("1080p") == 1080
+          and parse_height_text("4K") == 2160, "HD, 1080p, 4K")
+    check(parse_iso8601_duration("PT5M30S") == 330, "durée ISO 8601 (JSON-LD)")
+    check(split_lines(" a.com\n\nb.com\na.com ") == ["a.com", "b.com"],
+          "une ligne par site, sans vide ni doublon")
+    check(web_url("https://x.test/", "file://hote/partage/a.jpg") == "",
+          "une adresse file:// ne sort jamais d'ici")
+    check(form_template("<form action='/s'><input type='search' name='q'></form>",
+                        "https://x.test/") == "https://x.test/s?q={q}",
+          "le formulaire de recherche donne l'adresse")
 
-    print("\n[3] Liens directs vers des fichiers video")
-    videos = find_direct_video_links(DIRECT_VIDEO_PAGE, "https://exemple.test/liste")
-    check(len(videos) == 2, "deux videos directes trouvees")
-    titles = {v.title for v in videos}
-    check("Finale 1987" in titles, "titre du lien <a>")
-    check(any(v.thumbnail_url.endswith("poster.jpg") for v in videos), "poster de la balise <video>")
+    print("\n[2] Un site avec formulaire, sur plusieurs pages")
+    found, said, templates = search(queries=["plage"], sites=[site_a], max_per_site=1000)
+    check(len(found) == PER_PAGE * PAGES + 1,
+          f"toutes les pages sont lues, et la vidéo « à la une » n'est comptée "
+          f"qu'une fois : {len(found)} vidéos ({said[-2:]})")
+    check(templates.get(site_a, "").endswith("/search?q={q}"),
+          f"sa recherche est trouvée et retenue ({templates})")
+    first = found[0]
+    check(first.thumbnail_url.endswith("/t/0.jpg") and first.duration_s == 245
+          and "plage" in first.title, "titre, vignette et durée de chaque vidéo")
 
-    print("\n[4] Tri des liens internes (categories en tete)")
-    links = find_links(LINKS_PAGE, "https://exemple.test/")
-    check(all("autre-domaine.test" not in link for link in links), "liens externes ecartes")
-    check(links and "categorie" in links[0], "un lien-categorie passe devant")
+    print("\n[3] Les filtres")
+    found, said, _t = search(queries=["plage"], sites=[site_a], min_duration_s=600,
+                             max_per_site=1000)
+    found = [v for v in found if "une" not in v.title]
+    check(len(found) == PER_PAGE * PAGES // 2 and all(v.duration_s >= 600 for v in found),
+          f"durée minimum 10 min : la moitié passe ({len(found)})")
+    found, said, _t = search(queries=["plage"], sites=[site_a], min_height=1080,
+                             max_per_site=1000)
+    check(len(found) == PER_PAGE * PAGES // 3, f"1080p minimum : un tiers ({len(found)})")
+    found, said, _t = search(queries=["plage"], sites=[site_a, site_b], max_per_site=25)
+    per_site = {}
+    for v in found:
+        per_site[v.source_domain] = per_site.get(v.source_domain, 0) + 1
+    check(per_site.get(site_a) == 25 and per_site.get(site_b) == 8,
+          f"chaque site a sa part, le premier ne prend pas tout ({per_site})")
 
-    print("\n[5] Filtres de recherche")
-    filters = SearchFilters(keywords="course cote", min_duration_s=300, min_height=480)
-    check(filters.matches_text("Course de cote 1987", ""), "mot-cle trouve dans le titre")
-    check(not filters.matches_text("Vacances a la mer", ""), "mot-cle absent rejete")
-    check(filters.matches_duration(330), "duree suffisante acceptee")
-    check(not filters.matches_duration(60), "duree insuffisante rejetee")
-    check(filters.matches_duration(None), "duree inconnue non rejetee")
-    check(filters.matches_height(720), "resolution suffisante acceptee")
-    check(not filters.matches_height(360), "resolution insuffisante rejetee")
+    print("\n[4] Un site sans formulaire, et plusieurs recherches")
+    found, said, templates = search(queries=["plage", "montagne"],
+                                    sites=[site_a, site_b], max_per_site=1000)
+    by_site = {v.source_domain for v in found}
+    check(site_b in by_site and templates.get(site_b, "").endswith("/?k={q}"),
+          f"l'adresse courante « /?k= » est essayée et trouvée ({templates.get(site_b)})")
+    words = {v.query for v in found}
+    check(words == {"plage", "montagne"},
+          f"les deux recherches se cumulent ({len(found)} vidéos)")
+    check(len({v.page_url for v in found}) == len(found), "sans doublon")
 
-    print("\n[6] Correspondance stricte (par defaut) vs souple")
-    strict = SearchFilters(keywords="course cote auvergne")
-    check(strict.require_all_keywords, "stricte par defaut")
-    check(not strict.matches_text("Course de cote en Bretagne", ""), "un mot manquant rejete en strict")
-    check(strict.matches_text("La course de cote d'Auvergne 1987", ""), "les trois mots presents acceptes")
-    souple = SearchFilters(keywords="course cote auvergne", require_all_keywords=False)
-    check(souple.matches_text("Course de cote en Bretagne", ""), "un seul mot suffit en souple")
+    print("\n[5] Un site qui ne comprend pas la recherche")
+    site_c = serve(TubeC)
+    found, said, templates = search(queries=["plage"], sites=[site_c], max_per_site=1000)
+    check(not found and any("sans rapport" in line or "aucune recherche" in line
+                            for line in said),
+          f"ses vidéos du jour ne passent pas pour des résultats ({said[-2:]})")
 
-    print("\n[7] Domaines de confiance")
-    check(build_query("course de cote", []) == "course de cote", "requete inchangee sans domaine")
-    query = build_query("course de cote", ["forum-exemple.net", "archives-exemple.org"])
-    check("site:forum-exemple.net" in query and "site:archives-exemple.org" in query, "les deux domaines restreignent la requete")
-    check(SearchFilters(known_domains="a.net, b.org  c.net").domain_list() == ["a.net", "b.org", "c.net"], "liste de domaines eclatee sur virgules/espaces")
-
-    # Bug vecu : des URLs completes collees plutot que des domaines nus
-    # produisaient toutes le meme "https:" une fois qu'on rajoutait un second
-    # https:// par-dessus — 57 sites ecrases en une seule entree invalide.
-    full_urls = "https://forum-exemple.net/videos https://archives-exemple.org/tag/x"
-    domains = SearchFilters(known_domains=full_urls).domain_list()
-    check(domains == ["forum-exemple.net", "archives-exemple.org"], "URLs completes ramenees a des domaines nus")
-    check(all(build_query("x", [d]) and "https:" not in d for d in domains), "aucun domaine ne garde un schema")
-    from urllib.parse import urlparse as _urlparse
-    seed_netlocs = {_urlparse(f"https://{d}/").netloc for d in domains}
-    check(len(seed_netlocs) == 2, "les sites de depart restent distincts (pas ecrases en un seul)")
-
-    print("\n[8] Duree ISO 8601")
-    check(parse_iso8601_duration("PT1H2M3S") == 3723, "heures + minutes + secondes")
-    check(parse_iso8601_duration("PT45S") == 45, "secondes seules")
-    check(parse_iso8601_duration("n'importe quoi") is None, "chaine invalide -> None")
-
-    print("\n[9] Diagnostic d'exploration (CrawlStats)")
-    blocked = ws.CrawlStats(blocked_robots=5)
-    check("robots.txt" in blocked.summary(), "signale un blocage robots.txt")
-    unreachable = ws.CrawlStats(fetch_failed=3)
-    check("injoignable" in unreachable.summary(), "signale des pages injoignables")
-    no_video = ws.CrawlStats(pages_read=4, candidates_found=0)
-    check("JavaScript" in no_video.summary(), "signale des pages lues sans aucune video reconnue")
-    filtered_out = ws.CrawlStats(pages_read=4, candidates_found=6, candidates_matched=0)
-    check("passe les filtres" in filtered_out.summary(), "signale des videos vues mais filtrees")
-
-    print("\n[10] run_search : sites de confiance vs decouverte SerpAPI")
-    calls = []
-
-    def fake_serpapi(api_key, query, max_results=15, domains=None):
-        calls.append((query, tuple(domains or ())))
-        return []
-
-    class FakeCrawler:
-        def __init__(self):
-            self.last_stats = ws.CrawlStats()
-
-        def explore(self, start_url, filters, should_stop=lambda: False):
-            return iter([])
-
-    real_serpapi, real_crawler = ws.serpapi_search, ws.SiteCrawler
-    ws.serpapi_search, ws.SiteCrawler = fake_serpapi, FakeCrawler
-    try:
-        statuses = []
-        only_domains = SearchFilters(known_domains="exemple.net", discover_new_sites=False)
-        ws.run_search("cle", only_domains, on_status=statuses.append)
-        check(not calls, "site de confiance seul : SerpAPI jamais appele")
-        check(any("exemple.net" in s for s in statuses), "le statut mentionne le site direct")
-
-        calls.clear()
-        only_keywords = SearchFilters(keywords="course cote", known_domains="")
-        ws.run_search("cle", only_keywords, on_status=lambda s: None)
-        check(len(calls) == 1, "sans site connu : SerpAPI appele une seule fois")
-    finally:
-        ws.serpapi_search, ws.SiteCrawler = real_serpapi, real_crawler
-
-    print(f"\n{'TOUT PASSE' if not FAILURES else f'{len(FAILURES)} ECHEC(S)'}")
-    return 1 if FAILURES else 0
+    print("\n[6] Arrêter")
+    import threading as _threading
+    stop = _threading.Event()
+    found, said = [], []
+    runner = _threading.Thread(target=lambda: run_search(
+        SearchFilters(queries=["plage"], sites=[site_a, site_b], max_per_site=1000),
+        should_stop=stop.is_set, on_status=said.append, on_result=found.append))
+    websearch.DOMAIN_DELAY = 0.5
+    runner.start()
+    import time as _time
+    _time.sleep(0.8)
+    stop.set()
+    runner.join(10)
+    if runner.is_alive():                 # ou elle reste prise : on le montre
+        import faulthandler
+        faulthandler.dump_traceback(all_threads=True)
+    websearch.DOMAIN_DELAY = 0.0
+    check(not runner.is_alive() and "Recherche arrêtée." in said,
+          f"la recherche s'arrête vite ({len(found)} vidéos avant l'arrêt ; {said[-3:]} ; vivant={runner.is_alive()})")
+    print("\ntout est vert" if not FAILS else f"\n{len(FAILS)} échec(s)")
+    return 1 if FAILS else 0
 
 
 if __name__ == "__main__":

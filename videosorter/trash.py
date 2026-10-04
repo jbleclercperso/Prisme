@@ -129,6 +129,10 @@ class SessionTrash(QObject):
     def folder_for(self, path: Path) -> Path:
         """Dossier de session à utiliser pour cet élément, sur son propre volume."""
         base = self.base
+        if base is None:
+            # Plusieurs racines : celle qui porte l'element.
+            from . import roots
+            base = roots.owner(path)
         if base is None or actions.is_cross_device(path, base):
             # Pas de racine utilisable, ou racine sur un autre disque : on se
             # rabat sur le voisinage immédiat de l'élément.

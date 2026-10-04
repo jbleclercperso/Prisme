@@ -128,6 +128,43 @@ class Segmented(QWidget):
             button.style().polish(button)
 
 
+class KindToggle(QPushButton):
+    """Une seule icone, celle du mode en cours : la pellicule en videos,
+    l'image en photos. Un clic passe a l'autre collection.
+
+    Deux boutons « Vidéos | Photos » prenaient une place qu'un choix qu'on
+    fait rarement ne merite pas.
+    """
+
+    chosen = Signal(str)
+
+    # (cle, icone, ce que le bouton dit quand ce mode est le courant)
+    KINDS = {
+        "video": ("clapperboard", "Mode vidéos — cliquer pour trier les photos"),
+        "photo": ("image", "Mode photos — cliquer pour trier les vidéos"),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setObjectName("kindToggle")
+        self.setFixedWidth(38)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.value = ""
+        self.clicked.connect(
+            lambda _c=False: self.chosen.emit("photo" if self.value == "video" else "video"))
+        self.set_value("video")
+
+    def set_value(self, key: str) -> None:
+        key = "photo" if key == "photo" else "video"
+        if key == self.value:
+            return
+        self.value = key
+        glyph, tip = self.KINDS[key]
+        dress(self, glyph, 20)
+        self.setToolTip(tip)
+
+
 class Chips(QWidget):
     """Petits boutons ronds, un seul actif : deux familles de mots-cles."""
 
@@ -171,7 +208,7 @@ class SortChips(QWidget):
 
     chosen = Signal(str)
 
-    CRITERIA = (("duration", "Durée"), ("size", "Taille"),
+    CRITERIA = (("date", "Date"), ("duration", "Durée"), ("size", "Taille"),
                 ("resolution", "Résolution"))
 
     def __init__(self, parent=None):
@@ -188,8 +225,12 @@ class SortChips(QWidget):
             button.setCursor(Qt.PointingHandCursor)
             button.setFocusPolicy(Qt.NoFocus)
             button.setProperty("chosen", "false")
-            button.setToolTip("Clic : du plus grand au plus petit — "
-                              "reclic : l'inverse — troisième clic : au hasard")
+            button.setToolTip(
+                "Date de modification sur le disque. Clic : du plus récent au plus "
+                "ancien — reclic : l'inverse — troisième clic : au hasard"
+                if key == "date" else
+                "Clic : du plus grand au plus petit — "
+                "reclic : l'inverse — troisième clic : au hasard")
             button.clicked.connect(lambda _c=False, k=key: self._cycle(k))
             layout.addWidget(button)
             self.buttons[key] = button
@@ -372,6 +413,9 @@ class Breadcrumb(QWidget):
         self.layout_.setSpacing(2)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._top: Path | None = None
+        # La fiche d'une video : le dossier passe avant le nom, qui se lit
+        # aussi dans le bandeau survole. C'est le dossier qu'on cherche.
+        self.parent_first = False
 
     # -- mesure ------------------------------------------------------------
     def _pieces(self) -> list:
@@ -409,7 +453,10 @@ class Breadcrumb(QWidget):
         wants = [name.natural() for name in names]
         floors = [name.floor() for name in names]
         widths = list(wants)
-        if sum(wants) > room:
+        if self.parent_first and len(names) == 2 and sum(wants) > room:
+            parent = max(floors[0], min(wants[0], room - floors[1]))
+            widths = [parent, max(floors[1], room - parent)]
+        elif sum(wants) > room:
             head = _shrink(wants[:-1], floors[:-1], room - wants[-1])
             if head is not None:
                 widths = head + [wants[-1]]
@@ -445,8 +492,10 @@ class Breadcrumb(QWidget):
             self.updateGeometry()
             self._fit()
 
-    def set_path(self, top, current) -> None:
-        """Affiche la chaîne de `top` à `current`, chaque segment cliquable."""
+    def set_path(self, top, current, parent_first: bool = False) -> None:
+        """Affiche la chaîne de `top` à `current`, chaque segment cliquable.
+        `parent_first` : le dossier garde sa largeur avant le nom qui suit."""
+        self.parent_first = parent_first
         while self.layout_.count():
             child = self.layout_.takeAt(0)
             if child.widget():
@@ -457,14 +506,22 @@ class Breadcrumb(QWidget):
         if current is None:
             return
 
+        from . import roots
         self._top = Path(top) if top else Path(current)
         chain = []
         walk = Path(current)
-        while True:
+        union = roots.is_union(self._top)
+        # Sous « Toutes les racines », la chaine remonte jusqu'a la racine qui
+        # porte le dossier, puis a la reunion elle-meme.
+        ceiling = roots.owner(walk) if union and not roots.is_union(walk) else None
+        while not roots.is_union(walk):
             chain.append(walk)
-            if walk == self._top or walk.parent == walk or len(chain) > 16:
+            if (walk == self._top or walk == ceiling or walk.parent == walk
+                    or len(chain) > 16):
                 break
             walk = walk.parent
+        if union:
+            chain.append(Path(roots.UNION))
         chain.reverse()
 
         for position, path in enumerate(chain):
@@ -472,7 +529,9 @@ class Breadcrumb(QWidget):
                 separator = QLabel("›", self)
                 separator.setObjectName("crumbSep")
                 self.layout_.addWidget(separator)
-            button = _Crumb(path.name or str(path), self)
+            named = roots.label(path) if (roots.is_union(path) or (
+                union and path == ceiling)) else (path.name or str(path))
+            button = _Crumb(named, self)
             button.setToolTip(str(path))
             button.setCursor(Qt.PointingHandCursor)
             button.setProperty("last", "true" if position == len(chain) - 1 else "false")
@@ -517,8 +576,9 @@ class ControlBar(QWidget):
         outer.setSpacing(0)
         row = FlowLayout(spacing=8)
         outer.addLayout(row)
+        self.row = row
 
-        self.include = _Field("chercher…", 150)
+        self.include = _Field("chercher…", 184)
         # Conserve sans etre montre : le filtre d'exclusion garde sa place dans
         # les criteres et dans la configuration, il n'occupe plus l'ecran.
         self.exclude = _Field("", 0)
@@ -835,6 +895,18 @@ class ControlBar(QWidget):
         if wall:
             self.clear.hide()
 
+    def set_photo(self, on: bool) -> None:
+        """Des photos : ni duree, ni taille a trier -- la resolution suffit."""
+        for key in ("duration", "size"):
+            self.sorts.buttons[key].setVisible(not on)
+        noun = "photos" if on else "vidéos"
+        self.folder_min.setPlaceholderText(f"≥ {noun}")
+        self.folder_max.setPlaceholderText(f"≤ {noun}")
+        for field in (self.folder_min, self.folder_max):
+            field.setToolTip("Ne garder que les dossiers qui comptent au moins, "
+                             f"au plus, ce nombre de {noun}")
+        self.random_here.setToolTip(f"Une {noun[:-1]} au hasard, parmi celles affichées")
+
     def set_wall(self, on: bool) -> None:
         """Conserve pour les appels existants : « wall » ou l'onglet courant."""
         if on:
@@ -915,6 +987,8 @@ MENU_ICONS = (
     ("Enregistrer", "bookmark-plus"), ("enregistrées", "bookmark"),
     ("Affichage", "monitor"), ("Collection", "hard-drive"),
     ("Connexion", "share-2"), ("Aide", "keyboard"), ("Recherches", "search"),
+    ("Réglages", "gauge"), ("Confidentialité", "eye-off"), ("Avancé", "folder-cog"),
+    ("abîmées", "film"), ("Ultra tri", "zap"),
 )
 
 

@@ -41,6 +41,13 @@ CREATE TABLE IF NOT EXISTS views(
     seconds REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS views_by_time ON views(seen_at);
+CREATE TABLE IF NOT EXISTS favorites(
+    label TEXT NOT NULL,
+    video TEXT NOT NULL,
+    name  TEXT NOT NULL DEFAULT '',
+    at    REAL NOT NULL,
+    PRIMARY KEY (label, video)
+);
 """
 
 # Un battement plus vieux que cela ouvre une nouvelle ligne : on ne veut pas
@@ -167,8 +174,9 @@ class Journal:
             (limit,))
 
     def views(self, limit: int = 500) -> list:
+        """(quand, ip, appareil, nom, secondes, empreinte de la video)."""
         return self._rows(
-            "SELECT seen_at, ip, label, name, seconds FROM views"
+            "SELECT seen_at, ip, label, name, seconds, video FROM views"
             " ORDER BY seen_at DESC LIMIT ?", (limit,))
 
     def _rows(self, sql: str, args: tuple) -> list:
@@ -180,6 +188,45 @@ class Journal:
             except sqlite3.Error:
                 return []
 
+    # -- les favoris de chaque appareil -------------------------------------
+    def set_favorite(self, label: str, video: str, name: str, on: bool) -> None:
+        with self.lock:
+            if self.db is None:
+                return
+            try:
+                if on:
+                    self.db.execute(
+                        "INSERT OR REPLACE INTO favorites(label, video, name, at)"
+                        " VALUES (?,?,?,?)", (label, video, name, time.time()))
+                else:
+                    self.db.execute("DELETE FROM favorites WHERE label = ? AND video = ?",
+                                    (label, video))
+                self.db.commit()
+            except sqlite3.Error:
+                pass
+
+    def favorites(self, label: str) -> list:
+        """Les empreintes des favoris de cet appareil, du plus recent au plus ancien."""
+        return [row[0] for row in self._rows(
+            "SELECT video FROM favorites WHERE label = ? ORDER BY at DESC LIMIT ?",
+            (label, 5000))]
+
+    def all_favorites(self, limit: int = 5000) -> list:
+        """(quand, appareil, nom, empreinte) de tous les favoris."""
+        return self._rows("SELECT at, label, name, video FROM favorites"
+                          " ORDER BY at DESC LIMIT ?", (limit,))
+
+    def clear_views(self) -> None:
+        """Efface ce qui a ete regarde, et garde les connexions."""
+        with self.lock:
+            if self.db is None:
+                return
+            try:
+                self.db.execute("DELETE FROM views")
+                self.db.commit()
+            except sqlite3.Error:
+                pass
+
     def clear(self) -> None:
         with self.lock:
             if self.db is None:
@@ -190,6 +237,52 @@ class Journal:
                 self.db.commit()
             except sqlite3.Error:
                 pass
+
+
+def favorites_in(path: Path, limit: int = 5000) -> list:
+    """Les favoris notes dans un autre journal -- celui du NAS."""
+    return _rows_in(path, "SELECT at, label, name, video FROM favorites"
+                          " ORDER BY at DESC LIMIT ?", limit)
+
+
+def visits_in(path: Path, limit: int = 200) -> list:
+    """Les connexions notees dans un autre journal -- celui du NAS."""
+    return _rows_in(path, "SELECT at, ip, label, event FROM visits"
+                          " ORDER BY at DESC LIMIT ?", limit)
+
+
+def views_in(path: Path, limit: int = 500) -> list:
+    """Les visionnages notes dans un autre journal -- celui du NAS."""
+    return _rows_in(path, "SELECT seen_at, ip, label, name, seconds, video FROM views"
+                          " ORDER BY seen_at DESC LIMIT ?", limit)
+
+
+def _rows_in(path: Path, sql: str, limit: int) -> list:
+    """Des lignes d'un autre journal, lues dans une copie : ouvrir en direct,
+    par le reseau, une base que le serveur du NAS est en train d'ecrire
+    risquait de la verrouiller sous lui."""
+    import os
+    import shutil
+    import tempfile
+    try:
+        handle, copy = tempfile.mkstemp(suffix=".db", prefix="prisme-nas-")
+        os.close(handle)
+        shutil.copyfile(path, copy)
+    except OSError:
+        return []
+    try:
+        con = sqlite3.connect(copy)
+        try:
+            return con.execute(sql, (limit,)).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+    finally:
+        try:
+            os.remove(copy)
+        except OSError:
+            pass
 
 
 def when(moment: float) -> str:

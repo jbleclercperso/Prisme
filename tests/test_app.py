@@ -97,10 +97,26 @@ def wait_for(app: QApplication, predicate, timeout: float = 60.0) -> bool:
     return False
 
 
+def open_sheet(window, position: int) -> None:
+    """La fiche de cet element, meme d'un dossier. Un clic sur la carte d'un
+    dossier y entre desormais (ses videos en vignettes) : les essais qui
+    veulent la fiche d'un dossier l'ouvrent par ici."""
+    from videosorter.scan import MODE_FOLDERS as _FOLDERS
+    window.index = position
+    window.browsing = False
+    window._apply_selectors()
+    item = window.items[position]
+    window.viewer.setCurrentWidget(
+        window.grid if item.kind == _FOLDERS else window.single)
+    window.show_item(position)
+
+
 def first_untouched(window) -> int:
-    """Index du premier element encore intact : les precedents sont deja partis."""
+    """Index du premier element encore intact : les precedents sont deja
+    partis. Jamais une carte epinglee (« À trier », « Orphelins ») : elle
+    n'est pas un dossier du disque."""
     for index, item in enumerate(window.items):
-        if not item.status:
+        if not item.status and not getattr(item, "pinned", False):
             return index
     return 0
 
@@ -195,18 +211,20 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     # quand la place le permet, rognes a la mesure de ce qui manque sinon.
     long_bar = CommandBar()
     long_bar.rebuild([{"key": "6", "label": "Une destination au nom très long",
-                       "path": str(tri / "x")}], "Supprimer définitivement")
+                       "path": str(tri / "x")}], "détruit à la fermeture")
     long_bar.resize(4000, 40)
     long_bar._fit()
     shown = [c.text.text() for c in long_bar.caps()]
-    check(shown[0] == "Supprimer définitivement"
+    # « Suppr · Supprimer », court ; ce qu'il advient est dans l'infobulle.
+    check(shown[0] == "Supprimer" and shown[1] == "Suivante"
+          and "détruit à la fermeture" in long_bar.caps()[0].toolTip()
           and shown[2] == "Une destination au nom très long",
           f"avec de la place, les libellés sont entiers ({shown})")
     natural = sum(c.sizeHint().width() + 6 for c in long_bar.caps())
     long_bar.resize(int(natural * 0.75), 40)
     long_bar._fit()
     shown = [c.text.text() for c in long_bar.caps()]
-    check(not long_bar.compact and shown[1] == "Passer"
+    check(not long_bar.compact and shown[1] == "Suivante"
           and shown[2].endswith("…"),
           f"un peu serrés, seuls les plus longs se rognent ({shown})")
 
@@ -474,7 +492,13 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(window.crumbs.layout_.count() >= 3,
           f"le fil d'Ariane montre la descente ({window.crumbs.layout_.count()})")
 
-    # On trie une vidéo à l'intérieur, pour vérifier que tout fonctionne en profondeur.
+    # Entrer mene aux vignettes du dossier (le deuxieme etage), jamais a la
+    # fiche de sa premiere video.
+    check(window.browsing, "entrer montre les vignettes du dossier")
+    # On trie une vidéo à l'intérieur, pour vérifier que tout fonctionne en
+    # profondeur : sa fiche s'ouvre d'un clic.
+    window.on_board_click(0)
+    pump(app, 0.3)
     inner_dest = tri / "interieur"
     window.cfg.set_destinations([{"key": "6", "label": "Intérieur", "path": str(inner_dest)}])
     inner_name = window.current.name
@@ -496,9 +520,13 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     QTest.keyClick(window, Qt.Key_Down, Qt.ControlModifier)
     wait_for(app, lambda: not window.scanning and window.root == parent_item.path, 60)
     check(len(window.levels) == 1, "Ctrl+↓ entre aussi dans le dossier")
-    # Echap sort par etages : de la fiche aux vignettes, puis d'un niveau de
-    # dossier. Au sommet, il le dit et reste la : un Echap de trop menait a
-    # l'accueil et abandonnait la verification du NAS.
+    # Entrer mene aux vignettes du dossier (deuxieme etage). Echap sort par
+    # etages : de la fiche aux vignettes, puis d'un niveau de dossier. Au
+    # sommet, il le dit et reste la : un Echap de trop menait a l'accueil.
+    check(window.browsing and window.root == parent_item.path,
+          "on arrive sur les vignettes du dossier")
+    window.on_board_click(0)
+    pump(app, 0.4)
     QTest.keyClick(window, Qt.Key_Escape)
     pump(app, 0.4)
     check(window.browsing, "Échap rend d'abord la planche")
@@ -735,7 +763,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     wait_for(app, lambda: not window.scanning and len(window.items) >= 3, 60)
     # Les touches notent la fiche ouverte : sur la planche, ou Echap vient de
     # ramener, elles ne visent plus que la vignette survolee.
-    window.on_board_open(first_untouched(window))
+    open_sheet(window, first_untouched(window))
     target = window.current
     check(window.ratings.get(target.path) == 0, "un élément démarre hors des favoris")
     window.rate_current(4)
@@ -815,14 +843,15 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
                     if item.kind == MODE_FOLDERS and Path(item.path).is_dir()
                     and not item.loose_only)
     opened_name = window.items[position].name
-    window.on_board_open(position)
-    pump(app, 0.5)
-    check(not window.browsing, f"un clic sur une carte ouvre sa fiche ({opened_name})")
-    check(window.current is not None and window.current.name == opened_name,
-          "celle de l'élément cliqué")
-    check(str(window.root) == before, "sans quitter le dossier courant")
-    check((Path(before) / opened_name).exists(), "ni rien déplacer")
-    window.toggle_board(True)
+    window.on_board_click(position)
+    wait_for(app, lambda: not window.scanning, 30)
+    pump(app, 0.3)
+    check(window.browsing and window.root is not None
+          and Path(window.root).name == opened_name,
+          f"un clic sur un dossier y entre, ses vidéos en vignettes ({opened_name})")
+    check((Path(before) / opened_name).exists(), "sans rien déplacer")
+    window.go_parent()
+    wait_for(app, lambda: not window.scanning, 30)
     pump(app, 0.4)
 
     print("\n[30] L'arborescence navigue en planche, envoie en fiche")
@@ -1653,7 +1682,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 2, 60)
     position = next(i for i, it in enumerate(window.items)
-                    if it.kind == MODE_FOLDERS and len(it.videos) >= 2)
+                    if it.kind == MODE_FOLDERS and len(it.videos) >= 2
+                    and not it.is_tag)
     window.toggle_board(False)
     window.show_item(position)
     pump(app, 0.5)
@@ -1672,7 +1702,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.toggle_board(False)
     window.show_item(0)
     pump(app, 0.4)
-    check(not window.cinema_button.isHidden(), "une vidéo propose le cinéma")
+    check(window.cinema_button.isHidden() and "⛶" in window.single_bar.by_glyph,
+          "une vidéo propose le cinéma, dans le bandeau survolé (plus en double "
+          "sur la ligne du haut)")
     window.toggle_cinema(True)
     pump(app, 0.3)
     check(window.bottom_bar.isHidden() and window.top_bar.isHidden(),
@@ -2009,15 +2041,17 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     from PySide6.QtMultimedia import QMediaPlayer as _QMP
     from PySide6.QtWidgets import QInputDialog
     from videosorter.dupes import ImageDuplicateScan, dhash, group_by_look
-    from videosorter.split import grid_for
+    from videosorter.mosaic import layout as _mosaic
     from videosorter.index import INDEX
     from videosorter.backfill import ThumbBackfill
 
     # -- le mur : grille, nombre, orientation, plein ecran --------------------
-    check(grid_for(3, "vertical") == (1, 3) and grid_for(6, "vertical") == (2, 3),
-          "verticales : une ligne jusqu'à cinq")
-    check(grid_for(9, "any") == (3, 3) and grid_for(10, "horizontal") == (2, 5),
-          "horizontales : le carré, ou presque")
+    _rects, _form, _shown = _mosaic([9 / 16] * 3, 1920, 1080)
+    check(len({y for _x, y, _w, _h in _rects}) == 1 and _shown > 0.9,
+          "trois verticales : côte à côte, l'écran presque plein")
+    _rects, _form, _shown = _mosaic([16 / 9] * 9, 1920, 1080)
+    check(len({x for x, _y, _w, _h in _rects}) == 3 and _shown > 0.9,
+          "neuf horizontales : trois sur trois")
     window.set_tab(TAB_FOLDERS)
     window.start_root(root, MODE_FOLDERS)
     wait_for(app, lambda: not window.scanning and len(window.items) >= 4, 60)
@@ -2052,7 +2086,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.show_item(0)
     pump(app, 0.3)
     window.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Shift, Qt.ShiftModifier))
-    pump(app, 0.1)
+    pump(app, 0.4)
     check(sp.peeking and not sp.peek.isHidden(), "Maj enfoncée : la mosaïque est là")
     peek_key = f"peek@{window.current.item_id}"
     check(wait_for(app, lambda: len(window.peek_thumbs.get(peek_key, {})) == 9, 60),
@@ -2639,7 +2673,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(not sig_current(faux, "100|200"),
           "une ancienne empreinte prise sur les plans est refaite")
     INDEX.put_sig(faux, f"100|200|{SIG_METHOD}", [], 200)
-    check(sig_current(faux, "100|200") and not sig_current(faux, "101|200"),
+    check(sig_current(faux, "100|200") and not sig_current(faux, "160|200"),
           "une empreinte récente vaut tant que le fichier ne change pas")
     INDEX.forget_tree(str(base / "faux"))
 
@@ -2823,19 +2857,34 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.set_tab(TAB_FOLDERS)
     pump(app, 0.2)
 
-    print("\n[71] Grille qui remplit l'écran, vivier qui tient parole, jamais d'impasse")
-    from videosorter.split import grid_for as _grid
+    print("\n[71] Mosaïque qui remplit l'écran, vivier qui tient parole, jamais d'impasse")
+    from videosorter.mosaic import layout as _mosaic
+
+    def _spots(aspects, width, height):
+        rects = _mosaic(aspects, width, height)[0]
+        return len({y for _x, y, _w, _h in rects}), len({x for x, _y, _w, _h in rects})
 
     # -- la disposition suit la place -------------------------------------
-    check(_grid(4, "vertical", 1920, 900) == (1, 4),
+    check(_spots([9 / 16] * 4, 1920, 900) == (1, 4),
           "quatre verticales sur un écran large : une seule ligne")
-    check(_grid(4, "vertical", 900, 900) == (2, 2),
+    check(_spots([9 / 16] * 4, 900, 900) == (2, 2),
           "et deux par deux quand l'écran est étroit")
-    check(_grid(4, "horizontal", 1920, 900) == (2, 2),
+    check(_spots([16 / 9] * 4, 1920, 900) == (2, 2),
           "quatre horizontales : deux par deux, elles sont couchées")
-    check(_grid(9, "horizontal", 1920, 1080) == (3, 3), "neuf font un carré")
-    check(_grid(3, "vertical") == (1, 3),
-          "sans dimensions connues, un partage raisonnable")
+    check(_spots([16 / 9] * 9, 1920, 1080) == (3, 3), "neuf font un carré")
+    _mixed = [16 / 9] * 4 + [9 / 16] * 4
+    _rects, _form, _shown = _mosaic(_mixed, 1920, 1080)
+    check(_shown > 0.9, f"quatre verticales et quatre horizontales : "
+                        f"{_shown:.0%} de l'écran (59 % en grille)")
+    _cells = sum(w * h for _x, _y, w, h in _rects) + 0.0
+    check(_cells > 0.93 * 1920 * 1080 and all(w > 100 and h > 100 for _x, _y, w, h in _rects),
+          "les cases couvrent l'écran, et aucune n'est minuscule")
+    check(not any(a != b and a[0] < b[0] + b[2] and b[0] < a[0] + a[2]
+                  and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+                  for a in _rects for b in _rects),
+          "aucune case n'en chevauche une autre")
+    _again = _mosaic([16 / 9] * 4 + [9 / 16] * 3 + [0.6], 1920, 1080)
+    check(_again[1] == _form, "une verticale remplacée par une verticale : la mosaïque ne bouge pas")
 
     # -- le vivier ne promet que ce qu'il sait ------------------------------
     window.set_tab(TAB_FOLDERS)
@@ -2897,9 +2946,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "le mur joue plusieurs vidéos")
     from PySide6.QtWidgets import QPushButton as _QPB
     gestes = window.wall.panes[1].bar.findChildren(_QPB)
-    check(len(gestes) == 6 and window.wall.panes[1].bar.stay is not None,
-          f"le bandeau d'un panneau pilote tout : ★ ◂ ⏯ ▸ ⤢ ⛶ et la coche "
-          f"« rester dans ce dossier » ({len(gestes)})")
+    check(len(gestes) == 7 and window.wall.panes[1].bar.stay is not None,
+          f"le bandeau d'un panneau pilote tout : ☆, « rester dans ce dossier », "
+          f"◂ ⏯ ▸ ⌸ ⊙ ({len(gestes)})")
     pane = window.wall.panes[1]
     first_video = pane.video_path
     window.wall.refill_one(1)
@@ -2948,7 +2997,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     pump(app, 0.3)
     check(window.reveal_target() == Path(window.current.path),
           "et depuis une fiche, c'est son fichier")
-    check(not window.reveal_button.isHidden(), "le bouton est là, près du titre")
+    check(not window.reveal_button.isHidden()
+          or (window.current.kind != MODE_FOLDERS and "⌸" in window.single_bar.by_glyph),
+          "le bouton est là : près du titre (dossier), dans le bandeau (vidéo)")
     window.toggle_board(True)
     pump(app, 0.2)
     check(window.reveal_button.isHidden(), "et disparaît en vue planche")
@@ -3187,9 +3238,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           and _ws.web_url("https://site.example/page", "/img/a.jpg")
           == "https://site.example/img/a.jpg",
           "une vignette « file:// » est ignorée, une vignette du site gardée")
-    check("SECRET123" not in _ws.without_key(
-        "HTTPSConnectionPool: /search.json?q=x&api_key=SECRET123&start=0", "SECRET123"),
-        "la clé SerpAPI ne paraît pas dans les messages d'erreur")
+    # SerpAPI a quitte Prisme (websearch.py) : plus de cle a cacher.
 
     # -- le journal : qui est venu, et ce qu'il a regardé --------------------
     from videosorter.access import Journal, describe, spell
@@ -3432,8 +3481,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(window.stack.currentIndex() == PAGE_QUIET, "le repli prend toute la fenêtre")
     check(window.windowTitle() == QUIET_TITLE,
           f"et le titre ne dit plus rien de Prisme ({window.windowTitle()!r})")
-    check(window.quiet_page.table.topLevelItemCount() >= 3,
-          "la page montre autre chose, et c'est plausible")
+    check(window.quiet_page.cover is not None and window.quiet_page.timer.isActive(),
+          "la page montre autre chose, et elle vit")
     check(all(p.player.playbackState() != p.player.PlaybackState.PlayingState
               for p in window.wall.panes),
           "rien ne joue plus — ni image figée, ni son qui continue")
@@ -3482,11 +3531,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           "le bandeau du lecteur de côté flotte au-dessus de l'image")
     check(window.aside_bar.parent() is window or window.aside_bar.isWindow(),
           "c'est une fenêtre à part — la seule chose qui passe devant la vidéo")
-    check(window.aside_bar.buttons.count() == 6,
-          f"il porte ses cinq gestes, précédente et pause compris "
+    check(window.aside_bar.buttons.count() == 7,
+          f"☆, « rester dans ce dossier », ◂ ⏯ ▸ ⛶ ✕ "
           f"({window.aside_bar.buttons.count()})")
-    check(window.single_bar.buttons.count() == 6,
-          "le bandeau de la fiche aussi : la coche, ◂ ⏯ ▸ ⌸ ⛶")
+    check(window.single_bar.buttons.count() == 9,
+          "le bandeau de la fiche aussi : ☆, la durée du diaporama, « rester "
+          "dans ce dossier », ◂ ⏯ ▸ ⌸ ⧉ ⛶")
     gestes = window.aside_bar.skin.findChildren(QPushButton)
     check(gestes and all(b.width() >= 28 and b.height() >= 22 for b in gestes),
           "dont les signes ont la place de se voir")
@@ -3528,14 +3578,19 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     window.quiet_page.keyPressEvent(
         QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
     pump(app, 0.2)
-    check(window.stack.currentIndex() == depart, "Échap ramène")
+    check(window.stack.currentIndex() == PAGE_QUIET,
+          "Échap ne ramène pas : c'est la touche du réflexe")
+    window.toggle_quiet()
+    pump(app, 0.2)
+    check(window.stack.currentIndex() == depart, "Ctrl+K ramène")
     window.enter_quiet()
     pump(app, 0.2)
     window.quiet_page.leave.emit()
     pump(app, 0.2)
     check(window.stack.currentIndex() == depart, "un double-clic aussi")
-    check("Échap" in window.quiet_button.toolTip(),
-          "et le bouton dit ce qu'il fait avant qu'on le presse")
+    check("Ctrl+K" in window.quiet_button.toolTip()
+          and "Échap" not in window.quiet_button.toolTip(),
+          "et le bouton dit comment en revenir (Ctrl+K, pas Échap)")
 
     # -- l'état de la collection se lit ------------------------------------
     window._note_state(videos=106903, thumbs=41230, audited=106903)
@@ -3570,7 +3625,8 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
           and window.bottom_bar.isHidden(),
           "sur la planche : les filtres, ni titre ni commandes")
     position = next(i for i, it in enumerate(window.items)
-                    if it.kind == MODE_FOLDERS and len(it.videos) >= 2)
+                    if it.kind == MODE_FOLDERS and len(it.videos) >= 2
+                    and not it.is_tag)
     window.toggle_board(False)
     window.show_item(position)
     pump(app, 0.5)
@@ -3586,7 +3642,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     check(window.ratings.get(folder.path) > 0, "un dossier se met en favori aussi")
     window.ratings.set(folder.path, 0)
     check(window.random_here_button.text() == "Au hasard ici"
-          and window.reveal_button.text() == "Ouvrir le dossier",
+          and window.reveal_button.text() == "Explorateur",
           "de vrais boutons, qui disent ce qu'ils font")
     window.go_parent()
     pump(app, 0.3)
@@ -3712,11 +3768,12 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         pump(app, 0.3)
         window.set_wall_count(3)
         pump(app, 0.3)
-        grid = window.wall.grid
-        rows, cols = window.wall._shape
-        stretched = [c for c in range(grid.columnCount()) if grid.columnStretch(c)]
-        check(len(stretched) == cols,
-              f"trois vidéos après dix : aucune colonne fantôme ({stretched}, {cols})")
+        rects = [r for r in window.wall.rects if r]
+        width, height = window.wall.row.width(), window.wall.row.height()
+        covered = sum(w * h for _x, _y, w, h in rects)
+        check(len(rects) == 3 and covered > 0.9 * width * height,
+              f"trois vidéos après dix : elles prennent tout le mur "
+              f"({len(rects)}, {covered / max(1, width * height):.0%})")
         target = window._wall_pinned[0]
         window.open_video_path(target)
         wait_for(app, lambda: not window.scanning and window.current is not None
@@ -3724,8 +3781,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
         check(window.tab != TAB_SPLIT and not window.browsing
               and str(window.current.path) == target,
               "« sa fiche » depuis le mur : la fiche de toujours, au niveau fichier")
-        check(not window.stars.isHidden() and not window.bottom_bar.isHidden(),
-              "avec ses étoiles et ses commandes")
+        check(window.stars.isHidden() and hasattr(window.single_bar, "star_button")
+              and not window.bottom_bar.isHidden(),
+              "avec son ☆ dans le bandeau survolé, et ses commandes")
     tab_click(TAB_FOLDERS)
 
     print("\n[80] La sélection en mur ou en playlist, un menu rangé")
@@ -3758,8 +3816,9 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
             window.board.picked_ids.add(item.item_id)
         window.wall_picked()
         pump(app, 0.4)
-        check(window.tab == TAB_SPLIT and window.wall._shape == (1, 3),
-              f"« Mur » : trois vidéos choisies, sur une seule ligne "
+        shown = [r for r in window.wall.rects if r]
+        check(window.tab == TAB_SPLIT and len(shown) == 3,
+              f"« Mur » : les trois vidéos choisies, ensemble "
               f"({window.wall._shape})")
     tab_click(TAB_FOLDERS)
 
@@ -3859,7 +3918,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
 
     def sheet_state():
         return (window.tab != TAB_SPLIT, not window.browsing, window._one_line,
-                not window.bottom_bar.isHidden(), not window.stars.isHidden(),
+                not window.bottom_bar.isHidden(), window.stars.isHidden(),
                 window.controls.isHidden(),
                 window.viewer.currentWidget() is window.single)
 
@@ -3905,9 +3964,10 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     from videosorter.header import TAB_FAVS
     from videosorter.window import MainWindow as _MW
     tab_click(TAB_FOLDERS)
-    folder = next(i for i in window.items if i.kind == MODE_FOLDERS)
+    folder = next(i for i in window.items if i.kind == MODE_FOLDERS
+                  and not i.is_tag)
     window.ratings.set(folder.path, 0)
-    window.on_board_open(window.items.index(folder))
+    open_sheet(window, window.items.index(folder))
     pump(app, 0.3)
     window.stars.click()
     video = None
@@ -3939,8 +3999,7 @@ def check_new_features(app, window, base, root, flat, tri) -> None:
     tab_click(TAB_FAVS)
     spot = next(i for i, item in enumerate(window.items)
                 if str(item.path) == str(folder.path))
-    window.on_board_open(spot)
-    window.enter_current()
+    window.on_board_click(spot)         # un clic sur un dossier y entre
     wait_for(app, lambda: not window.scanning, 60)
     window.show_board_at(0)
     window.go_parent()
@@ -4822,11 +4881,11 @@ def check_board_wall(app, window, base, root) -> None:
     pump(app, 0.1)
     check(window.stack.currentIndex() == PAGE_QUIET,
           "F5 ne fait plus réapparaître Prisme")
-    area = window.quiet_page.table.viewport()
+    area = window.quiet_page.cover
     QTest.mouseDClick(area, Qt.LeftButton, Qt.NoModifier, area.rect().center())
     pump(app, 0.2)
     check(window.stack.currentIndex() == depart,
-          "un double-clic au milieu du tableau ramène, comme annoncé")
+          "un double-clic au milieu de l'écran ramène, comme annoncé")
 
     # -- les mots frequents : le fil se libere une fois fini
     from videosorter.tagging import TagsThread
@@ -4904,7 +4963,7 @@ def check_wiring(app, window, base, root) -> None:
 
     # -- les filtres suivent ce que montre la liste -------------------------
     leaf = next(i for i in window.items if i.kind == MODE_FOLDERS
-                and not i.subdir_count and i.video_count)
+                and not i.subdir_count and i.video_count and not i.is_tag)
     window.jump_to(str(leaf.path))
     wait_for(app, lambda: not window.scanning, 60)
     pump(app, 0.2)
@@ -5458,8 +5517,8 @@ def check_fluidity(app, window, base, root) -> None:
               "il attend un clic : sur le bandeau, ou dans « ⋯ › Doublons »")
         window.show_found_dupes()
         check(window._transient == "dupes" and len(window.items) == 2
-              and not window.dupes_result_action.isVisible(),
-              "un clic l'affiche")
+              and window.dupes_result_action.isVisible(),
+              "un clic l'affiche, et le résultat reste à portée")
         window.sort_mode = "random"
         window.apply_sort()
         groups = [getattr(item, "dupe_group", -1) for item in window.items]
@@ -5598,7 +5657,7 @@ def check_navigation(app, window, base) -> None:
 
     # -- Echap et Ctrl+↑ : comme le bouton ↑, jamais l'accueil ---------------
     home()
-    window.on_board_open(at("Trois"))
+    open_sheet(window, at("Trois"))
     pump(app, 0.2)
     _key(Qt.Key_Up, Qt.ControlModifier)
     pump(app, 0.2)
@@ -5678,7 +5737,7 @@ def check_navigation(app, window, base) -> None:
     steps = []
     kept_step = window.step
     window.step = lambda delta: steps.append(delta)
-    window.on_board_open(at("Feuille"))
+    open_sheet(window, at("Feuille"))
     _key(Qt.Key_Right)
     _key(Qt.Key_Left)
     del window.step
@@ -5857,15 +5916,14 @@ def check_quiet_and_header(app, window, base, root) -> None:
     pump(app, 0.2)
     kept_root, kept_levels = window.root, list(window.levels)
     window.enter_quiet()
-    QApplication.sendEvent(window.quiet_page, QKeyEvent(
-        QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+    window.toggle_quiet()                  # Ctrl+K : Echap n'en sort plus
     for _ in range(5):
         QApplication.sendEvent(window, QKeyEvent(
             QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier, "", True))
     pump(app, 0.2)
     check(window.stack.currentIndex() == PAGE_SORT and window.root == kept_root
           and window.levels == kept_levels,
-          "Échap maintenu ramène, sans remonter ensuite de dossier en dossier")
+          "Échap maintenu après le retour ne remonte pas de dossier en dossier")
     QApplication.sendEvent(window, QKeyEvent(
         QEvent.KeyRelease, Qt.Key_Escape, Qt.NoModifier))
 
@@ -6022,8 +6080,8 @@ def check_quiet_and_header(app, window, base, root) -> None:
     order = [row.itemAt(n).widget().text() for n in range(row.count())
              if row.itemAt(n).widget() is not None and row.itemAt(n).widget().text()]
     check(window.picked_delete.objectName() == "danger"
-          and order[-1] == "Supprimer" and order[-2] == "Annuler",
-          f"« Supprimer » en rouge, en dernier, à l'écart d'« Annuler » ({order})")
+          and order[-1] == "Suppr" and order[-2] == "Décocher",
+          f"« Supprimer » en rouge, en dernier, à l'écart de « Décocher » ({order})")
     check(window.minimumSize().width() <= 640,
           f"la fenêtre peut descendre à {window.minimumSize().width()} points")
     window.set_tab(TAB_SPLIT)
@@ -6267,7 +6325,7 @@ def check_chosen_features(app, window, base, tri) -> None:
     check(len(seen) == 4 and len(set(seen)) == 4,
           f"Ctrl+H ne remontre pas une vidéo déjà tirée ({len(set(seen))}/4)")
 
-    print("\n[104] Le mur : ⤢ puis Échap y ramène")
+    print("\n[104] Le mur : F puis Échap y ramène")
     orientation = window.cfg["wall_orientation"]
     window.set_tab(TAB_SPLIT)
     window.set_wall_orientation("any")
@@ -6280,7 +6338,7 @@ def check_chosen_features(app, window, base, tri) -> None:
         pump(app, 0.2)
         check(window.tab == TAB_FOLDERS and not window.browsing
               and str(window.current.path) == shown[0],
-              "⤢ ouvre la fiche de la vidéo")
+              "F ouvre la fiche de la vidéo")
         QTest.keyClick(window, Qt.Key_Escape)
         wait_for(app, lambda: [p.video_path for p in window.wall.panes] == shown, 10)
         check(window.tab == TAB_SPLIT
@@ -6763,8 +6821,10 @@ def check_review_fixes(app, window, base, root, tri) -> None:
     QApplication.sendEvent(window.quiet_page, _QKE(_QE.KeyPress, Qt.Key_Escape,
                                                    Qt.NoModifier))
     pump(app, 0.2)
-    check(held and window.stack.currentIndex() != _QUIET,
-          "Échap encore tenu ne fait pas ressortir du repli ; un nouvel appui, si")
+    check(held and window.stack.currentIndex() == _QUIET,
+          "Échap ne fait pas ressortir du repli, tenu ou non : la touche du réflexe")
+    window.leave_quiet()
+    pump(app, 0.2)
     import subprocess as _sp
     probe_env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
     loaded = _sp.run(
@@ -6944,11 +7004,12 @@ def check_reported_fixes(app, window, base, tri) -> None:
         QTest.keyClick(window._rename_field, Qt.Key_Return)
     settle(app, window)
     moved = shelf / "Album bis"
-    check(moved.is_dir() and not (shelf / "Album").exists()
-          and Path(album.path) == moved
-          and all(Path(v).parent == moved for v in album.videos)
-          and window.ratings.get(moved / "Album_0.mp4") == 1,
-          "F2 sur un dossier : renommé, ses vidéos et leur favori suivent")
+    parts = (moved.is_dir(), not (shelf / "Album").exists(),
+             Path(album.path) == moved,
+             all(Path(v).parent == moved for v in album.videos),
+             window.ratings.get(moved / "Album_0.mp4") == 1)
+    check(all(parts),
+          f"F2 sur un dossier : renommé, ses vidéos et leur favori suivent {parts}")
     QTest.keyClick(window, Qt.Key_Z, Qt.ControlModifier)
     settle(app, window)
     check((shelf / "Album").is_dir() and not moved.exists()
@@ -7208,7 +7269,8 @@ def main() -> int:
 
     # ------------------------------------------------------------- actions
     print("\n[3] Déplacement par touche")
-    window.show_item(0)
+    start = first_untouched(window)
+    window.show_item(start)
     first = window.current
     first_name = first.name
     QTest.keyClick(window, Qt.Key_6)
@@ -7217,7 +7279,7 @@ def main() -> int:
     check(moved.exists(), f"« {first_name} » déplacé dans tri/2019")
     check(not (root / first_name).exists(), "supprimé de la racine")
     check(window.stats["moved"] == 1, "compteur de déplacements incrémenté")
-    check(window.index == 1, "passage automatique à l'élément suivant")
+    check(window.index == start + 1, "passage automatique à l'élément suivant")
 
     print("\n[4] Annulation (Ctrl+Z)")
     QTest.keyClick(window, Qt.Key_Z, Qt.ControlModifier)

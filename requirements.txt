@@ -4,3 +4,5 @@ requests>=2.31
 beautifulsoup4>=4.12
 rapidfuzz>=3.0
 segno>=1.6
+yt-dlp>=2025.1
+truststore>=0.10

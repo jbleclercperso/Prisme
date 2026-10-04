@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from PySide6.QtCore import QByteArray, QRectF, QSize, Qt
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 from .icons_data import SVG
@@ -25,6 +25,11 @@ GLYPHS = {
     "◂": "chevron-left", "▸": "chevron-right", "⛶": "maximize",
     "✕": "x", "⚄": "dices", "⤢": "external-link", "⌸": "folder-open",
     "−": "minus", "+": "plus", "⋯": "ellipsis", "⏯": "pause",
+    "⧉": "picture-in-picture-2", "↩": "undo-2", "⏪": "rewind", "⏩": "fast-forward",
+    # Un signe = un geste : ⛶ ne veut plus dire que « plein ecran ».
+    "⊙": "focus",              # cette video seule, sur tout le mur
+    "⏏": "app-window",         # revenir dans Prisme (le lecteur flottant)
+    "⤮": "shuffle",            # une autre, au hasard (le mur)
 }
 
 
@@ -58,11 +63,35 @@ def icon(name: str, color: str = INK, stroke: float = 2.0) -> QIcon:
 
 
 @lru_cache(maxsize=16)
-def filled(name: str, color: str) -> QIcon:
-    """L'icone remplie de sa couleur : l'etoile doree d'un favori."""
+def lettered(name: str, color: str, letter: str) -> QIcon:
+    """L'icone avec une lettre posee en haut a gauche : « ⧉ A », le lecteur
+    flottant **automatique**, qu'on ne confond plus avec « ouvrir le
+    flottant maintenant »."""
     result = QIcon()
     for px in (24, 48, 64):
-        result.addPixmap(_pixmap(name, color, px, 2.0, color), QIcon.Normal)
+        pixmap = _pixmap(name, color, px, 2.0)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        font = QFont()
+        font.setBold(True)
+        font.setPixelSize(max(7, int(px * 0.42)))
+        painter.setFont(font)
+        painter.setPen(QColor(color))
+        painter.drawText(QRectF(px * 0.13, px * 0.17, px * 0.42, px * 0.42),
+                         Qt.AlignCenter, letter)
+        painter.end()
+        result.addPixmap(pixmap, QIcon.Normal)
+    return result
+
+
+@lru_cache(maxsize=16)
+def filled(name: str, color: str, line: str = "") -> QIcon:
+    """L'icone remplie de sa couleur : l'etoile doree d'un favori. `line` :
+    ses traits d'une autre couleur, pour qu'un dessin interieur (le cadenas
+    du dossier) reste lisible sur le plein."""
+    result = QIcon()
+    for px in (24, 48, 64):
+        result.addPixmap(_pixmap(name, line or color, px, 2.0, color), QIcon.Normal)
     return result
 
 

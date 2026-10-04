@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 from . import config
@@ -425,5 +426,99 @@ class LookMemo:
         return True
 
 
+class FoundDupes:
+    """Le dernier resultat d'une recherche de doublons, retenu sur le disque.
+
+    Il ne vivait qu'en memoire : quatre mille paires trouvees au bout de
+    trois heures disparaissaient a la fermeture de Prisme, et l'entree
+    « Afficher les doublons trouvés » avec elles -- il ne restait qu'a tout
+    relancer. Il est ecrit a chaque etape (pendant les empreintes) et a la
+    fin, puis relu au lancement : l'entree revient telle qu'on l'a laissee.
+
+    Ce ne sont que des chemins et ce qu'on en savait : rien n'y decide de ce
+    qui sera supprime. A l'affichage, ce qui a ete ecarte, range ou declare
+    « pas des doublons » depuis en est retire, comme pour un resultat frais.
+    Chez soi, comme les « pas des doublons » : un cache partage servirait
+    les doublons d'une machine a l'autre.
+    """
+
+    FILE = "doublons-trouves.json"
+
+    def __init__(self, path: Path | None = None):
+        self._path = Path(path) if path else None
+
+    @property
+    def path(self) -> Path:
+        return self._path or (config.PRIVATE_DIR / self.FILE)
+
+    def save(self, groups: list, by_image: bool, partial: bool = False,
+             root: str = "") -> bool:
+        """Ecrit ce resultat a la place du precedent. Faux si le disque refuse."""
+        out = []
+        for group in groups:
+            _each, paths = group
+            paths = [str(path) for path in paths]
+            count = len(paths)
+            if count < 2:
+                continue
+            sizes = list(getattr(group, "sizes", None) or [0] * count)
+            durations = list(getattr(group, "durations", None) or [0.0] * count)
+            out.append({"paths": paths,
+                        "sizes": [int(size or 0) for size in sizes],
+                        "durations": [round(float(d or 0.0), 3) for d in durations],
+                        "sure": bool(getattr(group, "sure", True))})
+        data = {"version": 1, "by_image": bool(by_image), "partial": bool(partial),
+                "root": str(root or ""), "saved_at": time.time(), "groups": out}
+        try:
+            _write_json(self.path, data)
+            return True
+        except OSError:
+            return False
+
+    def clear(self) -> None:
+        """« Aucun doublon » : le verdict complet remplace l'ancien resultat.
+        Le fichier est reecrit vide, jamais efface."""
+        if self.path.exists():
+            self.save([], False)
+
+    def load(self):
+        """(groupes, par image, partiel) du dernier resultat, ou None.
+
+        Les groupes reviennent tels qu'ils avaient ete classes, le meilleur
+        exemplaire en tete. Un fichier abime est mis de cote, jamais efface.
+        """
+        text = config._read_text(self.path)
+        if not isinstance(text, str):
+            return None
+        raw = config._parse_object(text)
+        if raw is None:
+            config._set_aside(self.path)
+            return None
+        from .dupes import DupeGroup
+        groups = []
+        for entry in raw.get("groups") or []:
+            if not isinstance(entry, dict):
+                continue
+            paths = [str(path) for path in entry.get("paths") or [] if path]
+            count = len(paths)
+            if count < 2:
+                continue
+            sizes = entry.get("sizes") or []
+            durations = entry.get("durations") or []
+            try:
+                groups.append(DupeGroup(
+                    paths,
+                    sizes if len(sizes) == count else None,
+                    durations if len(durations) == count else None,
+                    sure=bool(entry.get("sure", False)), ranked=True))
+            except (TypeError, ValueError):
+                continue
+        if not groups:
+            return None
+        return groups, bool(raw.get("by_image", True)), bool(raw.get("partial"))
+
+
 # La memoire des faux doublons, unique pour toute l'application.
 NOT_DUPES = NotDupes()
+# Le dernier resultat de recherche, pour le retrouver apres une relance.
+FOUND_DUPES = FoundDupes()

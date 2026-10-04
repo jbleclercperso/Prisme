@@ -57,7 +57,8 @@ def _walk(root, skip_hidden: bool = True, should_stop=None, on_count=None):
     nombre de videos deja vues, au plus trois fois par seconde : sans lui,
     l'attente du recensement ne se voyait pas.
     """
-    stack = [str(root)]
+    from . import roots
+    stack = roots.starts(root)
     seen = 0
     last = time.monotonic()
     while stack:
@@ -1318,6 +1319,28 @@ def group_by_signature(entries: list, close: int = CLOSE, agree: int = AGREE,
         return []
 
 
+def _same_stamp(held: str, base: str) -> bool:
+    """Vrai si deux « date|taille » designent le meme etat du fichier.
+
+    Meme taille, et des dates a deux secondes pres -- ou a une heure tout
+    rond : un disque FAT ou exFAT, et certains NAS, rendent l'heure locale
+    a deux secondes pres, decalee d'une heure au changement d'heure. Exiger
+    l'egalite exacte faisait refaire toutes les empreintes d'un tel disque
+    pour des fichiers qui n'avaient pas bouge.
+    """
+    if held == base:
+        return True
+    try:
+        held_time, held_size = held.split("|")
+        base_time, base_size = base.split("|")
+        if int(held_size) != int(base_size):
+            return False
+        gap = abs(int(held_time) - int(base_time))
+    except ValueError:
+        return False
+    return gap <= 2 or abs(gap - 3600) <= 2
+
+
 def sig_current(path, base: str) -> bool:
     """Vrai si l'empreinte retenue vaut encore pour ce fichier.
 
@@ -1336,10 +1359,20 @@ def sig_current(path, base: str) -> bool:
     # valeurs ne sont relues que pour une ancienne empreinte a juger.
     stamp = INDEX.sig_stamp(path)
     if stamp is None:
-        return False
+        # Peut-etre retenue sous une autre ecriture du meme chemin (casse,
+        # lettre de lecteur au lieu du nom reseau) : c'est le meme fichier.
+        other = INDEX.sig_spelling(path)
+        if other is None:
+            return False
+        path, stamp = other, INDEX.sig_stamp(other)
+        if stamp is None:
+            return False
     if stamp == f"{base}|{SIG_METHOD}":
         return True
-    if stamp != base or len(INDEX.sig_of(path)) < AGREE:
+    held, _bar, method = stamp.rpartition("|") if stamp.count("|") >= 2 else (stamp, "", "")
+    if method == SIG_METHOD and _same_stamp(held, base):
+        return True
+    if method or not _same_stamp(stamp, base) or len(INDEX.sig_of(path)) < AGREE:
         return False
     duration = float((INDEX.probe(path) or {}).get("duration") or 0.0)
     return not pick_moments(INDEX.scenes_of(path), duration, SHOTS)
@@ -1494,9 +1527,11 @@ class SignatureGroupScan(QThread):
             # Un instantane lu d'un bloc dans la base : les fils d'empreintes
             # peuvent ecrire dans la table pendant qu'on la parcourt, et ce
             # qui dort dans une corbeille n'y figure deja plus.
+            from . import roots
+            tops = [str(m) for m in roots.members(self.root)] if self.root else []
             entries = [(path, values, size)
                        for path, values, size in INDEX.all_sigs()
-                       if not self.root or _inside(path, self.root)]
+                       if not tops or any(_inside(path, top) for top in tops)]
         self.examined = len(entries)
         self.progress.emit(0)
         groups = group_by_signature(

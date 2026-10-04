@@ -173,7 +173,8 @@ def _forget(src: Path, target: Path) -> None:
             key = str(folder)
             if key not in done:
                 done.add(key)
-                INDEX.forget(folder)
+                # Toujours la : sa fiche reste, a relire.
+                INDEX.forget(folder, keep=True)
     INDEX.forget(src)
     # Le fichier change de place : l'empreinte retenue pour lui ne vaut plus.
     forget_stamp(src)

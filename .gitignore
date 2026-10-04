@@ -3,3 +3,15 @@ __pycache__/
 build/
 dist/
 *.spec
+
+# fichiers de travail, journaux
+*.log
+1/
+Prisme/
+SERSJBWAT*
+publication.txt
+# autres projets ranges dans ce dossier (hors Prisme)
+ConchyPro/
+site-a-reporter/
+site-a-reporter.zip
+reparateur/

@@ -5,25 +5,30 @@ import os
 import time
 from pathlib import Path
 
+from collections import OrderedDict
+
 from PySide6.QtCore import (
-    QPoint, QPointF, QRect, QSize, QThread, QTimer, QUrl, Qt, Signal,
+    QEvent, QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, QThread,
+    QThreadPool, QTimer, QUrl, Qt, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QCursor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen,
-    QPixmap, QPolygonF, QRegion,
+    QColor, QCursor, QGuiApplication, QIcon, QImage, QImageReader, QPainter,
+    QPainterPath, QPen, QPixmap, QPolygonF, QRegion,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout,
-    QListView, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy,
+    QLineEdit, QListView, QListWidget, QListWidgetItem, QMessageBox,
+    QPlainTextEdit, QPushButton, QSizePolicy,
     QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .actions import ActionError
+from .floatguard import FloatGuard, GuardedLabel, GuardedWidget
 from .icons import GLYPHS, dress, filled, icon
-from .config import KEY_ORDER, RESERVED_KEYS
+from .config import KEY_ORDER, RESERVED_KEYS, is_photo
 from .scan import human_duration, human_resolution
 
 GRID_COLUMNS = 5
@@ -54,6 +59,11 @@ QPushButton#paneGesture:checked { background: #1d2a40; border-color: #4c8dff; }
    suivante apres ★ » en marche ou non. Le cadre des gestes coches. */
 QMenu::icon:checked { background: #1d2a40; border: 1px solid #4c8dff;
                       border-radius: 3px; }
+/* Le menu ⌂ : une case par racine, qu'on coche sans que le menu se ferme. */
+QCheckBox#rootTick { background: transparent; padding: 7px 22px 7px 12px;
+                     font-size: 13px; }
+QCheckBox#rootTick:hover { background: #1d2a40; }
+QCheckBox#rootTick:disabled { color: #6f7885; }
 QLabel#subtitle { font-size: 15px; color: #b6c0cc; }
 QLabel#counter { font-size: 13px; color: #9aa4b0; }
 QLabel#rootPath { font-size: 13px; color: #9aa4b0; }
@@ -189,9 +199,10 @@ def _within(path, target) -> bool:
 
 
 def seek_step(event, seconds: int) -> int:
-    """Convertit un cran de molette en déplacement, en millisecondes.
+    """Convertit un cran de molette en déplacement, en millisecondes : un
+    cran vers le haut avance, partout (fiche, mur, lecteurs).
 
-    Ctrl amplifie le pas pour traverser rapidement une longue vidéo.
+    Ctrl amplifie le pas, la ou Ctrl+molette ne zoome pas.
     """
     notches = event.angleDelta().y() / 120.0
     if not notches:
@@ -688,6 +699,10 @@ class PreviewGrid(QWidget):
         if not tile.video:
             self._blank()
             return
+        if is_photo(tile.video):
+            # Une photo n'a rien a lire : sa vignette est deja l'image.
+            self._blank()
+            return
         if tile.video in self.unplayable:
             self._blank()
             return
@@ -752,7 +767,8 @@ class PreviewGrid(QWidget):
 
     def wheelEvent(self, event):
         """La molette avance ou recule dans l'extrait survolé."""
-        if self.hovered_slot == -1 or not self.player.source().isValid():
+        if self.hovered_slot == -1 or not self.player.source().isValid() \
+                or is_photo(self.tiles[self.hovered_slot].video or ""):
             return super().wheelEvent(event)
         step = seek_step(event, self.scroll_seconds)
         position = max(0, self.player.position() + step)
@@ -812,43 +828,98 @@ QLabel#peekCaption { color: #e9eef4; font-size: 12px; font-weight: 600; }
 """
 
 
+_BRAND_CACHE: dict = {}
+
+
+def brand_image(name: str) -> QImage:
+    """Le logo, en image : « p » (le P prismatique) ou « lettrage » (PRISME)."""
+    image = _BRAND_CACHE.get(name)
+    if image is None:
+        from .brand_data import LETTRAGE_PNG, P_MARK_PNG
+        image = QImage.fromData(P_MARK_PNG if name == "p" else LETTRAGE_PNG, "PNG")
+        _BRAND_CACHE[name] = image
+    return image
+
+
+def brand_pixmap(name: str, height: int, ratio: float = 1.0) -> QPixmap:
+    """Le logo a cette hauteur (en points), net sur un ecran a haute densite."""
+    image = brand_image(name).scaledToHeight(max(1, round(height * ratio)),
+                                             Qt.SmoothTransformation)
+    pixmap = QPixmap.fromImage(image)
+    pixmap.setDevicePixelRatio(ratio)
+    return pixmap
+
+
+def paint_app_icon(painter: QPainter, size: int) -> None:
+    """Le P prismatique, lumineux, sur un carre sombre aux coins arrondis.
+    Sert a la fenetre, au fichier prisme.ico (`construire.py`) et a l'icone
+    de l'ecran d'accueil des telephones."""
+    from PySide6.QtGui import QLinearGradient, QPainterPath
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+    radius = size * 0.22
+    square = QRectF(0, 0, size, size)
+    shape = QPainterPath()
+    shape.addRoundedRect(square, radius, radius)
+    ground = QLinearGradient(0, 0, 0, size)
+    ground.setColorAt(0, QColor("#171a22"))
+    ground.setColorAt(1, QColor("#050608"))
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(ground)
+    painter.drawPath(shape)
+    # Le P, centre, avec sa lueur -- qui reste dans le carre.
+    painter.save()
+    painter.setClipPath(shape)
+    mark = brand_image("p")
+    side = size * (0.80 if size >= 48 else 0.92)     # petit : le P prend toute la place
+    scaled = mark.scaled(round(side), round(side), Qt.KeepAspectRatio,
+                         Qt.SmoothTransformation)
+    painter.drawImage(QPointF((size - scaled.width()) / 2, (size - scaled.height()) / 2),
+                      scaled)
+    painter.restore()
+    if size >= 32:
+        # Un liseré a peine visible : le carre se detache d'un fond sombre.
+        painter.setPen(QPen(QColor(255, 255, 255, 28), max(1.0, size / 128)))
+        painter.setBrush(Qt.NoBrush)
+        inset = max(0.5, size / 256)
+        painter.drawRoundedRect(square.adjusted(inset, inset, -inset, -inset), radius, radius)
+
+
+def app_icon_pngs(sizes=(180, 192, 512)) -> dict:
+    """L'icone en PNG, pour l'application posee sur l'ecran d'accueil d'un
+    telephone. A faire sur le fil de l'interface (polices, peinture)."""
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+    found = {}
+    for px in sizes:
+        image = QImage(px, px, QImage.Format_ARGB32)
+        image.fill(Qt.transparent)
+        painter = QPainter(image)
+        paint_app_icon(painter, px)
+        painter.end()
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.WriteOnly)
+        image.save(buffer, "PNG")
+        buffer.close()
+        found[px] = bytes(data)
+    return found
+
+
 def app_icon(size: int = 256) -> QIcon:
-    """Le prisme : un rai entre, un triangle le decompose, trois rais sortent.
+    """L'icone de Prisme, dessinee a chaque taille que Windows demande.
 
     Dessinee plutot que chargee : pas de fichier a livrer, et l'icone reste
-    nette a toutes les tailles que Windows demande.
+    nette de la barre des taches au bureau.
     """
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    s = size / 64.0
-
-    # Le fond : un carre sombre aux coins arrondis, comme les autres icones
-    # de la barre des taches.
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("#11151b"))
-    painter.drawRoundedRect(0, 0, size, size, 12 * s, 12 * s)
-
-    # Le rai qui entre, blanc, par la gauche.
-    painter.setPen(QPen(QColor("#e9eef4"), 3 * s, Qt.SolidLine, Qt.RoundCap))
-    painter.drawLine(int(6 * s), int(30 * s), int(24 * s), int(30 * s))
-
-    # Les trois rais qui sortent, ecartes en eventail.
-    for color, dy in (("#e2645c", -9), ("#d8c05a", 0), ("#5aa9d8", 9)):
-        painter.setPen(QPen(QColor(color), 3 * s, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(int(40 * s), int(32 * s),
-                         int(58 * s), int((36 + dy) * s))
-
-    # Le prisme lui-meme : un triangle clair, pose sur la pointe du haut.
-    triangle = QPolygonF([QPointF(32 * s, 12 * s), QPointF(48 * s, 46 * s),
-                          QPointF(16 * s, 46 * s)])
-    painter.setPen(QPen(QColor("#8b94a1"), 2.5 * s, Qt.SolidLine,
-                        Qt.SquareCap, Qt.RoundJoin))
-    painter.setBrush(QColor(233, 238, 244, 26))
-    painter.drawPolygon(triangle)
-    painter.end()
-    return QIcon(pixmap)
+    result = QIcon()
+    for px in sorted({16, 24, 32, 48, 64, 128, int(size)}):
+        pixmap = QPixmap(px, px)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        paint_app_icon(painter, px)
+        painter.end()
+        result.addPixmap(pixmap)
+    return result
 
 
 def draw_icon(kind: str, on: bool = True, size: int = 20,
@@ -1035,14 +1106,97 @@ QFrame#overDone { background: #e9eef4; border-radius: 2px; }
 QPushButton#overGesture { background: transparent; border: 0; padding: 0;
                           color: #dbe2ea; font-size: 20px; }
 QPushButton#overGesture:hover { color: #ffffff; }
-QCheckBox#overStay { background: transparent; spacing: 0; padding: 0 6px; }
-QCheckBox#overStay::indicator { width: 18px; height: 18px; border-radius: 4px;
-                                border: 2px solid #dbe2ea; background: transparent; }
-QCheckBox#overStay::indicator:checked { background: #2f6fed; border-color: #2f6fed; }
+QPushButton#overStay { background: transparent; border: 0; padding: 0; }
+QPushButton#overStay:hover { background: rgba(255,255,255,0.08); border-radius: 5px; }
+QLabel#overSpeed { color: rgba(255,255,255,0.78); font-size: 12px; font-weight: 600;
+                   padding: 0 6px; border-radius: 5px; }
+QLabel#overSpeed:hover { background: rgba(255,255,255,0.10); color: #ffffff; }
 """
 
+# « Rester dans ce dossier » : un dossier verrouille, gris quand il dort, dore
+# quand il vaut. La case pleine de bleu pesait plus lourd que tous les gestes.
+STAY_ON = "#f5c542"
 
-class PlayMarks(QWidget):
+
+class StayCheck(QPushButton):
+    """« Rester dans ce dossier », qu'on allume ou eteint d'un clic (API d'une
+    case : `isChecked`, `setChecked`, `toggled`). Un dossier verrouille, dore
+    quand il vaut : une coche grise, a cote de l'etoile, se lisait « vu »."""
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setObjectName("overStay")
+        self.setCheckable(True)
+        self.setFixedSize(28, 28)
+        self.setIconSize(QSize(18, 18))
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setCursor(Qt.PointingHandCursor)
+        self.toggled.connect(self._dress)
+        self._dress(False)
+
+    def setChecked(self, on: bool) -> None:          # noqa: N802  (API Qt)
+        # Cochee d'ailleurs, signaux bloques (l'autre bandeau, le menu) :
+        # `toggled` ne part pas, et le dessin restait celui d'avant.
+        super().setChecked(on)
+        self._dress(bool(on))
+
+    def _dress(self, on: bool) -> None:
+        # Comme l'etoile : au repos, le trait blanc des autres gestes ;
+        # allume, plein et colore. Grise au repos, on la croyait desactivee.
+        self.setIcon(filled("folder-lock", STAY_ON, "#14161a") if on
+                     else icon("folder-lock"))
+
+
+SIMILAR_ON = "#b99cff"
+ULTRA_ON = "#ff9b3d"
+
+
+class UltraCheck(StayCheck):
+    """L'ultra tri : clic gauche, on garde ; clic droit, on supprime."""
+
+    def _dress(self, on: bool) -> None:
+        self.setIcon(filled("zap", ULTRA_ON) if on else icon("zap"))
+
+
+class SimilarCheck(StayCheck):
+    """« Que des vidéos qui ressemblent à celle-ci » : allumee, ▸ et Espace
+    ne proposent plus que ses voisines (similar.py)."""
+
+    def _dress(self, on: bool) -> None:
+        self.setIcon(filled("sparkles", SIMILAR_ON) if on else icon("sparkles"))
+
+
+class SpeedDial(QLabel):
+    """La duree du diaporama, dans le bandeau : « 6 s ». La molette dessus
+    l'allonge ou la raccourcit d'une seconde a chaque cran."""
+
+    turned = Signal(int)          # +1 ou -1 seconde
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setObjectName("overSpeed")
+        self.setCursor(Qt.SizeVerCursor)
+        self.setToolTip("Durée de chaque photo au diaporama.\n"
+                        "Molette dessus : une seconde de plus ou de moins.")
+        self._rest = 0
+
+    def set_seconds(self, seconds: int) -> None:
+        # Sans signe : ceux de la police de Windows n'etaient que des
+        # poussieres a douze points (voir icons.py).
+        self.setText(f"{int(seconds)} s")
+
+    def wheelEvent(self, event):
+        # Un cran de molette vaut 120 ; un pave tactile en envoie des
+        # fractions, qu'on cumule pour ne pas sauter de dix secondes.
+        self._rest += event.angleDelta().y()
+        while abs(self._rest) >= 120:
+            step = 1 if self._rest > 0 else -1
+            self._rest -= 120 * step
+            self.turned.emit(step)
+        event.accept()
+
+
+class PlayMarks(FloatGuard, QWidget):
     """Ou en est la lecture, pose **sur** l'image : un trait tres fin tout en
     bas, et, si on le demande, le temps restant en haut a droite.
 
@@ -1066,7 +1220,16 @@ class PlayMarks(QWidget):
         self.with_left = left
         self.fraction = 0.0
         self._target = None
-        self.left = QLabel("", parent, flags)
+        self._time = ""
+        # En favori : une petite etoile doree dans la pastille, au repos. Le
+        # bandeau survole a la sienne ; sans lui, on ne le voyait plus.
+        self.favorite = False
+        # Cache par le lecteur (souris sur l'image) : seul `place_on` le
+        # fait revenir. Le temps restant changeait chaque seconde et le
+        # remontrait au-dessus du bandeau, jusqu'au controle suivant 120 ms
+        # plus tard -- la barre fantome qui clignotait sous la barre de lecture.
+        self._held = True
+        self.left = GuardedLabel("", parent, flags)
         self.left.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.left.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.left.setStyleSheet(
@@ -1085,6 +1248,7 @@ class PlayMarks(QWidget):
 
     def setVisible(self, visible: bool) -> None:
         super().setVisible(visible)
+        self._held = not visible
         if not visible:
             self.left.hide()
 
@@ -1094,16 +1258,30 @@ class PlayMarks(QWidget):
                     if duration > 0 else 0.0)
         text = (f"−{human_duration(max(0, duration - position) / 1000.0)}"
                 if duration > 0 else "")
-        changed_text = text != self.left.text()
-        self.left.setText(text)
+        changed_text = text != self._time
+        self._time = text
         if int(fraction * 1000) != int(self.fraction * 1000):
             self.fraction = fraction
             self.update()
         if changed_text:
             self._lay_out()
 
+    def set_favorite(self, on: bool) -> None:
+        on = bool(on)
+        if on != self.favorite:
+            self.favorite = on
+            self._lay_out()
+
+    def _chip_text(self) -> str:
+        star = '<span style="color:#f5c542">★</span>'
+        time_text = self._time if self.with_left else ""
+        if self.favorite:
+            return f"{star}&nbsp;{time_text}" if time_text else star
+        return time_text
+
     def clear(self) -> None:
         self.fraction = 0.0
+        self._time = ""
         self.left.setText("")
         self._target = None
         self.hide()
@@ -1116,11 +1294,12 @@ class PlayMarks(QWidget):
         rect = widget.rect() if rect is None else rect
         corner = widget.mapToGlobal(rect.topLeft())
         self._target = QRect(corner.x(), corner.y(), rect.width(), rect.height())
+        self._held = False
         self._lay_out()
 
     def _lay_out(self) -> None:
         target = self._target
-        if target is None:
+        if target is None or self._held:
             return
         if self.with_rail:
             wanted = QRect(target.x(), target.bottom() - self.RAIL + 1,
@@ -1135,7 +1314,10 @@ class PlayMarks(QWidget):
         else:
             super().setVisible(False)
         chip = self.left
-        if self.with_left and chip.text():
+        text = self._chip_text()
+        if chip.text() != text:
+            chip.setText(text)
+        if text:
             chip.adjustSize()
             spot = QPoint(target.right() - chip.width() - 7, target.y() + 7)
             if chip.pos() != spot:
@@ -1147,7 +1329,133 @@ class PlayMarks(QWidget):
             chip.hide()
 
 
-class OverBar(QWidget):
+class _ScrubSignals(QObject):
+    ready = Signal(str, float, str)       # video, instant, image (ou "")
+
+
+class _ScrubJob(QRunnable):
+    """Une image a cet instant, hors du fil de l'interface (ffmpeg)."""
+
+    def __init__(self, signals, video: str, ts: float, width: int):
+        super().__init__()
+        self.signals, self.video, self.ts, self.width = signals, video, ts, width
+
+    def run(self):
+        from .media import extract_thumb
+        try:
+            found = extract_thumb(Path(self.video), self.ts, self.width)
+        except Exception:                             # noqa: BLE001
+            found = None
+        try:
+            self.signals.ready.emit(self.video, self.ts, str(found or ""))
+        except RuntimeError:
+            pass                                      # fenetre deja fermee
+
+
+class ScrubPreview(QWidget):
+    """L'image a l'instant vise, au survol du trait d'avancement d'un bandeau
+    (comme Plex, Jellyfin ou YouTube) : on vise avant de cliquer, sans aucune
+    barre de plus. Une fenetre-outil, comme le bandeau : le widget video
+    natif passe par-dessus tout le reste.
+
+    Les images viennent du cache des vignettes ; celles qui manquent sont
+    extraites une a une, la derniere visee d'abord -- un survol rapide ne
+    lance pas cinquante ffmpeg.
+    """
+
+    WIDTH = 200
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint
+                         | Qt.WindowDoesNotAcceptFocus | Qt.WindowTransparentForInput)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setStyleSheet(
+            "QWidget#scrub { background: #0b0d10; border: 1px solid #39414d; }"
+            "QLabel#scrubImage { background: #15181d; }"
+            "QLabel#scrubTime { color: #ffffff; font-size: 12px; font-weight: 600;"
+            " background: transparent; }")
+        self.setObjectName("scrub")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(3, 3, 3, 3)
+        box.setSpacing(2)
+        self.image = QLabel(self)
+        self.image.setObjectName("scrubImage")
+        self.image.setAlignment(Qt.AlignCenter)
+        self.image.setFixedSize(self.WIDTH, int(self.WIDTH * 9 / 16))
+        box.addWidget(self.image)
+        self.time = QLabel("", self)
+        self.time.setObjectName("scrubTime")
+        self.time.setAlignment(Qt.AlignCenter)
+        box.addWidget(self.time)
+        self.signals = _ScrubSignals(self)
+        self.signals.ready.connect(self._ready)
+        self.video = ""
+        self.wanted = None            # (video, instant) vise en dernier
+        self.busy = False
+        self.hide()
+
+    @staticmethod
+    def instant(fraction: float, duration_s: float) -> float:
+        """L'instant vise, arrondi : un pas d'un centieme (2 s au moins), pour
+        que le cache serve d'un survol a l'autre."""
+        step = max(2.0, duration_s / 100.0)
+        return max(0.0, min(duration_s - 0.5, round(fraction * duration_s / step) * step))
+
+    def show_at(self, video: str, fraction: float, duration_s: float,
+                spot: QPoint, area: QRect) -> None:
+        from .media import cached_thumb
+        ts = self.instant(fraction, duration_s)
+        self.time.setText(human_duration(fraction * duration_s))
+        key = (video, ts)
+        if key != self.wanted:
+            self.wanted = key
+            found = cached_thumb(Path(video), ts, self.WIDTH) if video else None
+            if found is not None:
+                self._set_image(str(found))
+            else:
+                if video != self.video:
+                    self.image.clear()
+                self._fetch()
+        self.video = video
+        self.adjustSize()
+        x = max(area.left(), min(area.right() - self.width(), spot.x() - self.width() // 2))
+        y = spot.y() - self.height() - 6
+        if self.pos() != QPoint(x, y):
+            self.move(x, y)
+        if self.isHidden():
+            self.show()
+            self.raise_()
+
+    def _fetch(self) -> None:
+        if self.busy or self.wanted is None:
+            return
+        video, ts = self.wanted
+        self.busy = True
+        QThreadPool.globalInstance().start(
+            _ScrubJob(self.signals, video, ts, self.WIDTH))
+
+    def _set_image(self, path: str) -> None:
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            return
+        self.image.setPixmap(pixmap.scaled(self.image.size(), Qt.KeepAspectRatio,
+                                           Qt.SmoothTransformation))
+
+    def _ready(self, video: str, ts: float, path: str) -> None:
+        self.busy = False
+        if (video, ts) == self.wanted:
+            if path:
+                self._set_image(path)
+            return
+        # On a vise ailleurs entre-temps : la derniere visee, maintenant.
+        if not self.isHidden():
+            self._fetch()
+
+
+class OverBar(FloatGuard, QWidget):
     """Le bandeau d'un lecteur : posé **sur** l'image, et seulement au survol.
 
     Le widget vidéo de Windows est une fenêtre native : il se dessine
@@ -1182,6 +1490,13 @@ class OverBar(QWidget):
         self.name.setObjectName("overName")
         self.name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         top.addWidget(self.name, 1)
+        # Ou l'on en est dans la liste (« 12 / 340 »), en or : sur la fiche,
+        # on triait sans le savoir. Cache tant que personne ne le donne.
+        self.pos = QLabel("", self.skin)
+        self.pos.setStyleSheet("QLabel { color: #f5c542; font-weight: 600;"
+                               " background: transparent; }")
+        self.pos.hide()
+        top.addWidget(self.pos, 0)
         self.left = QLabel("", self.skin)
         self.left.setObjectName("overLeft")
         top.addWidget(self.left, 0)
@@ -1190,6 +1505,10 @@ class OverBar(QWidget):
         top.addLayout(self.buttons)
         box.addLayout(top)
 
+        # Les gestes qu'on peut cacher quand la place manque, du premier
+        # sacrifie au dernier (un panneau etroit du mur).
+        self.by_glyph: dict = {}
+        self.spare: list = []
         self.rail = QFrame(self.skin)
         self.rail.setObjectName("overRail")
         self.rail.setFixedHeight(self.RAIL)
@@ -1197,7 +1516,68 @@ class OverBar(QWidget):
         self.done.setObjectName("overDone")
         self.done.setGeometry(0, 0, 0, self.RAIL)
         box.addWidget(self.rail)
+        # Survoler le trait montre l'image a cet instant ; un clic y va.
+        # `scrub_source` rend (video, duree en secondes), ou None : le
+        # lecteur qui porte le bandeau le donne.
+        self.scrub_source = None
+        self.scrub = None
+        # Le trait laisse passer la souris : c'est le bandeau qui la lit.
+        self.rail.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.done.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.skin.setMouseTracking(True)
+        self.setMouseTracking(True)
+        self.skin.installEventFilter(self)
         self.hide()
+
+    seekRequested = Signal(float)            # une fraction de la duree
+
+    def _on_rail(self, pos: QPoint):
+        """La fraction visee si `pos` (coordonnees du bandeau) touche le trait
+        -- avec une marge : quatre pixels ne se visent pas."""
+        rail = self.rail.geometry()
+        if self.scrub_source is None or rail.width() <= 0:
+            return None
+        if not (rail.top() - 9 <= pos.y() <= rail.bottom() + 9):
+            return None
+        if not (rail.left() <= pos.x() <= rail.right()):
+            return None
+        return (pos.x() - rail.left()) / max(1, rail.width())
+
+    def eventFilter(self, watched, event):
+        if watched is self.skin:
+            kind = event.type()
+            if kind == QEvent.MouseMove:
+                fraction = self._on_rail(event.position().toPoint())
+                source = self.scrub_source() if fraction is not None else None
+                if source and source[1] > 0:
+                    if self.scrub is None:
+                        self.scrub = ScrubPreview(self)
+                    spot = self.skin.mapToGlobal(event.position().toPoint())
+                    top = self.mapToGlobal(QPoint(0, 0))
+                    self.scrub.show_at(source[0], fraction, source[1],
+                                       QPoint(spot.x(), top.y()),
+                                       QRect(top, self.size()))
+                    self.skin.setCursor(Qt.PointingHandCursor)
+                else:
+                    self._end_scrub()
+            elif kind == QEvent.Leave:
+                self._end_scrub()
+            elif (kind == QEvent.MouseButtonPress
+                  and event.button() == Qt.LeftButton):
+                fraction = self._on_rail(event.position().toPoint())
+                if fraction is not None:
+                    self.seekRequested.emit(max(0.0, min(1.0, fraction)))
+                    return True
+        return super().eventFilter(watched, event)
+
+    def _end_scrub(self) -> None:
+        if self.scrub is not None and not self.scrub.isHidden():
+            self.scrub.hide()
+        self.skin.unsetCursor()
+
+    def hideEvent(self, event):
+        self._end_scrub()
+        super().hideEvent(event)
 
     def add_gesture(self, glyph: str, tip: str, slot) -> None:
         """Un geste de plus. Le signe remplit le bouton : à douze points, on
@@ -1216,6 +1596,46 @@ class OverBar(QWidget):
         # le prenait pour « sortir du cinema », et le ⛶ ne faisait rien.
         button.clicked.connect(lambda _checked=False, s=slot: s())
         self.buttons.addWidget(button)
+        self.by_glyph[glyph] = button
+        if glyph == "⏯":
+            # Retenu par lui-meme, et non par sa place : la coche « rester
+            # dans ce dossier » se pose devant, et c'etait alors ◂ qui prenait
+            # l'icone lecture / pause.
+            self.pause_button = button
+        return button
+
+    def add_star(self, slot) -> QPushButton:
+        """Le favori d'un clic, juste apres le nom : vide, ou doree. Le meme
+        partout ou une video joue -- fiche, mur, lecteur de cote, lecteur
+        flottant -- pour ne pas avoir a revenir a la planche pour l'aimer."""
+        button = self.add_gesture("☆", "Mettre en favori", slot)
+        self.buttons.removeWidget(button)
+        self.buttons.insertWidget(0, button)
+        button.setIconSize(QSize(18, 18))
+        self.star_button = button
+        self.favorite = None
+        self.set_favorite(False)
+        return button
+
+    def _front(self) -> int:
+        """Ou poser ce qui va « devant les gestes » : apres l'etoile, qui
+        reste la premiere, juste a cote du nom."""
+        return 1 if hasattr(self, "star_button") else 0
+
+    def set_favorite(self, on: bool) -> None:
+        on = bool(on)
+        if getattr(self, "favorite", None) == on:
+            return
+        self.favorite = on
+        button = self.star_button
+        button.setText("")
+        button.setIcon(filled("star", GOLD) if on else icon("star"))
+        button.setToolTip("Retirer des favoris" if on else "Mettre en favori")
+
+    def set_position(self, text: str) -> None:
+        if self.pos.text() != text:
+            self.pos.setText(text)
+            self.pos.setVisible(bool(text))
 
     def set_name(self, text: str) -> None:
         self.name.setText(elide(text, 60))
@@ -1236,6 +1656,7 @@ class OverBar(QWidget):
             return self.hide()
         corner = target.mapToGlobal(QPoint(0, 0))
         width = max(180, target.width())
+        self._fit_width(width)
         height = self.sizeHint().height()
         # Colle au bas de l'image, bord a bord : pose un peu au-dessus, il
         # semblait flotter au milieu de nulle part.
@@ -1244,25 +1665,77 @@ class OverBar(QWidget):
         if self.geometry() != wanted:
             self.setGeometry(wanted)
 
+    def _fit_width(self, width: int) -> None:
+        """Trop etroit pour tous ses gestes (un panneau du mur) : il cache les
+        moins utiles, dans l'ordre de `spare`, plutot que de deborder sur le
+        panneau voisin."""
+        if not self.spare:
+            return
+        if getattr(self, "_fitted_for", None) == width:
+            return
+        self._fitted_for = width
+        def needed() -> int:
+            # Les marges du bandeau, le nom (au moins quelques lettres), le
+            # temps restant s'il est la, puis chaque geste visible.
+            shown = [self.buttons.itemAt(i).widget() for i in range(self.buttons.count())]
+            shown = [w for w in shown if w is not None and not w.isHidden()]
+            total = 20 + 60 + 8
+            if not self.left.isHidden():
+                total += self.left.sizeHint().width() + 8
+            total += sum(w.sizeHint().width() for w in shown)
+            return total + self.buttons.spacing() * max(0, len(shown) - 1)
+        for button in self.spare:
+            button.show()
+        for button in self.spare:
+            if needed() <= width:
+                break
+            button.hide()
+
     def reveal(self) -> None:
         """Se montre, et ne remonte au premier plan qu'a ce moment-la."""
         if self.isHidden():
             self.show()
             self.raise_()
 
-    def add_stay(self, tip: str, on: bool, slot) -> QCheckBox:
+    def add_stay(self, tip: str, on: bool, slot) -> "StayCheck":
         """La coche « rester dans ce dossier » : ◂ ▸ ne sortent plus du
         dossier de la video. Sans texte — elle se reconnait a sa place."""
-        box = QCheckBox(self.skin)
-        box.setObjectName("overStay")
+        box = StayCheck(self.skin)
         box.setToolTip(tip)
-        box.setFocusPolicy(Qt.NoFocus)
-        box.setCursor(Qt.PointingHandCursor)
         box.setChecked(on)
         box.toggled.connect(slot)
-        self.buttons.insertWidget(0, box)
+        self.buttons.insertWidget(self._front(), box)
         self.stay = box
         return box
+
+    def add_similar(self, tip: str, slot) -> "SimilarCheck":
+        """L'interrupteur « Similaires », a cote de « rester dans ce dossier »."""
+        box = SimilarCheck(self.skin)
+        box.setToolTip(tip)
+        box.toggled.connect(slot)
+        self.buttons.insertWidget(self._front(), box)
+        self.similar = box
+        return box
+
+    def add_ultra(self, tip: str, slot) -> "UltraCheck":
+        """L'interrupteur de l'ultra tri, devant les gestes."""
+        box = UltraCheck(self.skin)
+        box.setToolTip(tip)
+        box.toggled.connect(slot)
+        self.buttons.insertWidget(self._front(), box)
+        self.ultra = box
+        return box
+
+    def add_speed(self, seconds: int, slot) -> "SpeedDial":
+        """La duree du diaporama, reglable a la molette, devant les gestes.
+        Cachee tant qu'on ne regarde pas des photos."""
+        dial = SpeedDial(self.skin)
+        dial.set_seconds(seconds)
+        dial.turned.connect(slot)
+        self.buttons.insertWidget(self._front(), dial)
+        self.speed = dial
+        dial.hide()
+        return dial
 
 
 class PeekCell(QFrame):
@@ -1363,6 +1836,77 @@ class PeekOverlay(QWidget):
             self.cells[slot].caption.setText(text)
 
 
+class _Still(QWidget):
+    """Une photo, entiere dans son cadre. Le cadre peut deborder de la zone
+    d'image : c'est ainsi que le zoom de la fiche l'agrandit, comme la video."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.image = None
+        # Vrai : la photo remplit son cadre, quitte a en rogner les bords
+        # (le mur, en mode « tout remplir »).
+        self.fill = False
+        self.hide()
+
+    def set_image(self, image) -> None:
+        self.image = image if image is not None and not image.isNull() else None
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#000000"))
+        if self.image is not None:
+            size = self.image.size().scaled(
+                self.size(), Qt.KeepAspectRatioByExpanding if self.fill
+                else Qt.KeepAspectRatio)
+            spot = QRect(0, 0, size.width(), size.height())
+            spot.moveCenter(self.rect().center())
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            painter.drawImage(spot, self.image)
+        painter.end()
+
+
+class _StillSignals(QObject):
+    loaded = Signal(str, QImage)
+
+
+class _StillLoader(QRunnable):
+    """Lit une photo hors du fil de l'interface, deja reduite a la taille
+    de l'ecran : un JPEG de vingt megapixels lu en entier sur le NAS gelait
+    la fiche une demi-seconde."""
+
+    def __init__(self, path: str, longest: int, signals: _StillSignals):
+        super().__init__()
+        self.path = path
+        self.longest = longest
+        self.signals = signals
+
+    def run(self) -> None:
+        image = QImage()
+        try:
+            reader = QImageReader(self.path)
+            reader.setAutoTransform(True)
+            size = reader.size()
+            if size.isValid() and max(size.width(), size.height()) > self.longest:
+                reader.setScaledSize(size.scaled(self.longest, self.longest,
+                                                 Qt.KeepAspectRatio))
+            image = reader.read()
+            if image.isNull():
+                # HEIC et consorts : ffmpeg sait les lire, Qt non.
+                from . import media
+                made = media.extract_thumb(Path(self.path), 0.0,
+                                           min(self.longest, 2560))
+                if made is not None:
+                    image = QImage(str(made))
+        except Exception:                               # noqa: BLE001
+            image = QImage()
+        try:
+            self.signals.loaded.emit(self.path, image)
+        except RuntimeError:
+            pass                        # la fiche a disparu entre-temps
+
+
 class _Deck:
     """Un lecteur complet : la surface, le moteur, le son.
 
@@ -1384,6 +1928,10 @@ class _Deck:
         # lecteur qui garde son son se vide, lui, le plus souvent en une
         # quinzaine.
         self.audio = QAudioOutput(area)
+        # La bonne sortie (jamais le « mains libres » d'un casque), suivie
+        # quand elle change.
+        from .audiodev import follow
+        follow(self.audio)
         self.player = QMediaPlayer(area)
         self.player.setVideoOutput(self.video)
         self.player.setAudioOutput(self.audio)
@@ -1411,6 +1959,9 @@ class SinglePlayer(QWidget):
     # premier clic a deja mis en pause, sans attendre de savoir s'il en
     # viendrait un second ; le double-clic defait cette pause.
     cinemaRequested = Signal()
+    # ⏯, Entree ou un clic sur une photo : le diaporama demarre, ou s'arrete.
+    slideshowToggled = Signal()
+    slideshow_on = False
 
     # Cinq reperes suffisent a se reperer dans une video : un cinquieme, deux
     # cinquiemes, et ainsi de suite. Dix prenaient deux fois plus de place pour
@@ -1445,6 +1996,13 @@ class SinglePlayer(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         outer.addWidget(top, 1)
+        self._top, self._top_row = top, layout
+        # En plein ecran, la pellicule flotte sur l'image (`float_strip`).
+        self._strip_floating = False
+        self._strip_wanted = True
+        self._strip_win = None
+        self._strip_anim = None
+        self._strip_out = True
 
         # Le lecteur est posé dans un cadre qui le rogne : agrandir sa géométrie
         # au-delà du cadre produit un zoom, sans passer par une scène graphique.
@@ -1455,6 +2013,15 @@ class SinglePlayer(QWidget):
         self.decks = [_Deck(self.video_area), _Deck(self.video_area)]
         self._active = 0
         self._muted = False
+        # Les photos : une image fixe a la place des lecteurs, lue hors du
+        # fil de l'interface, et les dernieres gardees en memoire pour que
+        # ◂ ▸ soient immediats.
+        self.still = _Still(self.video_area)
+        self.still_path = ""
+        self._stills: OrderedDict = OrderedDict()
+        self._still_wanted: set = set()
+        self._still_signals = _StillSignals(self)
+        self._still_signals.loaded.connect(self._still_loaded)
         self.peek = PeekOverlay(self.video_area)
         self.peeking = False
         # Le widget video de Windows avale les clics : on lui prend ses gestes
@@ -1555,6 +2122,25 @@ class SinglePlayer(QWidget):
     def video(self):
         return self.decks[self._active].video
 
+    def scrub_source(self):
+        """(video, duree en secondes) pour l'apercu du trait, ou None."""
+        if self.still_path:
+            return None
+        deck = self.decks[self._active]
+        duration = deck.player.duration()
+        if not deck.path or duration <= 0:
+            return None
+        return deck.path, duration / 1000.0
+
+    def seek_fraction(self, fraction: float) -> None:
+        """Un clic sur le trait du bandeau : a cet endroit de la video."""
+        duration = self.player.duration()
+        if self.still_path or duration <= 0:
+            return
+        target = int(max(0.0, min(1.0, fraction)) * duration)
+        self.player.setPosition(min(target, max(0, duration - 500)))
+        self._show_position(target)
+
     @property
     def audio(self):
         return self.decks[self._active].audio
@@ -1576,6 +2162,9 @@ class SinglePlayer(QWidget):
         cents millisecondes sur le fil de l'interface, passait avant la
         peinture de la fiche, et c'etait le clic qui semblait lent.
         """
+        if is_photo(path):
+            self._load_still(path)
+            return
         spare = self.spare
         if spare.path == path:
             self._spare_wanted = ""
@@ -1664,8 +2253,11 @@ class SinglePlayer(QWidget):
         was_click = not self._scrubbing and not self._zoomed_while_held
         self._scrub_x0 = None
         self._scrubbing = False
-        self._click_paused = was_click
-        if was_click:
+        self._click_paused = was_click and not getattr(self, "ultra", None)
+        if was_click and getattr(self, "ultra", None):
+            # Ultra tri : le clic gauche garde, et passe a la suivante.
+            self.ultra("left")
+        elif was_click:
             # Un clic sans glisser : pause ou reprise, comme sur le mur. Tout
             # de suite : attendre de savoir si un second clic suit ferait
             # payer a chaque pause le delai du double-clic.
@@ -1681,6 +2273,13 @@ class SinglePlayer(QWidget):
         double-clic par defaut rappelait l'appui : la video s'arretait puis
         repartait, sans rien produire d'autre.
         """
+        if getattr(self, "ultra", None):
+            # Ultra tri : des clics rapides ne sont pas un plein ecran, chacun
+            # compte (la fenetre ecarte ceux qui viennent trop vite).
+            self._scrub_x0 = None
+            self._scrubbing = False
+            event.accept()
+            return self.ultra("left" if event.button() == Qt.LeftButton else "right")
         if event.button() != Qt.LeftButton:
             # Le clic droit garde son effet, double ou non : les destinations.
             return self.mousePressEvent(event)
@@ -1752,16 +2351,198 @@ class SinglePlayer(QWidget):
 
     def hide_strip(self) -> None:
         """Retire la pellicule : tout l'espace revient a l'image."""
+        self._strip_wanted = False
         self.strip.hide()
+        if self._strip_win is not None:
+            self._strip_win.hide()
+
+    def show_strip(self) -> None:
+        self._strip_wanted = True
+        self.strip.show()
+
+    # -- la pellicule en plein ecran : posee sur l'image, au survol ----------
+    def float_strip(self, on: bool) -> None:
+        """En plein ecran, la pellicule quitte sa colonne : l'image prend
+        toute la largeur, et les cinq instants glissent depuis la droite au
+        survol (`reveal_strip`), puis s'en retournent (`tuck_strip`).
+
+        Une petite fenetre a part, comme le bandeau : posee dans l'image, le
+        lecteur natif la recouvrait."""
+        on = bool(on)
+        if on == self._strip_floating:
+            return
+        self._strip_floating = on
+        if on:
+            if self._strip_win is None:
+                from PySide6.QtWidgets import QVBoxLayout as _Column
+                win = GuardedWidget(self, Qt.Tool | Qt.FramelessWindowHint
+                              | Qt.WindowDoesNotAcceptFocus)
+                win.setAttribute(Qt.WA_ShowWithoutActivating, True)
+                win.setObjectName("stripFloat")
+                win.setStyleSheet("QWidget#stripFloat { background: #0b0d10; }")
+                column = _Column(win)
+                column.setContentsMargins(8, 8, 8, 8)
+                self._strip_win = win
+            self._top_row.removeWidget(self.strip)
+            self.strip.setParent(self._strip_win)
+            self._strip_win.layout().addWidget(self.strip)
+            self.strip.setVisible(self._strip_wanted)
+            self._strip_win.hide()
+            self._strip_out = True
+        else:
+            if self._strip_anim is not None:
+                self._strip_anim.stop()
+            if self._strip_win is not None:
+                self._strip_win.hide()
+                self._strip_win.layout().removeWidget(self.strip)
+            self.strip.setParent(self._top)
+            self._top_row.addWidget(self.strip)
+            self.strip.setVisible(self._strip_wanted)
+            self._strip_out = True
+
+    def _strip_place(self) -> tuple:
+        """(position visible, position cachee, taille) contre le bord droit
+        de l'image."""
+        area = self.video_area
+        corner = area.mapToGlobal(QPoint(0, 0))
+        width = self.strip.width() + 16
+        height = max(220, min(area.height() - 120, 640))
+        y = corner.y() + (area.height() - height) // 2
+        right = corner.x() + area.width()
+        return QPoint(right - width - 14, y), QPoint(right + 2, y), QSize(width, height)
+
+    def _animate_strip(self, start: QPoint, end: QPoint, fade_from: float,
+                       fade_to: float, ms: int, then=None) -> None:
+        from PySide6.QtCore import QEasingCurve, QParallelAnimationGroup, QPropertyAnimation
+        win = self._strip_win
+        if self._strip_anim is not None:
+            self._strip_anim.stop()
+        group = QParallelAnimationGroup(win)
+        move = QPropertyAnimation(win, b"pos", group)
+        move.setDuration(ms)
+        move.setStartValue(start)
+        move.setEndValue(end)
+        move.setEasingCurve(QEasingCurve.OutCubic if fade_to > fade_from
+                            else QEasingCurve.InCubic)
+        fade = QPropertyAnimation(win, b"windowOpacity", group)
+        fade.setDuration(ms)
+        fade.setStartValue(fade_from)
+        fade.setEndValue(fade_to)
+        group.addAnimation(move)
+        group.addAnimation(fade)
+        if then is not None:
+            group.finished.connect(then)
+        self._strip_anim = group
+        group.start()
+
+    def reveal_strip(self) -> None:
+        """Les cinq instants arrivent de la droite, en fondu."""
+        win = self._strip_win
+        if not self._strip_floating or win is None or not self._strip_wanted:
+            return
+        shown, hidden, size = self._strip_place()
+        if not self._strip_out:
+            if win.isVisible() and win.pos() != shown and (
+                    self._strip_anim is None
+                    or self._strip_anim.state() != self._strip_anim.State.Running):
+                win.move(shown)                       # l'image a bouge : on suit
+            return
+        self._strip_out = False
+        win.resize(size)
+        start = win.pos() if win.isVisible() else hidden
+        win.setWindowOpacity(win.windowOpacity() if win.isVisible() else 0.0)
+        win.move(start)
+        win.show()
+        win.raise_()
+        self._animate_strip(start, shown, win.windowOpacity(), 1.0, 220)
+
+    def tuck_strip(self, now: bool = False) -> None:
+        """Ils repartent vers la droite, et disparaissent."""
+        win = self._strip_win
+        if not self._strip_floating or win is None or self._strip_out:
+            return
+        self._strip_out = True
+        if now or not win.isVisible():
+            if self._strip_anim is not None:
+                self._strip_anim.stop()
+            win.hide()
+            return
+        _shown, hidden, _size = self._strip_place()
+        self._animate_strip(win.pos(), hidden, win.windowOpacity(), 0.0, 280,
+                            then=lambda: win.hide() if self._strip_out else None)
+
+    def strip_has_pointer(self) -> bool:
+        win = self._strip_win
+        return bool(win is not None and win.isVisible()
+                    and win.geometry().contains(QCursor.pos()))
 
     def set_muted(self, muted: bool) -> None:
         self._muted = muted
         self.audio.setMuted(muted)
 
+    # -- photos ---------------------------------------------------------------
+    STILLS_KEPT = 8
+
+    def _still_longest(self) -> int:
+        """Assez de pixels pour l'ecran entier, zoom modere compris."""
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return 2560
+        size = screen.size() * screen.devicePixelRatio()
+        return max(1280, min(4096, int(max(size.width(), size.height()) * 1.5)))
+
+    def _load_still(self, path: str) -> None:
+        if path in self._stills or path in self._still_wanted:
+            return
+        self._still_wanted.add(path)
+        QThreadPool.globalInstance().start(
+            _StillLoader(path, self._still_longest(), self._still_signals))
+
+    def _still_loaded(self, path: str, image) -> None:
+        self._still_wanted.discard(path)
+        self._stills[path] = image
+        self._stills.move_to_end(path)
+        while len(self._stills) > self.STILLS_KEPT:
+            self._stills.popitem(last=False)
+        if path == self.still_path:
+            self.still.set_image(image)
+            self.position_label.hide()
+
+    def _show_still(self, path: str) -> None:
+        """Une photo dans la fiche : les lecteurs video se taisent."""
+        for deck in self.decks:
+            if deck.path or deck.player.source().isValid():
+                deck.clear()
+        self.blackout_timer.stop()
+        self._blackout = False
+        self._awaiting_frame = False
+        self._spare_wanted = ""
+        self.reset_zoom()
+        self.still_path = path
+        image = self._stills.get(path)
+        if image is not None:
+            self._stills.move_to_end(path)
+        self.still.set_image(image)
+        self.still.show()
+        self.still.raise_()
+        self.marks.set_progress(0, 0)
+        if image is None:
+            self._load_still(path)
+
+    def _hide_still(self) -> None:
+        if self.still_path:
+            self.still_path = ""
+            self.still.hide()
+            self.still.set_image(None)
+
     def set_item(self, path: str, message: str = "…") -> None:
         for tile in self.tiles:
             tile.reset()
             tile.placeholder.setText(message)
+        if is_photo(path):
+            self._show_still(path)
+            return
+        self._hide_still()
         spare = self.spare
         # Un clic ou un appui d'avant ne vaut plus pour ce fichier.
         self._click_paused = False
@@ -1875,7 +2656,11 @@ class SinglePlayer(QWidget):
 
     def _poll_hover(self) -> None:
         # Survoler une image de la pellicule déplace la lecture à cet instant.
-        if not self.isVisible() or not self.window().isActiveWindow():
+        # Le lecteur flottant repond au survol meme sans avoir le clavier : on
+        # travaille ailleurs pendant qu'il joue.
+        owner = self.window()
+        if not self.isVisible() or not (
+                owner.isActiveWindow() or getattr(owner, "hover_anytime", False)):
             return
         slot = -1
         for index, tile in enumerate(self.tiles):
@@ -1897,8 +2682,10 @@ class SinglePlayer(QWidget):
 
         Bouton gauche maintenu, ou Ctrl : zoomer là où pointe la souris.
         """
-        if event.buttons() & Qt.LeftButton or event.modifiers() & Qt.ControlModifier:
-            self._zoomed_while_held = True
+        if (event.buttons() & Qt.LeftButton or event.modifiers() & Qt.ControlModifier
+                or self.still_path):
+            # Une photo n'a pas de temps a parcourir : la molette zoome.
+            self._zoomed_while_held = bool(event.buttons() & Qt.LeftButton)
             return self._zoom_at(event)
         if not self.player.source().isValid():
             return super().wheelEvent(event)
@@ -1947,6 +2734,7 @@ class SinglePlayer(QWidget):
         # Les deux surfaces, pour que la reserve soit deja en place a l'echange.
         for deck in self.decks:
             deck.video.setGeometry(left, top, width, height)
+        self.still.setGeometry(left, top, width, height)
         self.peek.setGeometry(area)
 
     def reset_zoom(self) -> None:
@@ -1972,6 +2760,10 @@ class SinglePlayer(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             return self._scrub_press(event)
+        if event.button() == Qt.RightButton and getattr(self, "ultra", None):
+            # Ultra tri : le clic droit supprime, sans menu.
+            event.accept()
+            return self.ultra("right")
         # Le clic droit remet l'image à sa taille : geste unique, sans menu.
         if event.button() == Qt.RightButton and self.zoom <= 1.0:
             # Le clic droit ouvre les destinations autour du pointeur ; s'il y
@@ -1999,7 +2791,25 @@ class SinglePlayer(QWidget):
         self._scrub_release(event)
         super().mouseReleaseEvent(event)
 
+    def jump(self, seconds: float) -> None:
+        """Maj+← / Maj+→ : quelques secondes en arriere ou en avant. Les
+        fleches seules restent au tri (la precedente, la suivante)."""
+        if self.still_path:
+            return
+        duration = self.player.duration()
+        target = self.player.position() + int(seconds * 1000)
+        if duration > 0:
+            target = min(duration - 1000, target)
+        target = max(0, target)
+        self.player.setPosition(target)
+        self._show_position(target)
+
     def toggle_pause(self) -> None:
+        if self.still_path:
+            # Une photo ne joue pas : le meme geste lance ou arrete le
+            # diaporama, que la fenetre fait avancer.
+            self.slideshowToggled.emit()
+            return
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
@@ -2057,6 +2867,105 @@ class TagsDialog(QDialog):
             if term and term.lower() not in [t.lower() for t in seen]:
                 seen.append(term)
         return seen
+
+
+class VeilDialog(QDialog):
+    """Les noms de dossiers qu'on ne veut pas voir, et ceux qu'on reaffiche.
+
+    Coche : le dossier est masque partout — listes, recherche, mots-cles,
+    mur, doublons, partage. Decoche : il revient, mais son nom reste dans la
+    liste, pret a etre recoche. Rien ne bouge sur le disque.
+    """
+
+    def __init__(self, names: list, off: list, parent=None, start: str = ""):
+        super().__init__(parent)
+        # Ou s'ouvre le choix des dossiers : la racine en cours.
+        self.start = start
+        self.setWindowTitle("Dossiers masqués")
+        self.resize(460, 420)
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Les dossiers qui portent un de ces noms, où qu'ils soient, et tout "
+            "ce qu'ils contiennent, sont cachés de la recherche et des listes. "
+            "Décochez un nom pour le réafficher sans l'oublier. La casse est "
+            "ignorée ; rien n'est déplacé sur le disque.", self)
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.list = QListWidget(self)
+        low_off = {str(n).casefold() for n in off}
+        for name in names:
+            self._add_row(name, str(name).casefold() not in low_off)
+        layout.addWidget(self.list, 1)
+
+        row = QHBoxLayout()
+        self.entry = QLineEdit(self)
+        self.entry.setPlaceholderText("…ou tapez un nom, puis Entrée (par ex. @eaDir)")
+        self.entry.returnPressed.connect(self.add_name)
+        add = QPushButton("Ajouter des dossiers…", self)
+        add.setToolTip("Choisir un ou plusieurs dossiers (Ctrl ou Maj) : leurs noms "
+                       "s'ajoutent à la liste")
+        add.clicked.connect(self.add_folders)
+        row.addWidget(add)
+        row.addWidget(self.entry, 1)
+        remove = QPushButton("Retirer", self)
+        remove.setToolTip("Enlève le nom sélectionné de la liste")
+        remove.clicked.connect(self.remove_name)
+        row.addWidget(remove)
+        layout.addLayout(row)
+
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        box.button(QDialogButtonBox.Ok).setText("Enregistrer")
+        box.button(QDialogButtonBox.Cancel).setText("Annuler")
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        # Entree dans le champ ajoute le nom, elle ne ferme pas la fenetre.
+        for button in box.buttons():
+            button.setAutoDefault(False)
+        layout.addWidget(box)
+
+    def _add_row(self, name: str, on: bool) -> None:
+        item = QListWidgetItem(str(name), self.list)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    def _names(self) -> list:
+        return [self.list.item(i).text() for i in range(self.list.count())]
+
+    def add_folders(self) -> None:
+        """Les dossiers choisis dans l'explorateur : leurs noms, tous d'un coup."""
+        for folder in pick_folders(self, "Dossiers à masquer", self.start):
+            self._take(folder.name or str(folder))
+
+    def add_name(self) -> None:
+        self._take(self.entry.text())
+        self.entry.clear()
+
+    def _take(self, text: str) -> None:
+        # Un nom de dossier, pas un chemin : c'est ainsi que le masque compare.
+        name = str(text).strip().strip("\\/").split("\\")[-1].split("/")[-1]
+        if not name:
+            return
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item.text().casefold() == name.casefold():
+                item.setCheckState(Qt.Checked)
+                self.list.setCurrentItem(item)
+                return
+        self._add_row(name, True)
+        self.list.setCurrentRow(self.list.count() - 1)
+
+    def remove_name(self) -> None:
+        row = self.list.currentRow()
+        if row >= 0:
+            self.list.takeItem(row)
+
+    def result_veil(self) -> tuple:
+        """(tous les noms, ceux qui sont decoches)."""
+        names = self._names()
+        off = [self.list.item(i).text() for i in range(self.list.count())
+               if self.list.item(i).checkState() != Qt.Checked]
+        return names, off
 
 
 class _Restorer(QThread):
@@ -2294,6 +3203,31 @@ class FavoriteStar(QPushButton):
                         else "Mettre en favori   (touche 1)")
 
 
+class PinButton(QPushButton):
+    """L'epingle de la fiche : l'element passe en tete de sa liste (onglet
+    Dossiers ou Videos). Grise, ou bleue quand il est epingle."""
+
+    toggledPin = Signal()
+
+    def __init__(self, size: int = 20, parent=None):
+        super().__init__("", parent)
+        self.value = False
+        self.setObjectName("pinButton")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setFixedSize(size + 14, size + 10)
+        self.setIconSize(QSize(size, size))
+        self.setStyleSheet("QPushButton#pinButton { background: transparent; border: 0; }")
+        self.clicked.connect(lambda _c=False: self.toggledPin.emit())
+        self.set_value(False)
+
+    def set_value(self, pinned: bool) -> None:
+        self.value = bool(pinned)
+        self.setIcon(icon("pin", "#6ea8ff" if self.value else "#8b94a1"))
+        self.setToolTip("Désépingler" if self.value else
+                        "Épingler : en tête de la liste, dans son onglet")
+
+
 class KeyCap(QFrame):
     """Un raccourci et son effet — utilisable au clavier comme à la souris."""
 
@@ -2305,7 +3239,8 @@ class KeyCap(QFrame):
     # avec mille pixels libres.
     LONGEST = 60
 
-    def __init__(self, key: str, label: str, tone: str = "", parent=None):
+    def __init__(self, key: str, label: str, tone: str = "", parent=None,
+                 key_only: bool = False):
         super().__init__(parent)
         self.setObjectName("keycap")
         self.setCursor(Qt.PointingHandCursor)
@@ -2315,9 +3250,12 @@ class KeyCap(QFrame):
         layout.setSpacing(8)
         key_label = QLabel(key, self)
         key_label.setObjectName("keyLetter")
-        self.full = elide(label, self.LONGEST)
+        # La touche seule quand elle dit deja tout (« Suppr ») : le libelle
+        # ne reste qu'en infobulle.
+        self.full = "" if key_only else elide(label, self.LONGEST)
         text = QLabel(self.full, self)
         text.setObjectName("keyLabel")
+        text.setVisible(not key_only)
         layout.addWidget(key_label)
         layout.addWidget(text)
         self.text = text
@@ -2333,7 +3271,7 @@ class KeyCap(QFrame):
     def set_compact(self, on: bool) -> None:
         """La touche seule, son effet en infobulle : quand la ligne manque de
         place, on resserre plutot que d'ouvrir une deuxieme rangee."""
-        self.text.setVisible(not on)
+        self.text.setVisible(not on and bool(self.full))
         self._layout.setContentsMargins(*((8, 4, 8, 4) if on else (9, 4, 11, 4)))
 
     def label_width(self) -> int:
@@ -2371,6 +3309,13 @@ class FlowLayout(QLayout):
 
     def addItem(self, item) -> None:
         self._items.append(item)
+
+    def insert_widget(self, index: int, widget) -> None:
+        """Pose un element a ce rang (en tete : 0)."""
+        from PySide6.QtWidgets import QWidgetItem
+        self.addChildWidget(widget)
+        self._items.insert(max(0, min(index, len(self._items))), QWidgetItem(widget))
+        self.invalidate()
 
     def count(self) -> int:
         return len(self._items)
@@ -2468,11 +3413,18 @@ class CommandBar(QWidget):
                 item.widget().hide()
                 item.widget().deleteLater()
 
-        delete_cap = KeyCap("Suppr", delete_label, "danger")
+        # « Supprimer », court et en gris ; le detail (corbeille, NAS) en
+        # infobulle -- le libelle long debordait de la ligne.
+        delete_cap = KeyCap("Suppr", "Supprimer", "danger")
+        if delete_label:
+            delete_cap.setToolTip(f"Supprimer : corbeille de session, puis "
+                                  f"{delete_label}   (touche Suppr)")
         delete_cap.clicked.connect(self.deleteRequested)
         self.layout_.addWidget(delete_cap)
 
-        skip_cap = KeyCap("Espace", "Passer", "neutral")
+        # Espace : la suivante, sans rien decider -- la meme touche pour une
+        # video et pour un dossier.
+        skip_cap = KeyCap("Espace", "Suivante", "neutral")
         skip_cap.clicked.connect(self.skipRequested)
         self.layout_.addWidget(skip_cap)
 
@@ -2562,27 +3514,147 @@ def _water_level(widths: list, budget: int, floor: int):
     return low
 
 
-def pick_folders(parent, caption: str, start: str = "") -> list:
-    """Ouvre un sélecteur de dossiers acceptant une sélection multiple.
+class FolderPicker(QDialog):
+    """Choisir plusieurs dossiers d'un coup : Ctrl ou Maj, puis « Ajouter ».
 
-    Le sélecteur natif de Windows ne laisse choisir qu'un dossier à la fois. On
-    passe donc par celui de Qt, dont on élargit le mode de sélection des vues
-    internes — seule façon d'ajouter vingt destinations en une fois.
+    Le selecteur de Qt, force en selection multiple, grisait son bouton des
+    que deux dossiers etaient choisis -- il ne sait en valider qu'un -- et
+    « Ajouter des dossiers » ne faisait rien. Celui-ci ne montre que des
+    dossiers, s'ouvre ou l'on veut (un chemin se colle en haut), et rend tous
+    ceux qu'on a selectionnes.
     """
-    dialog = QFileDialog(parent, caption, start)
-    dialog.setFileMode(QFileDialog.Directory)
-    dialog.setOption(QFileDialog.DontUseNativeDialog, True)
-    dialog.setOption(QFileDialog.ShowDirsOnly, True)
-    for view in dialog.findChildren((QListView, QTreeView)):
-        view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+    def __init__(self, parent=None, caption: str = "", start: str = ""):
+        from PySide6.QtWidgets import QFileSystemModel
+        from PySide6.QtCore import QDir
+        super().__init__(parent)
+        self.setWindowTitle(caption or "Choisir des dossiers")
+        self.resize(640, 520)
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self.up = QPushButton("↑", self)
+        self.up.setToolTip("Dossier parent")
+        self.up.setFixedWidth(36)
+        self.up.clicked.connect(self._go_up)
+        row.addWidget(self.up)
+        self.where = QLineEdit(self)
+        self.where.setPlaceholderText(r"Un chemin : C:\Vidéos, \\NAS\partage…")
+        self.where.returnPressed.connect(lambda: self.open_folder(self.where.text()))
+        row.addWidget(self.where, 1)
+        layout.addLayout(row)
+        # Les racines de Prisme, d'un clic : un partage reseau (le NAS)
+        # n'apparait jamais parmi les lecteurs, et l'on ne pouvait pas y aller.
+        places = QHBoxLayout()
+        places.setSpacing(6)
+        for place in _picker_places():
+            button = QPushButton("⌂ " + place[1], self)
+            button.setToolTip(place[0])
+            button.setFocusPolicy(Qt.NoFocus)
+            button.clicked.connect(lambda _c=False, p=place[0]: self.open_folder(p))
+            places.addWidget(button)
+        drives = QPushButton("Lecteurs", self)
+        drives.setToolTip("La liste des lecteurs de ce PC")
+        drives.setFocusPolicy(Qt.NoFocus)
+        drives.clicked.connect(lambda: self.open_folder(""))
+        places.addWidget(drives)
+        places.addStretch(1)
+        layout.addLayout(places)
+        hint = QLabel("Double-clic : entrer dans un dossier.  Ctrl ou Maj : en "
+                      "sélectionner plusieurs.", self)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.model = QFileSystemModel(self)
+        self.model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Drives)
+        self.model.setRootPath("")
+        self.view = QTreeView(self)
+        self.view.setModel(self.model)
+        self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.view.setUniformRowHeights(True)
+        self.view.setSortingEnabled(True)
+        self.view.sortByColumn(0, Qt.AscendingOrder)
+        for column in (1, 2, 3):
+            self.view.hideColumn(column)
+        self.view.header().hide()
+        self.view.doubleClicked.connect(
+            lambda index: self.open_folder(self.model.filePath(index)))
+        layout.addWidget(self.view, 1)
+
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        self.ok = box.button(QDialogButtonBox.Ok)
+        box.button(QDialogButtonBox.Cancel).setText("Annuler")
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        layout.addWidget(box)
+        self.view.selectionModel().selectionChanged.connect(lambda *_a: self._name_ok())
+        from . import roots
+        if roots.is_union(start):
+            # « Toutes les racines » n'est pas un dossier : la premiere qui
+            # repond. Le selecteur retombait sinon sur la liste des lecteurs.
+            members = roots.members(start) or roots.roots()
+            start = str(members[0]) if members else ""
+        self.open_folder(start or str(Path.home()))
+
+    def _name_ok(self) -> None:
+        """Le bouton dit ce qu'il ajoutera : sans selection, le dossier ouvert
+        lui-meme. « Ajouter la sélection » ne faisait rien, sans un mot, quand
+        on etait entre dans le dossier voulu sans rien selectionner."""
+        count = len(self.view.selectionModel().selectedRows(0))
+        here = self.where.text().strip()
+        if count:
+            self.ok.setText(f"Ajouter {count} dossier{'s' if count > 1 else ''}")
+            self.ok.setEnabled(True)
+        else:
+            self.ok.setText(f"Ajouter « {Path(here).name or here} »" if here else "Ajouter")
+            self.ok.setEnabled(bool(here) and Path(here).is_dir())
+
+    def open_folder(self, folder: str) -> None:
+        folder = (folder or "").strip().strip('"')
+        if folder and not Path(folder).is_dir():
+            self.where.setText(folder)
+            return
+        index = self.model.index(folder) if folder else self.model.index("")
+        self.view.setRootIndex(index)
+        self.where.setText(folder)
+        self.view.clearSelection()
+        self._name_ok()
+
+    def _go_up(self) -> None:
+        current = self.where.text().strip()
+        if not current:
+            return
+        parent = str(Path(current).parent)
+        # Au sommet d'un lecteur, on remonte a la liste des lecteurs.
+        self.open_folder("" if parent == current else parent)
+
+    def chosen(self) -> list:
+        rows = self.view.selectionModel().selectedRows(0)
+        found = [Path(self.model.filePath(index)) for index in rows]
+        if not found and self.where.text().strip():
+            found = [Path(self.where.text().strip())]   # le dossier ouvert lui-meme
+        return sorted({path for path in found if path.is_dir()},
+                      key=lambda path: str(path).lower())
+
+
+def _picker_places() -> list:
+    """(chemin, nom court) des racines de Prisme qu'on peut ouvrir."""
+    from . import roots
+    found, seen = [], set()
+    for root in roots.roots():
+        key = os.path.normcase(str(root))
+        if key not in seen:
+            seen.add(key)
+            found.append((str(root), roots.label(root)))
+    return found
+
+
+def pick_folders(parent, caption: str, start: str = "") -> list:
+    """Un ou plusieurs dossiers, choisis d'un coup (`FolderPicker`)."""
+    dialog = FolderPicker(parent, caption, start)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return []
-    chosen = []
-    for selected in dialog.selectedFiles():
-        path = Path(selected)
-        if path.is_dir():
-            chosen.append(path)
-    return chosen
+    return dialog.chosen()
 
 
 class DestinationsDialog(QDialog):
@@ -2590,8 +3662,11 @@ class DestinationsDialog(QDialog):
 
     COL_GRIP, COL_KEY, COL_LABEL, COL_PATH = range(4)
 
-    def __init__(self, destinations: list, parent=None):
+    def __init__(self, destinations: list, parent=None, start: str = ""):
         super().__init__(parent)
+        # Ou s'ouvre le choix des dossiers : la racine en cours, et non le
+        # dossier personnel, ou le NAS n'apparait pas.
+        self.start = start
         self.setWindowTitle("Dossiers de destination")
         self.resize(820, 480)
 
@@ -2634,18 +3709,16 @@ class DestinationsDialog(QDialog):
         add = QPushButton("Ajouter des dossiers…")
         add.setObjectName("primary")
         add.setToolTip("Ctrl ou Maj pour en sélectionner plusieurs d'un coup")
-        add_many = QPushButton("Ajouter tous les sous-dossiers de…")
         remove = QPushButton("Retirer")
         renumber = QPushButton("Renuméroter")
         renumber.setToolTip("Réattribue les touches dans l'ordre de la liste")
         reset = QPushButton("Réinitialiser")
         reset.setObjectName("danger")
         add.clicked.connect(self.add_folders)
-        add_many.clicked.connect(self.add_children_of)
         remove.clicked.connect(self.remove_selected)
         renumber.clicked.connect(self.renumber)
         reset.clicked.connect(self.reset_all)
-        for button in (add, add_many, remove, renumber):
+        for button in (add, remove, renumber):
             buttons.addWidget(button)
         buttons.addStretch(1)
         buttons.addWidget(reset)
@@ -2711,7 +3784,7 @@ class DestinationsDialog(QDialog):
 
     # -- actions ---------------------------------------------------------
     def add_folders(self) -> None:
-        start = ""
+        start = self.start
         rows = self._rows()
         if rows:
             start = str(Path(rows[-1].text(self.COL_PATH)).parent)
@@ -2727,7 +3800,7 @@ class DestinationsDialog(QDialog):
 
     def add_children_of(self) -> None:
         parent = QFileDialog.getExistingDirectory(
-            self, "Dossier contenant les destinations"
+            self, "Dossier contenant les destinations", self.start
         )
         if parent:
             self._add_children(parent)

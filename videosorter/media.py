@@ -16,10 +16,11 @@ import time
 from collections import deque
 
 from PySide6.QtCore import (
-    QObject, QRunnable, QThread, QThreadPool, QTimer, Signal,
+    QObject, QRunnable, QThread, QThreadPool, QTimer, Qt, Signal,
 )
+from PySide6.QtGui import QColor, QImage, QImageIOHandler, QImageReader, QPainter
 
-from .config import THUMB_DIR, VIDEO_EXTS
+from .config import THUMB_DIR, VIDEO_EXTS, is_photo
 from .index import INDEX
 from .stamps import carry as carry_stamps, stamp_of
 
@@ -480,6 +481,26 @@ def _really_broken(path, stamp: str, code, err: str) -> bool:
     return True
 
 
+def _probe_photo(path: Path, stamp: str) -> dict | None:
+    """Dimensions d'une photo, lues dans son en-tete par Qt : ni ffprobe, ni
+    lecture de l'image entiere. Rien si Qt ne sait pas la lire (HEIC)."""
+    reader = QImageReader(str(path))
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if not size.isValid():
+        return None
+    width, height = size.width(), size.height()
+    # Une photo prise de cote est rangee couchee : c'est son orientation
+    # EXIF qui la redresse, et les filtres doivent la voir debout.
+    if reader.transformation() & QImageIOHandler.Transformation.TransformationRotate90:
+        width, height = height, width
+    info = {"duration": 0.0, "width": width, "height": height,
+            "codec": bytes(reader.format()).decode("ascii", "replace"),
+            "ok": width > 0}
+    INDEX.put_probe(path, stamp, info)
+    return info
+
+
 def _probe(path: Path) -> dict:
     """Retourne {duration, width, height, codec, ok} pour une vidéo."""
     key = str(path)
@@ -492,6 +513,10 @@ def _probe(path: Path) -> dict:
         # qui gardait tout : on le reverifie une fois par seance.
         _RECHECKED.add(key)
 
+    if is_photo(path):
+        found = _probe_photo(path, stamp)
+        if found is not None:
+            return found
     info = {"duration": 0.0, "width": 0, "height": 0, "codec": "", "ok": False}
     if not Tools.ffprobe:
         return cached or info
@@ -708,7 +733,7 @@ def _extract_thumb(video: Path, ts: float, width: int,
         found = cached_thumb(video, ts, width)
         if found is not None:
             return found
-        if not Tools.ffmpeg:
+        if not Tools.ffmpeg and not is_photo(video):
             return None
         out = thumb_path(video, ts, width)
         slot_key = str(out)
@@ -765,6 +790,52 @@ def _drop(path: Path) -> None:
         pass
 
 
+def _make_photo_thumb(photo: Path, width: int, part: Path, out: Path) -> Path | None:
+    """La vignette d'une photo, par Qt : decodee directement a la taille
+    voulue (un JPEG se lit alors bien plus vite), redressee selon l'EXIF.
+    Ecrite a cote, puis renommee d'un coup, comme celles de ffmpeg."""
+    reader = QImageReader(str(photo))
+    reader.setAutoTransform(True)
+    size = reader.size()
+    rotated = bool(reader.transformation()
+                   & QImageIOHandler.Transformation.TransformationRotate90)
+    if size.isValid() and INDEX.probe(photo) is None:
+        # Ses dimensions, au passage : l'en-tete est deja lu, et le filtre
+        # « Verticales » en a besoin.
+        tall, wide = (size.width(), size.height()) if rotated else \
+            (size.height(), size.width())
+        INDEX.put_probe(photo, _stamp_of(photo), {
+            "duration": 0.0, "width": wide, "height": tall,
+            "codec": bytes(reader.format()).decode("ascii", "replace"),
+            "ok": wide > 0})
+    if size.isValid() and size.width() > width:
+        # La largeur voulue est celle de l'image redressee.
+        if rotated:
+            reader.setScaledSize(size.scaled(10 ** 6, width, Qt.KeepAspectRatio))
+        else:
+            reader.setScaledSize(size.scaled(width, 10 ** 6, Qt.KeepAspectRatio))
+    image = reader.read()
+    if image.isNull():
+        return None
+    if image.hasAlphaChannel():
+        # Un PNG transparent devient noir en JPEG : on le pose sur du sombre.
+        flat = QImage(image.size(), QImage.Format_RGB32)
+        flat.fill(QColor("#14161a"))
+        painter = QPainter(flat)
+        painter.drawImage(0, 0, image)
+        painter.end()
+        image = flat
+    if not image.save(str(part), "JPG", 85) or not _usable(part):
+        _drop(part)
+        return None
+    try:
+        os.replace(part, out)
+    except OSError:
+        _drop(part)
+        return out if _usable(out) else None
+    return out
+
+
 def _make_thumb(video: Path, ts: float, width: int, out: Path,
                 keyframe: bool) -> tuple:
     """Lance ffmpeg ; rend (fichier ou None, vrai si l'on a ete arrete).
@@ -778,6 +849,15 @@ def _make_thumb(video: Path, ts: float, width: int, out: Path,
     except OSError:
         return None, False
     part = out.with_name(out.stem + ".part.jpg")
+    if is_photo(video):
+        made = _make_photo_thumb(video, width, part, out)
+        if made is not None:
+            _served(video, ts, width)
+            return made, False
+        if not Tools.ffmpeg:
+            return None, False
+        # Qt ne sait pas la lire (HEIC) : ffmpeg, a partir de sa seule image.
+        ts = 0.0
     base = [Tools.ffmpeg, "-hide_banner", "-loglevel", "error"]
     # -an : pas de piste son a demultiplexer pour fabriquer une image fixe.
     tail = ["-an", "-frames:v", "1", "-vf", f"scale={width}:-2",
@@ -1027,6 +1107,8 @@ def card_moment(video) -> float:
     les plans reperes (« Repérer les plans », un choix explicite) deplacent
     l'image, une fois pour toutes. La duree n'y entre pas : elle arrive apres.
     """
+    if is_photo(video):
+        return 0.0                      # une photo n'a qu'une image
     if INDEX.has_scenes(video):
         moments = pick_moments(INDEX.scenes_of(video), 0.0, 1)
         if moments:
@@ -1050,6 +1132,20 @@ def build_preview_plan(videos: list, count: int, page: int = 0,
     """
     if not videos:
         return []
+
+    if is_photo(videos[0]):
+        # Des photos : une image chacune, a l'instant zero, et une seule pour
+        # une photo seule -- dix « instants » d'une meme image n'ont pas de sens.
+        if one_per_video:
+            chunk = (videos[page:page + 1] if blind and count == 1
+                     else videos[page * count:(page + 1) * count])
+        else:
+            chunk = videos[:1]
+        plan = []
+        for photo in chunk:
+            info = INDEX.probe(photo) or {}
+            plan.append((str(photo), 0.0, 0.0, info.get("height") or 0))
+        return plan
 
     if blind and count == 1:
         # Une carte : son instant ne depend que de la video (`card_moment`),

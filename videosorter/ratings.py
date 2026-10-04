@@ -62,6 +62,20 @@ class Ratings(QObject):
     def backup_path(self) -> Path:
         return self.path.with_name(self.path.name + ".bak")
 
+    def switch(self, path) -> None:
+        """Passe aux favoris d'une autre collection (videos, photos), apres
+        avoir ecrit ceux-ci."""
+        path = Path(path)
+        if path == self.path:
+            return
+        self.flush()
+        self.path = path
+        self.data = {}
+        self.dirty = False
+        self.read_only = False
+        self.problem = ""
+        self.load()
+
     def load(self) -> None:
         text = _read_text(self.path)
         if text is None:
@@ -102,7 +116,9 @@ class Ratings(QObject):
         l'autre machine qui voudrait le reprendre a son tour.
         """
         shared = _config.SHARED_RATINGS_PATH
-        if shared is None or Path(shared) == self.path or self.read_only:
+        if (shared is None or Path(shared) == self.path or self.read_only
+                or self.path.name != Path(RATINGS_PATH).name):
+            # Les favoris des photos n'ont jamais vecu sur le partage.
             return
         mark = self.path.with_name(_ADOPTED_MARK)
         if mark.exists():

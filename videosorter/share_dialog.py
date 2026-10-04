@@ -134,6 +134,12 @@ def _open_link(result) -> None:
 
 SHARE_STYLE = """
 QDialog { background: #0e1116; }
+QTabWidget::pane { background: #0e1116; border: 1px solid #1c222b; top: -1px; }
+QTabWidget > QWidget > QWidget { background: #0e1116; }
+QTabBar::tab { background: #151a21; color: #8b94a1; padding: 6px 14px;
+               border: 1px solid #1c222b; border-bottom: 0; margin-right: 2px; }
+QTabBar::tab:selected { background: #0e1116; color: #ffffff; }
+QCheckBox { color: #cdd5df; }
 QLabel { color: #b9c2cd; font-size: 13px; }
 QLabel#shareHead { color: #ffffff; font-size: 14px; font-weight: 600; }
 QLineEdit#shareLink { color: #e9eef4; font-size: 13px; background: #151a21;
@@ -167,9 +173,18 @@ class ShareDialog(QDialog):
 
         outer = QVBoxLayout(self)
         tabs = QTabWidget(self)
+        # Trois facons d'entrer : par le PC (sur le Wi-Fi de la maison, ou de
+        # n'importe ou par son adresse publique -- Prisme ouvert), ou par le
+        # NAS (de partout, meme PC eteint). Un seul onglet « Inviter » ne
+        # montrait que le NAS, et l'on ne savait plus lequel etait lequel.
+        # Devant tout : « Téléphone », un seul code, celui qui marche.
+        tabs.addTab(self._phone(), "Téléphone")
+        tabs.addTab(self._invite_pc(), "Via le PC")
+        tabs.addTab(self._invite(), "Via le NAS")
         tabs.addTab(self._settings(), "Réglages")
         tabs.addTab(self._visits(), "Connexions")
         tabs.addTab(self._views(), "Ce qui a été regardé")
+        tabs.addTab(self._favorites(), "Favoris")
         outer.addWidget(tabs, 1)
 
         box = QDialogButtonBox(QDialogButtonBox.Close, self)
@@ -189,6 +204,313 @@ class ShareDialog(QDialog):
             self._follow(installer)
         self.refresh()
 
+    # -- le telephone : un seul code ------------------------------------------
+    def _phone(self) -> QWidget:
+        """Le code a scanner, sur le meilleur chemin du moment -- ou la seule
+        chose a faire pour qu'il paraisse.
+
+        Quatre liens dans deux onglets, chacun avec ses conditions : on ne
+        savait plus lequel prendre, et quand aucun ne marchait (partage coupe,
+        NAS pas a jour), les codes disparaissaient sans dire pourquoi."""
+        page = QWidget(self)
+        box = QVBoxLayout(page)
+        box.setSpacing(12)
+        self.phone_state = QLabel("", page)
+        self.phone_state.setObjectName("shareHead")
+        self.phone_state.setWordWrap(True)
+        box.addWidget(self.phone_state)
+        self.phone_how = QLabel("", page)
+        self.phone_how.setWordWrap(True)
+        box.addWidget(self.phone_how)
+        self._phone_do = None
+        self.phone_fix = QPushButton("", page)
+        self.phone_fix.clicked.connect(
+            lambda: self._phone_do() if self._phone_do else None)
+        self.phone_fix.hide()
+        box.addWidget(self.phone_fix, 0, Qt.AlignLeft)
+        code = QLabel("", page)
+        code.setObjectName("shareCode")
+        code.setAlignment(Qt.AlignCenter)
+        code.hide()
+        box.addWidget(code, 0, Qt.AlignLeft)
+        link = QLineEdit(page)
+        link.setObjectName("shareLink")
+        link.setReadOnly(True)
+        box.addWidget(link)
+        copy = QPushButton("Copier le lien", page)
+        box.addWidget(copy, 0, Qt.AlignLeft)
+        said = QLabel("", page)
+        said.setWordWrap(True)
+        box.addWidget(said)
+        tip = QLabel(
+            "Un ancien lien, ou une icône posée sur l'écran d'accueil, qui dit "
+            "« ne donne plus accès » : scannez ce code à nouveau, puis reposez "
+            "l'icône. Les autres liens et les réglages sont dans les onglets "
+            "suivants.", page)
+        tip.setWordWrap(True)
+        box.addWidget(tip)
+        box.addStretch(1)
+        self.phone_part = {"code": code, "link": link, "copy": copy,
+                           "said": said, "shown": None}
+        copy.clicked.connect(lambda _c=False: self._copy_invite(self.phone_part))
+        return page
+
+    def _phone_fix_set(self, label: str = "", do=None) -> None:
+        self._phone_do = do
+        self.phone_fix.setText(label)
+        self.phone_fix.setVisible(bool(label))
+        self.phone_fix.setEnabled(not self._busy)
+
+    def _refresh_phone(self) -> None:
+        """Choisit le lien : le NAS (partout, meme PC eteint), sinon l'adresse
+        publique du PC, sinon le Wi-Fi de la maison. Appele apres
+        `_refresh_pc` et `_refresh_nas`, dont il reprend les liens."""
+        from .nas_publish import PUBLISHER, share_root
+        window = self.window
+        on = bool(window.cfg["share"])
+        top = window.top_root()
+        on_nas = bool(top is not None and share_root(top) is not None)
+        nas_link = self.nas_away["shown"] or ""
+        away, home = self.pc_away["shown"] or "", self.pc_home["shown"] or ""
+        address, how = "", ""
+        self._phone_fix_set()
+        if not on:
+            state = ("Le partage est coupé : le téléphone ne peut pas entrer, "
+                     "et le NAS n'est plus mis à jour.")
+            self._phone_fix_set("Activer le partage",
+                                lambda: self.switch.setChecked(True))
+        elif on_nas and nas_link and PUBLISHER.last_ok:
+            address = nas_link
+            how = ("Par le NAS : marche partout (Wi-Fi, 4G), même PC éteint.")
+        elif on_nas and nas_link and (PUBLISHER.running or window.share_server is None):
+            state = "Mise à jour du NAS… le code paraît dans un instant."
+        elif away:
+            address = away
+            how = "Par le PC : marche partout, tant que Prisme reste ouvert sur ce PC."
+        elif home:
+            address = home
+            how = ("Sur le Wi-Fi de la maison seulement, tant que Prisme reste "
+                   "ouvert sur ce PC.")
+            self._phone_fix_set("Marcher aussi en 4G (adresse publique)",
+                                self._open_tunnel)
+        else:
+            state = window.share_state()
+            if window.share_server is not None and not window.tunnel_address:
+                self._phone_fix_set("Ouvrir l'adresse publique", self._open_tunnel)
+        if on and on_nas and nas_link and not PUBLISHER.last_ok and not address:
+            how = PUBLISHER.state
+        elif on and not on_nas:
+            # Le NAS ne sert pas : qu'on sache pourquoi, au lieu de chercher.
+            how = ((how + "\n") if how else "") + (
+                f"Le NAS n'est pas utilisé : ce PC ne voit pas la bibliothèque "
+                f"sur le NAS (racine : {top}). Choisissez une racine sur le NAS "
+                "pour un lien qui marche PC éteint.")
+        if address:
+            state = "Prêt — scannez ce code avec l'appareil photo du téléphone."
+        self.phone_state.setText(state)
+        self.phone_how.setText(how)
+        self._show_invite(self.phone_part, address,
+                          "Le lien paraîtra ici.", scale=6)
+
+    # -- inviter -------------------------------------------------------------
+    def _invite(self) -> QWidget:
+        """Les liens du NAS, chacun avec son code a scanner : sur le Wi-Fi, et
+        de n'importe ou, meme PC eteint. Les ouvrir suffit pour entrer."""
+        page = self._nas()
+        box = page.layout()
+        head = QLabel("Par le NAS — de partout (Wi-Fi, 4G, ailleurs), même PC éteint. "
+                      "Scannez le code, ou envoyez le lien : l'ouvrir suffit pour "
+                      "entrer, sans mot de passe.", page)
+        head.setObjectName("shareHead")
+        head.setWordWrap(True)
+        box.insertWidget(0, head)
+        warn = QLabel(
+            "Quiconque a le lien entre dans la bibliothèque : ne l'envoyez "
+            "qu'à qui vous voulez.", page)
+        warn.setObjectName("shareWarn")
+        warn.setWordWrap(True)
+        # Avant l'espace qui pousse tout en haut.
+        box.insertWidget(box.count() - 1, warn)
+        return page
+
+    def _invite_pc(self) -> QWidget:
+        """Les liens du PC : Prisme doit y etre ouvert. Sur le Wi-Fi de la
+        maison (le telephone sur le meme Wi-Fi que le PC), ou de n'importe ou
+        par l'adresse publique du PC (4G, ailleurs)."""
+        page = QWidget(self)
+        box = QVBoxLayout(page)
+        box.setSpacing(10)
+        head = QLabel("Par le PC — Prisme doit être ouvert sur ce PC. Scannez le "
+                      "code, ou envoyez le lien : l'ouvrir suffit pour entrer, "
+                      "sans mot de passe.", page)
+        head.setObjectName("shareHead")
+        head.setWordWrap(True)
+        box.addWidget(head)
+        self.pc_state = QLabel("", page)
+        self.pc_state.setWordWrap(True)
+        box.addWidget(self.pc_state)
+        row = QHBoxLayout()
+        row.setSpacing(18)
+        self.pc_home = self._invite_column(
+            page, row, "Sur le Wi-Fi de la maison",
+            "Le téléphone sur le même Wi-Fi que ce PC.")
+        self.pc_away = self._invite_column(
+            page, row, "De n'importe où",
+            "Par l'adresse publique du PC : 4G, ailleurs. Elle s'ouvre ici "
+            "(et se règle dans « Réglages »).")
+        self.pc_open = QPushButton("Ouvrir l'adresse publique", page)
+        self.pc_open.clicked.connect(self._open_tunnel)
+        column = self.pc_away["box"]
+        column.insertWidget(column.count() - 1, self.pc_open, 0, Qt.AlignLeft)
+        box.addLayout(row)
+        warn = QLabel("Quiconque a le lien entre dans la bibliothèque : ne l'envoyez "
+                      "qu'à qui vous voulez.", page)
+        warn.setObjectName("shareWarn")
+        warn.setWordWrap(True)
+        box.addWidget(warn)
+        box.addStretch(1)
+        return page
+
+    # -- le NAS --------------------------------------------------------------
+    def _nas(self) -> QWidget:
+        """Le partage publie sur le NAS : joignable meme PC eteint."""
+        page = QWidget(self)
+        box = QVBoxLayout(page)
+        box.setSpacing(10)
+        intro = QLabel(
+            "Votre Prisme reste sur ce PC. Après chaque analyse, il dépose sur "
+            "le NAS le catalogue, les vignettes et la clé du lien ; un petit "
+            "serveur, sur le NAS, les montre aux invités et lit les vidéos "
+            "directement sur ses disques. À préparer une fois sur le NAS : "
+            "voir « Installer sur le NAS ».", page)
+        intro.setWordWrap(True)
+        box.addWidget(intro)
+        self.nas_state = QLabel("", page)
+        self.nas_state.setWordWrap(True)
+        box.addWidget(self.nas_state)
+
+        row = QHBoxLayout()
+        row.setSpacing(18)
+        # Le lien Tailscale du NAS marche partout, a la maison comme en 4G :
+        # c'est lui d'abord. Celui du Wi-Fi ne sert que sans Tailscale.
+        self.nas_away = self._invite_column(
+            page, row, "De partout",
+            "Par l'adresse Tailscale du NAS : sur le Wi-Fi de la maison, en 4G, "
+            "ailleurs — le même lien.")
+        self.nas_home = self._invite_column(
+            page, row, "Sur le Wi-Fi de la maison seulement",
+            "Le téléphone sur le même Wi-Fi que le NAS (sans Tailscale).")
+        box.addLayout(row)
+
+        buttons = QHBoxLayout()
+        publish = QPushButton("Publier maintenant", page)
+        publish.clicked.connect(self._publish_now)
+        buttons.addWidget(publish)
+        install = QPushButton("Installer sur le NAS…", page)
+        install.clicked.connect(self._open_install)
+        buttons.addWidget(install)
+        buttons.addStretch(1)
+        box.addLayout(buttons)
+        box.addStretch(1)
+        return page
+
+    def _publish_now(self) -> None:
+        if not self.window.publish_nas(force=True):
+            QMessageBox.information(
+                self, "Publier sur le NAS",
+                "Rien à publier pour l'instant : le partage doit être ouvert, "
+                "sur la collection de vidéos, et celle-ci sur le NAS.")
+        self.refresh()
+
+    def _open_install(self) -> None:
+        from .nas_publish import FOLDER, share_root
+        root = share_root(self.window.top_root() or "")
+        if root is None:
+            QMessageBox.information(self, "Installer sur le NAS",
+                                    "La bibliothèque n'est pas sur un NAS.")
+            return
+        where = root / FOLDER / "installation"
+        if not where.exists():
+            self.window.publish_nas(force=True)
+            QMessageBox.information(
+                self, "Installer sur le NAS",
+                "Les fichiers d'installation se préparent : réessayez dans "
+                "un instant.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(where)))
+
+    def _invite_column(self, page, row, title: str, hint: str) -> dict:
+        column = QVBoxLayout()
+        column.setSpacing(6)
+        head = QLabel(title, page)
+        head.setObjectName("shareHead")
+        column.addWidget(head)
+        tip = QLabel(hint, page)
+        tip.setWordWrap(True)
+        column.addWidget(tip)
+        code = QLabel("", page)
+        code.setObjectName("shareCode")
+        code.setAlignment(Qt.AlignCenter)
+        code.hide()
+        column.addWidget(code, 0, Qt.AlignLeft)
+        link = QLineEdit(page)
+        link.setObjectName("shareLink")
+        link.setReadOnly(True)
+        column.addWidget(link)
+        copy = QPushButton("Copier le lien", page)
+        column.addWidget(copy, 0, Qt.AlignLeft)
+        said = QLabel("", page)
+        said.setWordWrap(True)
+        column.addWidget(said)
+        column.addStretch(1)
+        row.addLayout(column, 1)
+        part = {"box": column, "code": code, "link": link, "copy": copy,
+                "said": said, "shown": None}
+        copy.clicked.connect(lambda _c=False, p=part: self._copy_invite(p))
+        return part
+
+    def _copy_invite(self, part: dict) -> None:
+        address = part["link"].text().strip()
+        if not address:
+            return
+        QGuiApplication.clipboard().setText(address)
+        part["link"].selectAll()
+        part["said"].setText("Lien copié.")
+
+    def _renew(self) -> None:
+        if QMessageBox.question(
+                self, "Révoquer le lien",
+                "Le lien actuel ne marchera plus, nulle part : chaque "
+                "téléphone devra scanner le nouveau code (onglet "
+                "« Téléphone »), et tous ceux qui étaient entrés seront "
+                "déconnectés.\n\nÀ ne faire que si le lien est tombé entre "
+                "de mauvaises mains. Continuer ?") != QMessageBox.Yes:
+            return
+        self.window.renew_invite()
+        for part in (self.nas_home, self.nas_away, self.pc_home, self.pc_away,
+                     self.phone_part):
+            part["said"].setText("Nouveau lien : scannez-le à nouveau.")
+        self.refresh()
+
+    def _show_invite(self, part: dict, address: str, empty: str,
+                     scale: int = 4) -> None:
+        """Le lien et son code, redessines seulement s'ils changent."""
+        part["link"].setPlaceholderText(empty)
+        if address == part["shown"]:
+            return
+        part["shown"] = address
+        part["link"].setText(address)
+        part["link"].setCursorPosition(0)
+        part["copy"].setEnabled(bool(address))
+        raw = qr_png(address, scale=scale) if address else b""
+        if not raw:
+            part["code"].hide()
+            return
+        picture = QPixmap()
+        picture.loadFromData(raw, "PNG")
+        part["code"].setPixmap(picture)
+        part["code"].show()
+
     # -- reglages -----------------------------------------------------------
     def _settings(self) -> QWidget:
         page = QWidget(self)
@@ -204,10 +526,12 @@ class ShareDialog(QDialog):
         self.switch.toggled.connect(self.window.set_share)
         box.addWidget(self.switch)
 
-        box.addWidget(QLabel(
-            "Le partage est actif dès le lancement. Il reste sans effet tant "
-            "qu'aucun mot de passe n'est posé : on n'ouvre pas une collection "
-            "sans serrure.", page))
+        hint = QLabel(
+            "Le partage est actif dès le lancement. On y entre par le lien "
+            "d'invitation (onglets « Via le PC » et « Via le NAS »), ou avec ce mot de passe — "
+            "utile pour qui n'a pas le lien.", page)
+        hint.setWordWrap(True)
+        box.addWidget(hint)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Mot de passe", page))
@@ -219,6 +543,16 @@ class ShareDialog(QDialog):
         keep.clicked.connect(self._save_word)
         row.addWidget(keep)
         box.addLayout(row)
+
+        # Le lien est fait pour durer : le meme pour les deux PC, PC eteints.
+        # « Nouveau lien », pose a cote des codes, se cliquait pour « avoir un
+        # lien » -- et cassait celui de tous les telephones. Il est ici, et
+        # dit ce qu'il fait.
+        renew = QPushButton("Révoquer le lien actuel…", page)
+        renew.setToolTip("Seulement si le lien est tombé entre de mauvaises "
+                         "mains : tous les téléphones devront rescanner.")
+        renew.clicked.connect(self._renew)
+        box.addWidget(renew, 0, Qt.AlignLeft)
 
         self.state = QLabel("", page)
         box.addWidget(self.state)
@@ -508,6 +842,8 @@ class ShareDialog(QDialog):
         self.visits.setHeaderLabels(["Quand", "Depuis", "Appareil", ""])
         self.visits.setRootIsDecorated(False)
         self.visits.header().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.visits.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.visits.customContextMenuRequested.connect(self._visit_menu)
         box.addWidget(self.visits, 1)
         box.addWidget(QLabel(
             "« refus » signale un mot de passe rejeté. Après huit essais "
@@ -526,11 +862,165 @@ class ShareDialog(QDialog):
         self.views.setHeaderLabels(["Quand", "Appareil", "Vidéo", "Regardée"])
         self.views.setRootIsDecorated(False)
         self.views.header().setSectionResizeMode(2, QHeaderView.Stretch)
+        # Une ligne mene a sa video : double-clic, le lecteur flottant ; clic
+        # droit, le lecteur ou l'explorateur.
+        self.views.itemDoubleClicked.connect(
+            lambda item, _column: self._play_row(item))
+        self.views.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.views.customContextMenuRequested.connect(self._row_menu)
         box.addWidget(self.views, 1)
-        box.addWidget(QLabel(
+        hint = QLabel(
+            "Double-clic sur une vidéo : elle s'ouvre dans le lecteur flottant. "
+            "Clic droit : la montrer dans l'explorateur.\n"
             "Le temps compté est celui où l'image défile : une vidéo en pause "
-            "ne compte pas, et un onglet oublié ne rapporte pas la nuit.", page))
+            "ne compte pas, et un onglet oublié ne rapporte pas la nuit. "
+            "« · NAS » : regardée par le partage du NAS.", page)
+        hint.setWordWrap(True)
+        box.addWidget(hint)
+        forget = QPushButton("Effacer ce journal", page)
+        forget.setToolTip("Efface ce qui a été regardé, ici et sur le NAS. "
+                          "Les connexions restent.")
+        forget.clicked.connect(self._forget_views)
+        box.addWidget(forget, 0, Qt.AlignLeft)
         return page
+
+    def _forget_views(self) -> None:
+        if QMessageBox.question(
+                self, "Effacer ce qui a été regardé",
+                "Tout ce qui a été regardé, ici et sur le NAS, sera oublié. "
+                "Continuer ?") != QMessageBox.Yes:
+            return
+        JOURNAL.clear_views()
+        # Le journal du NAS s'efface chez lui : on lui laisse le mot, il le
+        # lit dans la demi-minute (voir nas/serveur.py).
+        from .nas_publish import FOLDER, share_root
+        root = share_root(self.window.top_root() or "")
+        if root is not None:
+            try:
+                marker = root / FOLDER / "etat" / "effacer-vues"
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("oui", encoding="utf-8")
+            except OSError:
+                pass
+        self._nas_kept = None
+        self._rows = (None, None)
+        self.refresh()
+
+    def _favorites(self) -> QWidget:
+        """Les favoris de chaque appareil, marques depuis le telephone."""
+        page = QWidget(self)
+        box = QVBoxLayout(page)
+        self.favs = QTreeWidget(page)
+        self.favs.setHeaderLabels(["Appareil", "Vidéo", "Ajoutée le"])
+        self.favs.setRootIsDecorated(True)
+        self.favs.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.favs.itemDoubleClicked.connect(lambda item, _c: self._play_row(item))
+        self.favs.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.favs.customContextMenuRequested.connect(self._fav_menu)
+        box.addWidget(self.favs, 1)
+        hint = QLabel("Chaque personne a ses favoris, marqués d'une étoile dans le "
+                      "lecteur du téléphone. Double-clic : regarder la vidéo. "
+                      "Clic droit sur un appareil : lui donner un nom.", page)
+        hint.setWordWrap(True)
+        box.addWidget(hint)
+        self._fav_rows = None
+        return page
+
+    def _fav_menu(self, point) -> None:
+        from PySide6.QtWidgets import QMenu
+        item = self.favs.itemAt(point)
+        if item is None:
+            return
+        menu = QMenu(self)
+        name = menu.addAction("Nommer cet appareil…")
+        play = menu.addAction("Regarder dans le lecteur flottant") \
+            if item.data(0, Qt.UserRole) else None
+        chosen = menu.exec(self.favs.viewport().mapToGlobal(point))
+        if chosen is name:
+            self._name(item)
+            self._fav_rows = None
+        elif play is not None and chosen is play:
+            self._play_row(item)
+
+    def _fill_favorites(self, nas_favorites: list) -> None:
+        from .access import when as _when
+        rows = [row + ("",) for row in JOURNAL.all_favorites()]
+        rows += [row + (" · NAS",) for row in nas_favorites]
+        aliases = dict(self.window.cfg["share_aliases"] or {})
+        key = (tuple(rows), tuple(sorted(aliases.items())))
+        if key == self._fav_rows:
+            return
+        self._fav_rows = key
+        self.favs.clear()
+        groups: dict = {}
+        for at, label, name, mark, where in sorted(rows, key=lambda r: -r[0]):
+            parent = groups.get(label + where)
+            if parent is None:
+                parent = QTreeWidgetItem(self.favs, [(aliases.get(label) or label) + where,
+                                                     "", ""])
+                parent.setData(0, Qt.UserRole + 1, label)
+                parent.setToolTip(0, label + "\nClic droit : lui donner un nom.")
+                parent.setExpanded(True)
+                groups[label + where] = parent
+            child = QTreeWidgetItem(parent, ["", name, _when(at)])
+            child.setData(0, Qt.UserRole, mark)
+            child.setData(0, Qt.UserRole + 1, label)
+        for label, parent in groups.items():
+            parent.setText(1, f"{parent.childCount()} favori(s)")
+        self.favs.resizeColumnToContents(0)
+
+    def _row_path(self, item):
+        """Le fichier d'une ligne du journal, ou None (et on dit pourquoi)."""
+        mark = item.data(0, Qt.UserRole) if item is not None else ""
+        path = self.window.video_for_mark(mark) if mark else None
+        if path is None:
+            QMessageBox.information(
+                self, "Vidéo introuvable",
+                "Cette vidéo n'est plus dans la collection : déplacée, "
+                "renommée ou supprimée depuis.")
+        return path
+
+    def _play_row(self, item) -> None:
+        path = self._row_path(item)
+        if path is not None:
+            self.window.play_floating_path(path)
+
+    def _row_menu(self, point) -> None:
+        from PySide6.QtWidgets import QMenu
+        item = self.views.itemAt(point)
+        if item is None:
+            return
+        menu = QMenu(self)
+        play = menu.addAction("Regarder dans le lecteur flottant")
+        show = menu.addAction("Montrer dans l'explorateur")
+        menu.addSeparator()
+        name = menu.addAction("Nommer cet appareil…")
+        chosen = menu.exec(self.views.viewport().mapToGlobal(point))
+        if chosen is name:
+            self._name(item)
+        elif chosen is play:
+            self._play_row(item)
+        elif chosen is show:
+            path = self._row_path(item)
+            if path is not None:
+                self.window.reveal_path(str(path))
+
+    def _visit_menu(self, point) -> None:
+        from PySide6.QtWidgets import QMenu
+        item = self.visits.itemAt(point)
+        if item is None:
+            return
+        menu = QMenu(self)
+        name = menu.addAction("Nommer cet appareil…")
+        if menu.exec(self.visits.viewport().mapToGlobal(point)) is name:
+            self._name(item)
+
+    def _name(self, item) -> None:
+        """Un nom pour l'appareil de cette ligne ; partout ensuite."""
+        label = item.data(0, Qt.UserRole + 1) or ""
+        if label and self.window.name_device(label, self):
+            self._rows = (None, None)
+            self.refresh()
 
     def _forget(self) -> None:
         if QMessageBox.question(
@@ -571,7 +1061,71 @@ class ShareDialog(QDialog):
         self.setup.setVisible(kind == "tailscale" and not public)
         self.setup.setEnabled(not self._busy)
         self._paint_code(public + "/" if public else "")
+        self._refresh_pc()
+        self._refresh_nas()
+        self._refresh_phone()
         self._fill_journals()
+
+    def _refresh_pc(self) -> None:
+        window = self.window
+        on = bool(window.cfg["share"])
+        self.pc_state.setText(window.share_state())
+        home = window.share_home_link() if on else ""
+        away = window.share_away_link() if on else ""
+        if not on:
+            closed = "Partage fermé (Réglages › « Autoriser le partage à distance »)."
+            self._show_invite(self.pc_home, "", closed)
+            self._show_invite(self.pc_away, "", closed)
+        else:
+            self._show_invite(self.pc_home, home,
+                              "Partage sur le Wi-Fi désactivé, ou pas encore ouvert."
+                              if window.share_server is None or not window.cfg["share_lan"]
+                              else "Adresse du PC sur le Wi-Fi introuvable.")
+            self._show_invite(self.pc_away, away,
+                              "Adresse publique fermée : « Ouvrir l'adresse publique ».")
+        public = bool(window.tunnel_address)
+        self.pc_open.setVisible(on and not public)
+        self.pc_open.setEnabled(not self._busy and window.share_server is not None)
+
+    def _refresh_nas(self) -> None:
+        from .nas_publish import NAS_PORT, PUBLISHER
+        from .web import INVITE_PATH
+        self.nas_state.setText(PUBLISHER.state)
+        key = self.window.cfg["share_invite"]
+        tailnet = self.window.nas_tailnet() if hasattr(self.window, "nas_tailnet") else ""
+        home = (f"http://{PUBLISHER.lan}:{NAS_PORT}{INVITE_PATH}{key}"
+                if PUBLISHER.lan and key else "")
+        away = (f"https://prisme-nas.{tailnet}{INVITE_PATH}{key}"
+                if tailnet and key else "")
+        self._show_invite(self.nas_home, home, "Pas encore publié.")
+        self._show_invite(self.nas_away, away,
+                          "Nom Tailscale encore inconnu : ouvrez une fois l'adresse "
+                          "fixe (Tailscale) du PC, dans « Réglages ».")
+
+    def _nas_journal(self) -> tuple:
+        """(connexions, visionnages) notes par le serveur du NAS, relus
+        seulement quand son journal a change (on le recopie a chaque fois)."""
+        from .access import visits_in, views_in
+        from .nas_publish import FOLDER, share_root
+        root = share_root(self.window.top_root() or "")
+        if root is None:
+            return [], []
+        journal = root / FOLDER / "etat" / "acces.db"
+        try:
+            stamp = journal.stat().st_mtime
+        except OSError:
+            return [], []
+        kept = getattr(self, "_nas_kept", None)
+        if kept is None or kept[0] != stamp:
+            from .access import favorites_in
+            kept = (stamp, (visits_in(journal), views_in(journal)))
+            self._nas_favorites = favorites_in(journal)
+            self._nas_kept = kept
+        visits, views = kept[1]
+        # Tant que le NAS n'a pas efface ses visionnages, ils ne reviennent pas.
+        if (journal.parent / "effacer-vues").exists():
+            views = []
+        return visits, views
 
     def _fill_journals(self) -> None:
         """Les journaux, refaits seulement s'ils ont change.
@@ -579,18 +1133,35 @@ class ShareDialog(QDialog):
         Les refaire toutes les quatre secondes ramenait la liste en haut et
         perdait la ligne selectionnee, pour rien la plupart du temps.
         """
-        visits, views = JOURNAL.visits(), JOURNAL.views()
+        nas_visits, nas_views = self._nas_journal()
+        self._fill_favorites(getattr(self, "_nas_favorites", []))
+        visits = [row + ("",) for row in JOURNAL.visits()]
+        visits += [row + (" · NAS",) for row in nas_visits]
+        visits.sort(key=lambda row: row[0], reverse=True)
+        views = [row + ("",) for row in JOURNAL.views()]
+        views += [row + (" · NAS",) for row in nas_views]
+        views.sort(key=lambda row: row[0], reverse=True)
+        aliases = dict(self.window.cfg["share_aliases"] or {})
+        visits = [row + (aliases.get(row[2], ""),) for row in visits]
+        views = [row + (aliases.get(row[2], ""),) for row in views]
         if (visits, views) == self._rows:
             return
         self._rows = (visits, views)
         self.visits.clear()
-        for at, ip, label, event in visits:
-            QTreeWidgetItem(self.visits, [
-                when(at), ip, label, "" if event == "entree" else event])
+        for at, ip, label, event, where, alias in visits:
+            row = QTreeWidgetItem(self.visits, [
+                when(at), ip, (alias or label) + where,
+                "" if event == "entree" else event])
+            row.setData(0, Qt.UserRole + 1, label)
+            row.setToolTip(2, label + "\nClic droit : lui donner un nom.")
         self.views.clear()
-        for at, _ip, label, name, seconds in views:
-            QTreeWidgetItem(self.views, [
-                when(at), label, name, spell(seconds)])
+        for at, _ip, label, name, seconds, mark, where, alias in views:
+            row = QTreeWidgetItem(self.views, [
+                when(at), (alias or label) + where, name, spell(seconds)])
+            row.setData(0, Qt.UserRole, mark)
+            row.setData(0, Qt.UserRole + 1, label)
+            row.setToolTip(1, label + "\nClic droit : lui donner un nom.")
+            row.setToolTip(2, "Double-clic : la regarder. Clic droit : plus.")
         for tree in (self.visits, self.views):
             for column in (0, 1, 3):
                 tree.resizeColumnToContents(column)

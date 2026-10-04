@@ -673,7 +673,11 @@ def open_fixed(port: int) -> tuple:
     ready, why = fixed_state(fresh=True)
     if not ready:
         return "", why
-    code, said, link = _watch(["funnel", "--bg", str(port)], timeout=60)
+    # Le port HTTPS dit en toutes lettres : ouvert sans lui, le partage ne se
+    # laissait plus retirer par « funnel --https=443 off » (Tailscale 1.102 :
+    # « handler does not exist »), et « Fermer » ne fermait rien.
+    code, said, link = _watch(["funnel", "--bg", "--https=443", str(port)],
+                              timeout=60)
     forget_fixed()
     if link:
         return "", "Le partage public doit être autorisé une fois : " + link

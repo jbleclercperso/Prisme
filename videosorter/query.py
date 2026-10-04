@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .tagging import fold
+from .textfold import fold
 
 # rapidfuzz ne se charge qu'a la premiere recherche approchee : son import
 # pesait sur chaque lancement, pour une fonction dont on ne se sert pas

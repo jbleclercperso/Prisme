@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import math
 import random
+import time
 from collections import OrderedDict
 
 from PySide6.QtCore import (
-    QEvent, QObject, QPoint, QRect, QRunnable, QThreadPool, QTimer, QUrl, Qt,
+    QEvent, QObject, QPoint, QRect, QRunnable, QSize, QThreadPool, QTimer, QUrl, Qt,
     Signal,
 )
 from PySide6.QtGui import QCursor, QImage, QImageReader, QPixmap, QRegion
@@ -23,9 +24,16 @@ from PySide6.QtWidgets import (
     QFrame, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from .floatguard import FloatGuard
+from .config import is_photo
 from .perf import mark
 from .scan import MODE_FOLDERS, human_duration, human_resolution, human_size
+from .icons import icon
 from .widgets import Expiring, PlayMarks, VideoWake
+
+# L'epingle : bleue quand l'element est epingle (il passe en tete de sa liste).
+PIN_ON = "#6ea8ff"
+PIN_OFF = "#9aa6b4"
 
 # Une seule feuille pour toutes les cartes, posee sur leur toile. Une feuille
 # par carte obligeait Qt a analyser et appliquer quarante fois la meme regle a
@@ -33,8 +41,9 @@ from .widgets import Expiring, PlayMarks, VideoWake
 # planche.
 BOARD_STYLE = """
 QLabel#cardRating { color: #f5c542; background: rgba(8, 10, 13, 190);
-                    border-radius: 4px; padding: 0 5px; font-size: 14px;
+                    border-radius: 4px; padding: 0; font-size: 14px;
                     font-weight: 700; }
+QLabel#cardPin { background: rgba(8, 10, 13, 190); border-radius: 4px; }
 """
 
 # L'etoile de la carte survolee : la meme pastille que la note, mais vide et
@@ -46,6 +55,8 @@ QPushButton#cardStar { background: rgba(8, 10, 13, 190); border: 0;
 QPushButton#cardStar:hover { color: #ffffff; }
 QPushButton#cardStar[favorite="true"] { color: #f5c542; }
 QPushButton#cardStar[favorite="true"]:hover { color: #ffd966; }
+QPushButton#cardPin { background: rgba(8, 10, 13, 190); border: 0;
+                      border-radius: 4px; padding: 0; }
 """
 
 # Densites proposees : moins de colonnes, donc des cartes plus grandes.
@@ -285,7 +296,19 @@ class BoardCard(QFrame):
         self.rating = QLabel("", self)
         self.rating.setObjectName("cardRating")
         self.rating.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.rating.setFixedSize(24, 21)
+        self.rating.setAlignment(Qt.AlignCenter)
         self.rating.hide()
+        # L'epingle : un element epingle passe en tete de sa liste. Visible au
+        # repos sur les cartes epinglees seulement, a cote de l'etoile.
+        self.pinned_value = False
+        self.pin_mark = QLabel(self)
+        self.pin_mark.setObjectName("cardPin")
+        self.pin_mark.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.pin_mark.setFixedSize(24, 21)
+        self.pin_mark.setAlignment(Qt.AlignCenter)
+        self.pin_mark.setPixmap(icon("pin", PIN_ON).pixmap(14, 14))
+        self.pin_mark.hide()
 
         # Elle ne se montre qu'au survol, ou si elle est cochee : une case par
         # vignette, visible en permanence, ferait un damier avant de faire une
@@ -351,15 +374,25 @@ class BoardCard(QFrame):
         self.pick.move(area.left() + 6, area.top() + 6)
         self.pick.raise_()
         self.rating.adjustSize()
-        self.rating.move(area.left() + 6, area.top() + 30)
+        # Sur une rangee, a droite de la coche : la note, puis l'epingle --
+        # aux places memes de l'etoile et de l'epingle flottantes du survol.
+        self.rating.move(area.left() + 30, area.top() + 6)
         self.rating.raise_()
+        self.pin_mark.move(area.left() + 58, area.top() + 6)
+        self.pin_mark.raise_()
 
     def handle_rect(self) -> QRect:
         """La bande du haut de l'image, en coordonnees globales : la coche,
-        et la note dessous."""
+        l'etoile et l'epingle, sur une rangee."""
         area = self.image.geometry()
         top_left = self.mapToGlobal(area.topLeft())
-        return QRect(top_left.x(), top_left.y(), area.width(), 58)
+        return QRect(top_left.x(), top_left.y(), area.width(), 30)
+
+    def set_pinned(self, pinned: bool) -> None:
+        self.pinned_value = bool(pinned)
+        self.pin_mark.setVisible(self.pinned_value and self.property("hovered") != "true")
+        if self.pinned_value:
+            self._place_handles()
 
     def set_item(self, item, stars: int) -> None:
         self.item = item
@@ -380,8 +413,10 @@ class BoardCard(QFrame):
         self.meta.set_full_text(f"{note} · {item.name}" if note else item.name)
         count = (f"{item.video_count} vidéo{'s' if item.video_count > 1 else ''}\n"
                  if item.kind == MODE_FOLDERS else "")
+        tip = getattr(item, "board_tip", "")
         self.meta.setToolTip((f"{note}\n" if note else "")
-                             + f"{item.path}\n{count}{human_size(item.size)}")
+                             + (f"{tip}\n{count}" if tip else
+                                f"{item.path}\n{count}{human_size(item.size)}"))
         if item.kind == MODE_FOLDERS:
             # Le seul chiffre : sur une pastille posee au coin d'une image, le
             # mot « videos » ne dit rien que la vignette ne montre deja, et il
@@ -467,6 +502,7 @@ class BoardCard(QFrame):
     def _show_handles(self, hovered: bool) -> None:
         self.pick.setVisible(hovered or self.pick.isChecked())
         self.rating.setVisible(self.stars_value > 0 and not hovered)
+        self.pin_mark.setVisible(self.pinned_value and not hovered)
         if hovered or self.pick.isChecked():
             self._place_handles()
 
@@ -509,7 +545,7 @@ class BoardCard(QFrame):
             self.played.emit(self.index)
 
 
-class HoverHandles(QWidget):
+class HoverHandles(FloatGuard, QWidget):
     """Coche et étoile flottantes, au-dessus de la carte survolée.
 
     Le lecteur d'apercu est une fenetre native : il passe devant tout ce qu'on
@@ -520,6 +556,7 @@ class HoverHandles(QWidget):
     """
 
     starred = Signal()
+    pinned = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint
@@ -535,13 +572,12 @@ class HoverHandles(QWidget):
         self.pick.setCursor(Qt.PointingHandCursor)
         self.pick.setFocusPolicy(Qt.NoFocus)
         self.pick.setFixedSize(20, 20)
-        column = QVBoxLayout()
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(4)
-        column.addWidget(self.pick, 0, Qt.AlignLeft)
-        # Le favori d'un clic, sous la coche, la ou la carte montre sa note :
-        # il fallait jusqu'ici ouvrir la fiche, noter, puis revenir. Toujours
-        # la au survol — vide ou doree — pour qu'on sache ou cliquer.
+        layout.setSpacing(4)
+        layout.addWidget(self.pick, 0, Qt.AlignTop)
+        # Le favori d'un clic, a droite de la coche, la ou la carte montre sa
+        # note : il fallait jusqu'ici ouvrir la fiche, noter, puis revenir.
+        # Toujours la au survol — vide ou doree — pour qu'on sache ou cliquer.
+        # (Sous la coche, il tombait mal sous la main.)
         self.star = QPushButton("☆", self)
         self.star.setObjectName("cardStar")
         self.star.setProperty("favorite", "false")
@@ -550,10 +586,20 @@ class HoverHandles(QWidget):
         self.star.setFixedSize(24, 21)
         self.star.setToolTip("Mettre en favori")
         self.star.clicked.connect(lambda _c=False: self.starred.emit())
-        column.addWidget(self.star, 0, Qt.AlignLeft)
-        column.addStretch(1)
-        layout.addLayout(column)
+        layout.addWidget(self.star, 0, Qt.AlignTop)
+        # L'epingle, a cote : l'element passe en tete de sa liste (onglet
+        # Dossiers ou Videos), en plus ou a la place d'un favori.
+        self.pin = QPushButton("", self)
+        self.pin.setObjectName("cardPin")
+        self.pin.setCursor(Qt.PointingHandCursor)
+        self.pin.setFocusPolicy(Qt.NoFocus)
+        self.pin.setFixedSize(24, 21)
+        self.pin.setIconSize(QSize(14, 14))
+        self.pin.clicked.connect(lambda _c=False: self.pinned.emit())
+        layout.addWidget(self.pin, 0, Qt.AlignTop)
         layout.addStretch(1)
+        self._pin_on = None
+        self.set_pin(False)
         self.card = None
         self.hide()
 
@@ -567,16 +613,26 @@ class HoverHandles(QWidget):
         self.star.style().unpolish(self.star)
         self.star.style().polish(self.star)
 
+    def set_pin(self, pinned: bool) -> None:
+        if self._pin_on == bool(pinned):
+            return
+        self._pin_on = bool(pinned)
+        self.pin.setIcon(icon("pin", PIN_ON if pinned else PIN_OFF))
+        self.pin.setToolTip("Désépingler" if pinned else
+                            "Épingler : en tête de la liste, dans son onglet")
+
     def sync(self, card) -> None:
-        """Reprend l'etat de la carte : coche et favori."""
+        """Reprend l'etat de la carte : coche, favori, epingle."""
         if self.pick.isChecked() != card.pick.isChecked():
             self.pick.blockSignals(True)
             self.pick.setChecked(card.pick.isChecked())
             self.pick.blockSignals(False)
         self.set_star(card.stars_value > 0)
         # Un mot-cle ne se met pas en favori : son etoile ne faisait rien.
+        self.set_pin(card.pinned_value)
         item = card.item
         self.star.setVisible(not (item is not None and item.is_tag))
+        self.pin.setVisible(not (item is not None and item.is_tag))
 
     def attach(self, card, rect: QRect) -> None:
         """Se pose sur cette carte, et relaie ses gestes a ses propres poignees."""
@@ -594,6 +650,7 @@ class HoverHandles(QWidget):
             region = QRegion(self.pick.geometry())
             if self.star.isVisibleTo(self):
                 region = region.united(QRegion(self.star.geometry()))
+                region = region.united(QRegion(self.pin.geometry()))
             self.setMask(region)
         if self.isHidden():
             self.show()
@@ -627,6 +684,9 @@ class BoardView(QWidget):
     # position. La planche n'enregistre rien elle-meme ; on lui renvoie la
     # nouvelle valeur par set_stars.
     favoriteToggled = Signal(int)
+    pinToggled = Signal(int)
+    # Un dossier de photos survole : ses images a feuilleter (`add_flip`).
+    flipNeeded = Signal(int)
 
     def __init__(self, preview_seconds: int = 10, columns: int = DEFAULT_COLUMNS,
                  parent=None):
@@ -715,6 +775,12 @@ class BoardView(QWidget):
         # bout de l'ecran pour continuer.
         self.scroll.verticalScrollBar().valueChanged.connect(self._maybe_next_page)
         self._at_end = False
+        # ... mais seulement quand c'est l'utilisateur qui fait defiler : une
+        # carte qui change d'image (les couvertures tournantes) remet la page
+        # en place un instant, et l'on sautait de page sans avoir rien touche.
+        self._user_scroll_at = 0.0
+        for watched in (self.scroll, self.scroll.viewport(), self.scroll.verticalScrollBar()):
+            watched.installEventFilter(self)
 
         # Les cartes gardaient la largeur calculee au premier affichage :
         # agrandir la fenetre laissait une bande vide a droite, la retrecir les
@@ -733,6 +799,9 @@ class BoardView(QWidget):
         self.floating = HoverHandles(self.window())
         self.floating.pick.toggled.connect(self._float_picked)
         self.floating.starred.connect(self._float_starred)
+        self.floating.pinned.connect(self._float_pinned)
+        # Ce qui est epingle (la fenetre le sait) : chemin -> vrai ou faux.
+        self.pinned_of = lambda _path: False
         # Le fantome : Qt livre parfois une image qui appartient encore au
         # fichier precedent, juste apres le changement de source. Deux
         # verrous, comme dans la fiche : rien avant que le nouveau media soit
@@ -754,6 +823,14 @@ class BoardView(QWidget):
         self.settle_timer.setSingleShot(True)
         self.settle_timer.setInterval(HOVER_SETTLE_MS)
         self.settle_timer.timeout.connect(self._play_settled)
+        # Le feuilletage d'un dossier de photos survole (`_flip_start`).
+        self.flip_timer = QTimer(self)
+        self.flip_timer.setInterval(self.FLIP_MS)
+        self.flip_timer.timeout.connect(self._flip_step)
+        self._flip_card = None
+        self._flip_home = ""
+        self._flip_paths: list = []
+        self._flip_at = 0
 
     # -- contenu ---------------------------------------------------------
     def showEvent(self, event):
@@ -847,6 +924,7 @@ class BoardView(QWidget):
             else:
                 card.set_state(item.status)
                 card.set_stars(self._stars_of(item.path))
+            card.set_pinned(self.pinned_of(item.path))
             # La coche appartient a l'element, pas a la carte : les cartes sont
             # reutilisees d'une page a l'autre.
             card.set_picked(item.item_id in self.picked_ids)
@@ -910,11 +988,23 @@ class BoardView(QWidget):
             self.asideRequested.emit(card.index)
         event.accept()
 
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Wheel, QEvent.KeyPress, QEvent.MouseButtonPress,
+                            QEvent.MouseMove):
+            if event.type() != QEvent.MouseMove or watched is self.scroll.verticalScrollBar():
+                self._user_scroll_at = time.monotonic()
+        return super().eventFilter(watched, event)
+
     def _maybe_next_page(self, value: int) -> None:
         bar = self.scroll.verticalScrollBar()
         if bar.maximum() <= 0:
             return
         at_end = value >= bar.maximum() - 4
+        if not bar.isSliderDown() and time.monotonic() - self._user_scroll_at > 1.5:
+            # La page a bouge toute seule (une image arrivee, une couverture
+            # changee) : on note ou l'on est, sans tourner la page.
+            self._at_end = at_end
+            return
         # Une seule fois par arrivee en bas : sans ce verrou, le moindre
         # tremblement de molette avalerait plusieurs pages d'affilee.
         if at_end and not self._at_end and self.page < self.total_pages() - 1:
@@ -985,6 +1075,7 @@ class BoardView(QWidget):
         card.index = position
         card.set_card_width(self._card_width())
         card.set_item(item, stars)
+        card.set_pinned(self.pinned_of(item.path))
         self.grid.addWidget(card, slot // self._cols(), slot % self._cols())
         card.show()
         self._last_spot = None
@@ -1008,6 +1099,13 @@ class BoardView(QWidget):
             card.set_stars(stars)
             if self.floating.card is card:
                 self.floating.set_star(card.stars_value > 0)
+
+    def set_pinned(self, position: int, pinned: bool) -> None:
+        card = self._card_for(position)
+        if card is not None:
+            card.set_pinned(pinned)
+            if self.floating.card is card:
+                self.floating.set_pin(pinned)
 
     def set_state(self, position: int, status: str) -> None:
         card = self._card_for(position)
@@ -1101,6 +1199,18 @@ class BoardView(QWidget):
 
     def _poll_hover(self) -> None:
         if not self.isVisible() or not self.window().isActiveWindow():
+            # Prisme n'a plus la main (la recherche web par-dessus, une autre
+            # application) : la coche et l'etoile flottantes s'en vont. Ce sont
+            # de petites fenetres posees au-dessus de tout : laissees la, elles
+            # transparaissaient par-dessus la fenetre de devant.
+            if self.hovered != -1 or self.floating.isVisible():
+                if 0 <= self.hovered < len(self.cards):
+                    self.cards[self.hovered].set_hovered(False)
+                self.hovered = -1
+                self._last_spot = None
+                self.floating.detach()
+                self._flip_stop()
+                self.stop()             # l'apercu aussi : on regarde ailleurs
             return
         cursor = QCursor.pos()
         corner = self.canvas.mapToGlobal(QPoint(0, 0))
@@ -1116,6 +1226,7 @@ class BoardView(QWidget):
             return
         if 0 <= self.hovered < len(self.cards):
             self.cards[self.hovered].set_hovered(False)
+        self._flip_stop()
         self._blank()
         self.marks.clear()
         self.hovered = found
@@ -1148,6 +1259,11 @@ class BoardView(QWidget):
         if card is not None:
             # Par la coche de la carte : c'est elle qui est branchee au reste.
             card.pick.setChecked(on)
+
+    def _float_pinned(self) -> None:
+        card = self.floating.card
+        if card is not None and 0 <= card.index < len(self.items):
+            self.pinToggled.emit(card.index)
 
     def _float_starred(self) -> None:
         card = self.floating.card
@@ -1184,8 +1300,52 @@ class BoardView(QWidget):
             self.video.show()
             self.wake.over(self.video.geometry())
 
+    # -- le feuilletage d'un dossier de photos ----------------------------------
+    FLIP_MS = 650
+
+    def _flip_start(self, card) -> None:
+        """Un dossier de photos survole : ses images defilent sur la carte.
+        La fenetre en tire une dizaine au hasard (`flipNeeded`) et les donne
+        a mesure qu'elles sont pretes (`add_flip`)."""
+        self._flip_stop()
+        self._flip_card = card
+        self._flip_home = card.thumb_path
+        self._flip_paths = [card.thumb_path] if card.thumb_path else []
+        self._flip_at = 0
+        self.flipNeeded.emit(card.index)
+
+    def add_flip(self, position: int, path: str) -> None:
+        card = self._flip_card
+        if card is None or card.index != position or path in self._flip_paths:
+            return
+        self._flip_paths.append(path)
+        if not self.flip_timer.isActive():
+            self.flip_timer.start()
+
+    def _flip_step(self) -> None:
+        card = self._flip_card
+        if card is None or len(self._flip_paths) < 2:
+            return
+        self._flip_at = (self._flip_at + 1) % len(self._flip_paths)
+        card.set_thumb(self._flip_paths[self._flip_at])
+
+    def _flip_stop(self) -> None:
+        """La souris part : la carte reprend son image."""
+        self.flip_timer.stop()
+        card, self._flip_card = self._flip_card, None
+        if card is not None and self._flip_home and card.thumb_path != self._flip_home:
+            card.set_thumb(self._flip_home)
+        self._flip_paths = []
+
     def _play(self, position: int) -> None:
         card = self.cards[position]
+        if card.video and is_photo(card.video):
+            # Une photo n'a rien a lire au survol ; un dossier de photos
+            # feuillette ses images.
+            self._blank()
+            if card.item is not None and card.item.kind == MODE_FOLDERS:
+                self._flip_start(card)
+            return
         if not card.video or card.video in self.unplayable:
             self._blank()
             return
@@ -1258,6 +1418,7 @@ class BoardView(QWidget):
 
     def stop(self) -> None:
         self.settle_timer.stop()
+        self._flip_stop()
         self.player.stop()
         self._blank()
         self.marks.clear()

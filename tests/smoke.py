@@ -22,7 +22,7 @@ shutil.rmtree(base, ignore_errors=True)
 root = base / "root"
 for folder, names in {
     "+ Set": ["deja range"],
-    "+ Beach": ["vrac beach z.mp4"],
+    "+ Beach": ["vrac beach z.mp4", "8f7e6d5c4b.mp4"],
     "Vacances beach 2019": ["beach sunset a.mp4", "beach party b.mp4"],
     "Soiree beach": ["BEACH night c.mp4", "road trip d.mp4"],
     "Divers": ["road movie e.mp4"],
@@ -111,7 +111,17 @@ check(patches == [], f"et la relecture n a rien corrige ({patches})")
 check(window.scan_thread.rescanned == 0,
       f"aucun dossier reparcouru ({window.scan_thread.rescanned})")
 
+pinned = {i.name: sorted(Path(v).name for v in i.videos)
+          for i in window.items if i.pinned}
+from videosorter.window import PINNED_LOOSE, PINNED_UNREAD  # noqa: E402
+check(window.items[0].pinned and pinned.get(PINNED_LOOSE) == ["8f7e6d5c4b.mp4"],
+      f"« {PINNED_LOOSE} », épinglé en tête : hors sous-dossier ET nom illisible, "
+      f"pas « vrac beach z » qui a un titre ({pinned})")
+check(pinned.get(PINNED_UNREAD) == ["8f7e6d5c4b.mp4"],
+      f"« {PINNED_UNREAD} » : les noms sans un mot, où qu'ils soient ({pinned})")
+
 print("\n[3] Les onglets repartent de la racine")
+window.index = next(n for n, i in enumerate(window.items) if not i.pinned)
 window.enter_current()
 settle()
 check(window.root != root, f"on peut descendre dans un dossier ({window.root.name})")

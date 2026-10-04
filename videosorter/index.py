@@ -150,6 +150,23 @@ def _under(key: str, text: str) -> bool:
     return text == key or text.startswith((key + "\\", key + "/"))
 
 
+def _spelling(path: str) -> str:
+    """Une ecriture de chemin qui ne depend ni de la casse, ni de la facon
+    d'atteindre le partage : « Z:\\Films\\a.mkv » et
+    « \\\\as1104t\\Volume 3\\Films\\a.mkv » se rejoignent quand Z: designe
+    ce partage."""
+    text = str(path)
+    if len(text) > 1 and text[1] == ":" and os.name == "nt":
+        try:
+            from .nas_publish import _mapped
+            target = _mapped(text[:2].upper())
+        except Exception:                               # noqa: BLE001
+            target = ""
+        if target:
+            text = target.rstrip("\\/") + text[2:]
+    return os.path.normcase(text)
+
+
 def _parse_hashes(text: str):
     try:
         return array("Q", (int(x, 16) for x in text.split(",") if x))
@@ -211,6 +228,9 @@ class Index:
         self._scene_paths: set | None = None
         self._scene_cache: dict = {}
         self._sig_stamps: dict | None = None
+        # {ecriture normalisee: chemin retenu}, fait a la premiere video
+        # introuvable sous son ecriture exacte (voir `sig_spelling`).
+        self._sig_spellings: dict | None = None
 
     # -- ouverture ------------------------------------------------------
     def _connect(self, timeout: float) -> sqlite3.Connection:
@@ -491,6 +511,35 @@ class Index:
                 self._sig_stamps = {path: stamp for path, stamp in rows}
             return self._sig_stamps
 
+    def sig_spelling(self, path) -> str | None:
+        """Le chemin sous lequel l'empreinte de cette video est retenue,
+        quand ce n'est pas exactement le sien -- None sinon.
+
+        Les empreintes sont rangees sous le chemin tel que le parcours l'a
+        ecrit. La meme racine ouverte une autre fois sous une autre casse
+        (« \\\\as1104t\\volume 3 »), ou par sa lettre de lecteur (« Z: »)
+        plutot que par son nom reseau, ne retrouvait plus rien : des heures
+        d'empreintes refaites pour des fichiers qui n'avaient pas bouge.
+        """
+        stamps = self._sig_index()
+        with self._lazy_lock:
+            spellings = self._sig_spellings
+            if spellings is None:
+                spellings = {_spelling(key): key for key in stamps.copy()}
+                self._sig_spellings = spellings
+        found = spellings.get(_spelling(str(path)))
+        return found if found is not None and found in stamps else None
+
+    def sig_count_under(self, root) -> int:
+        """Combien de videos sous `root` ont deja leur empreinte (lecture
+        memoire, apres la premiere fois)."""
+        top = os.path.normcase(str(root)).rstrip("\\/")
+        if not top:
+            return 0
+        heads = (top + "\\", top + "/")
+        return sum(1 for path in self._sig_index()
+                   if os.path.normcase(path).startswith(heads))
+
     def _fetch(self, sql: str, args: tuple = ()) -> list:
         if self.db is None:
             return []
@@ -504,8 +553,9 @@ class Index:
         """L'empreinte d'une video. Une liste vide vaut « essaye, rien
         d'exploitable » : on ne la recalculera pas tant qu'elle ne change pas."""
         key = str(path)
-        self._sig_index()[key] = stamp or ""
         if self.db is None:
+            # Sans index, rien ne serait retenu : la dire connue ferait
+            # croire, pendant la seance, a une empreinte qu'on n'a pas.
             return
         with self.lock:
             try:
@@ -514,8 +564,15 @@ class Index:
                     " VALUES (?,?,?,?)",
                     (key, stamp or "", ",".join(f"{h:016x}" for h in hashes),
                      int(size or 0)))
-            except sqlite3.Error:
+            except sqlite3.Error as exc:
+                # Ne se perd plus sans un mot : l'empreinte sera refaite au
+                # prochain passage, et l'on sait pourquoi.
+                self.problem = str(exc)
                 return
+            self._sig_index()[key] = stamp or ""
+            spellings = self._sig_spellings
+            if spellings is not None:
+                spellings[_spelling(key)] = key
             # Groupe avec le reste : un commit par empreinte, depuis six fils,
             # tenait le verrou que l'interface attendait.
             self._touched()
@@ -565,6 +622,9 @@ class Index:
     def forget_sig(self, path) -> None:
         key = str(path)
         self._sig_index().pop(key, None)
+        spellings = self._sig_spellings
+        if spellings is not None and spellings.get(_spelling(key)) == key:
+            spellings.pop(_spelling(key), None)
         if self.db is None:
             return
         with self.lock:
@@ -895,20 +955,30 @@ class Index:
                 return
             self._touched()
 
-    def forget(self, folder) -> None:
+    def forget(self, folder, keep: bool = False) -> None:
         """Oublie ce dossier : l'application vient d'y toucher.
 
         Les dates relevees en enumerant un repertoire peuvent retarder sur la
         realite. Pour les changements que l'application fait elle-meme, on ne
         s'en remet pas a elles.
+
+        `keep` : le dossier est toujours la (on a range ou supprime une video
+        dedans) ; sa fiche reste, marquee « a relire » -- la prochaine analyse
+        la refait. L'effacer le retirait de la collection tant qu'une analyse
+        complete ne l'avait pas relu : une nuit de tri a travers soixante-six
+        dossiers en avait fait disparaitre onze mille videos de l'ecran.
         """
         if self.db is None:
             return
         key = str(folder)
         with self.lock:
             try:
-                self.db.execute("DELETE FROM folders WHERE id = ? OR id = ?",
-                                (key, key + "|vrac"))
+                if keep:
+                    self.db.execute("UPDATE folders SET sig = '' WHERE id = ? OR id = ?",
+                                    (key, key + "|vrac"))
+                else:
+                    self.db.execute("DELETE FROM folders WHERE id = ? OR id = ?",
+                                    (key, key + "|vrac"))
                 self.db.execute("DELETE FROM expansions WHERE path = ?", (key,))
             except sqlite3.Error:
                 return
@@ -932,6 +1002,7 @@ class Index:
                       self._sig_stamps):
             if table is not None:
                 moved += _rekey(table, old_s, new_s)
+        self._sig_spellings = None
         for keys in (self.seen, self._scene_paths):
             if keys is not None:
                 moved += _rekey_set(keys, old_s, new_s)
@@ -972,6 +1043,7 @@ class Index:
             if table is not None:
                 for name in [k for k in list(table) if _under(key, k)]:
                     table.pop(name, None)
+        self._sig_spellings = None
         for keys in (self.seen, self._scene_paths):
             if keys is not None:
                 for name in [k for k in list(keys)

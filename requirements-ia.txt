@@ -1,0 +1,9 @@
+# Le Labo IA (essai) : facultatif. Prisme marche sans ces paquets, et le labo
+# propose de les installer lui-meme (⋯ › Collection › Labo IA (essai)…).
+# Avec une carte NVIDIA, torch et torchvision s'installent de preference depuis
+#   https://download.pytorch.org/whl/cu121
+torch
+torchvision
+open_clip_torch
+transformers
+numpy

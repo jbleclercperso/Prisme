@@ -38,6 +38,12 @@ EXCLUDES = [
     "PySide6.QtTest", "PySide6.QtSql", "PySide6.QtHelp", "PySide6.QtPdf",
     "PySide6.QtWebSockets", "PySide6.QtWebChannel", "PySide6.QtQuick",
     "PySide6.QtQml", "matplotlib", "numpy", "scipy", "PIL", "tkinter",
+    # Le labo IA : il ne marche que depuis les sources (ia.can_install le dit),
+    # mais s'il est installé sur la machine qui construit, PyInstaller suit
+    # ses imports et emporte plusieurs gigaoctets de torch.
+    "torch", "torchvision", "torchaudio", "transformers", "open_clip",
+    "huggingface_hub", "safetensors", "tokenizers", "timm", "sympy",
+    "faster_whisper", "ctranslate2", "onnxruntime", "sklearn", "pandas",
 ]
 
 
@@ -78,7 +84,7 @@ def gather_cache(into: Path) -> tuple:
     return count, weight
 
 
-def build(complete: bool = False) -> int:
+def build(complete: bool = False, source: str = "") -> int:
     for folder in (HERE / "build", HERE / "dist"):
         shutil.rmtree(folder, ignore_errors=True)
 
@@ -100,6 +106,15 @@ def build(complete: bool = False) -> int:
     (OUT / "prisme.cache.exemple").write_text(
         "X:\\_prisme\n", encoding="utf-8")
     (OUT / "LISEZ-MOI.txt").write_text(LISEZMOI, encoding="utf-8")
+    # Ou ce programme cherchera ses mises a jour : sans rien regler, il sait.
+    if not source and PUBLICATION.is_file():
+        lines = PUBLICATION.read_text(encoding="utf-8").strip().splitlines()
+        source = ((lines[1].strip() if len(lines) > 1 else "")
+                  or (lines[0].strip() if lines else ""))
+    if source:
+        (OUT / "mise-a-jour.txt").write_text(source + "\n", encoding="utf-8")
+    if not sign(OUT):
+        return 3
 
     cached = 0
     if complete:
@@ -135,13 +150,20 @@ from PyInstaller.utils.hooks import collect_all
 
 extra_datas, extra_binaries, extra_hidden = collect_all("PySide6.QtMultimedia")
 
+# Le serveur du NAS se publie à partir des sources : nas_publish recopie ces
+# fichiers tels quels sur le partage. Empaquetés en bytecode, ils manqueraient.
+extra_datas += [(r"{here}\videosorter\\" + name, "videosorter")
+                for name in ("__init__.py", "web.py", "access.py", "config.py", "query.py",
+                             "textfold.py", "brand_data.py", "demandes.py")]
+extra_datas += [(r"{here}\nas\serveur.py", "nas")]
+
 a = Analysis(
     [r"{here}\main.py"],
     pathex=[r"{here}"],
     binaries=extra_binaries,
     datas=extra_datas,
     hiddenimports=extra_hidden + ["PySide6.QtMultimediaWidgets", "PySide6.QtSvg", "rapidfuzz",
-                                  "segno"],
+                                  "segno", "yt_dlp", "truststore"],
     excludes={excludes},
     noarchive=False,
 )
@@ -224,5 +246,114 @@ Le menu ⋯ → « Raccourcis et recherche ».
 """
 
 
+# -- publier une version ---------------------------------------------------
+# Ou deposer les versions, et ou les PC les lisent : `publication.txt`, a cote
+# de ce script. Ligne 1, le dossier ou deposer ; ligne 2, facultative,
+# l'adresse que les PC lisent si elle differe (un stockage en ligne, plus
+# tard). Sans fichier : `--vers <dossier>`.
+PUBLICATION = HERE / "publication.txt"
+# La signature Windows, des qu'il y aura un certificat : `signature.json`,
+# a cote de ce script, {"signtool": "C:/.../signtool.exe", "arguments": [...]}
+# -- les arguments de `signtool sign` que le fournisseur indique. Sans fichier,
+# rien n'est signe ; avec, chaque .exe l'est avant la mise en archive, et un
+# Prisme signe n'accepte plus que des mises a jour signees du meme editeur.
+SIGNATURE = HERE / "signature.json"
+
+
+def sign(folder: Path) -> bool:
+    if not SIGNATURE.is_file():
+        print("Pas de signature.json : programme non signé.")
+        return True
+    import json
+    told = json.loads(SIGNATURE.read_text(encoding="utf-8"))
+    for exe in sorted(folder.glob("*.exe")):
+        code = subprocess.call([told["signtool"], "sign", *told.get("arguments", []),
+                                str(exe)])
+        if code != 0:
+            print(f"Signature impossible : {exe.name}")
+            return False
+    print("Programme signé.")
+    return True
+
+
+def set_version(version: str) -> None:
+    import re
+    place = HERE / "videosorter" / "__init__.py"
+    text = place.read_text(encoding="utf-8")
+    text = re.sub(r'__version__ = "[^"]*"', f'__version__ = "{version}"', text)
+    place.write_text(text, encoding="utf-8")
+
+
+def publish(version: str, notes: list, into: str = "") -> int:
+    """Construit la version, la depose, puis l'annonce (version.json en
+    dernier : un PC qui regarde pendant la copie ne voit rien a moitie)."""
+    import hashlib
+    import json
+    import re
+    from datetime import date
+
+    if not re.fullmatch(r"\d+(\.\d+){1,3}", version):
+        print(f"Numéro de version invalide : {version} (attendu : 1.2.0)")
+        return 2
+    lines = (PUBLICATION.read_text(encoding="utf-8").strip().splitlines()
+             if PUBLICATION.is_file() else [])
+    target = Path(into or (lines[0].strip() if lines else ""))
+    readers = (lines[1].strip() if len(lines) > 1 else "") or str(target)
+    if not str(target) or str(target) == ".":
+        print("Où publier ? Mettez le dossier dans publication.txt, ou --vers <dossier>.")
+        return 2
+    target.mkdir(parents=True, exist_ok=True)
+    sys.path.insert(0, str(HERE))
+    from videosorter.update import MANIFEST, newer
+    try:
+        before = json.loads((target / MANIFEST).read_text(encoding="utf-8"))["version"]
+    except (OSError, ValueError, KeyError):
+        before = ""
+    if before and not newer(version, before):
+        print(f"La version publiée est déjà la {before} : choisissez un numéro plus grand.")
+        return 2
+
+    set_version(version)
+    code = build(source=readers)
+    if code != 0:
+        return code
+    archive = HERE / "dist" / "Prisme.zip"
+    name = f"Prisme-{version}.zip"
+    print(f"Dépôt dans {target}…", flush=True)
+    shutil.copyfile(archive, target / (name + ".partiel"))
+    (target / (name + ".partiel")).replace(target / name)
+    digest = hashlib.sha256()
+    with open(target / name, "rb") as src:
+        for piece in iter(lambda: src.read(1 << 20), b""):
+            digest.update(piece)
+    told = {"version": version, "date": date.today().isoformat(),
+            "notes": [n for n in notes if n.strip()], "fichier": name,
+            "taille": (target / name).stat().st_size, "sha256": digest.hexdigest()}
+    (target / (MANIFEST + ".partiel")).write_text(
+        json.dumps(told, ensure_ascii=False, indent=2), encoding="utf-8")
+    (target / (MANIFEST + ".partiel")).replace(target / MANIFEST)
+    # Les deux dernieres archives suffisent : un PC en retard passe
+    # directement a la derniere.
+    olds = sorted((p for p in target.glob("Prisme-*.zip") if p.name != name),
+                  key=lambda p: p.stat().st_mtime)
+    for old in olds[:-1]:
+        old.unlink(missing_ok=True)
+    print(f"\nPrisme {version} publié : les PC le verront dans les six heures, "
+          "ou tout de suite par le menu : Aide, Rechercher une mise à jour.")
+    return 0
+
+
+def _option(name: str) -> list:
+    found, args = [], sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == name and i + 1 < len(args):
+            found.append(args[i + 1])
+    return found
+
+
 if __name__ == "__main__":
+    if "--publier" in sys.argv:
+        chosen = _option("--publier")
+        sys.exit(publish(chosen[0] if chosen else "", _option("--notes"),
+                         (_option("--vers") or [""])[0]))
     sys.exit(build("--complet" in sys.argv))

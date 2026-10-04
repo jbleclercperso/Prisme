@@ -75,6 +75,16 @@ def _read_setting(name: str) -> bool:
 DECODING_VARIABLE = "QT_FFMPEG_DECODING_HW_DEVICE_TYPES"
 
 
+def _read_text(name: str, default: str = "") -> str:
+    import json
+    try:
+        from videosorter.config import CONFIG_PATH
+        value = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get(name)
+        return str(value) if value else default
+    except Exception:                                  # noqa: BLE001
+        return default
+
+
 def _pick_decoding(environ, hardware: bool) -> None:
     """Avant tout import de QtMultimedia : Qt lit ce choix une fois pour toutes.
     Un choix pose a la main dans l'environnement l'emporte."""
@@ -122,6 +132,36 @@ def _leave_now_if_stuck(app, window, code: int, wait: float = 2.0) -> None:
                 pass
             os._exit(code)
         time.sleep(0.05)
+
+
+def _leave_now(app, window, code: int) -> None:
+    """La fenetre fermee, le processus s'en va -- vraiment.
+
+    `_leave_now_if_stuck` ne guette que les fils Qt de la fenetre. Restaient
+    ceux qu'il ne voit pas : un groupe de lectures du NAS (les rayonnages se
+    lisent de front), un apercu de la reserve commune, un fil Python ordinaire.
+    La sortie normale de Python les attend tous, sans limite : la fenetre
+    avait disparu, le processus restait, invisible, avec le verrou -- et
+    chaque relance repondait « Prisme finit de se fermer ». Tout ce qui compte
+    est ecrit par `closeEvent` (reglages, favoris, index referme, corbeille) :
+    on s'en va sans attendre personne. Sauf un transfert encore en vol.
+    """
+    import os
+    try:
+        if window.transfers.busy:
+            return
+    except (AttributeError, RuntimeError):
+        return
+    try:
+        app._prisme_lock.unlock()
+    except (AttributeError, RuntimeError):
+        pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except (AttributeError, OSError, ValueError):
+        pass
+    os._exit(code)
 
 
 # ---------------------------------------------------------------------------
@@ -325,15 +365,27 @@ def _splash(app, text: str):
     from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
     from PySide6.QtWidgets import QSplashScreen
 
+    from PySide6.QtGui import QImage
+
     pixmap = QPixmap(420, 140)
     pixmap.fill(QColor("#14161a"))
     painter = QPainter(pixmap)
-    painter.setPen(QColor("#e6e8ea"))
-    title = QFont()
-    title.setPointSize(22)
-    title.setBold(True)
-    painter.setFont(title)
-    painter.drawText(pixmap.rect().adjusted(0, 22, 0, -60), Qt.AlignHCenter, "Prisme")
+    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+    try:
+        # Le logo : le P prismatique et le lettrage PRISME, cote a cote.
+        from videosorter.brand_data import LETTRAGE_PNG, P_MARK_PNG
+        mark = QImage.fromData(P_MARK_PNG, "PNG").scaledToHeight(64, Qt.SmoothTransformation)
+        word = QImage.fromData(LETTRAGE_PNG, "PNG").scaledToHeight(26, Qt.SmoothTransformation)
+        left = (pixmap.width() - mark.width() - 14 - word.width()) // 2
+        painter.drawImage(left, 14, mark)
+        painter.drawImage(left + mark.width() + 14, 14 + (64 - word.height()) // 2, word)
+    except Exception:                                   # noqa: BLE001
+        painter.setPen(QColor("#e6e8ea"))
+        title = QFont()
+        title.setPointSize(22)
+        title.setBold(True)
+        painter.setFont(title)
+        painter.drawText(pixmap.rect().adjusted(0, 22, 0, -60), Qt.AlignHCenter, "Prisme")
     body = QFont()
     body.setPointSize(10)
     painter.setFont(body)
@@ -409,13 +461,29 @@ def run() -> int:
     if _read_setting("ignore_dpi"):
         os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
         os.environ["QT_SCALE_FACTOR"] = "1"
-    _pick_decoding(os.environ, _read_setting("hw_decoding"))
+    from videosorter.config import wants_hardware
+    _pick_decoding(os.environ, wants_hardware(_read_text("decoding", "auto"),
+                                              _read_setting("hw_decoding"),
+                                              os.cpu_count() or 0))
 
-    from PySide6.QtCore import QLockFile
+    # Prisme se presente a Windows sous son propre nom : sans cela, sa
+    # fenetre se rangeait avec « Python » dans la barre des taches, et en
+    # prenait l'icone au lieu de la sienne.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Prisme.App")
+        except (OSError, AttributeError):
+            pass
+
+    from PySide6.QtCore import QCoreApplication, QLockFile, Qt
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     from videosorter.config import ADOPTED, APP_NAME, CRASH_LOG, LOCK_PATH, Config
 
+    # Le navigateur invisible de la recherche web (charge seulement quand on
+    # s'en sert) exige ce reglage avant la creation de l'application.
+    QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
 
@@ -465,6 +533,12 @@ def run() -> int:
     cfg = Config()
     Tools.resolve(cfg)
 
+    # L'essai fini sans licence valable : la cle d'abord (« Quitter » ne
+    # touche a rien). Version de developpement (sans cle publique) : rien.
+    from videosorter.licence_dialog import gate
+    if not gate(cfg, before=splash.close):
+        return 0
+
     window = MainWindow(cfg)
     window.show()
     splash.finish(window)
@@ -492,10 +566,13 @@ def run() -> int:
     app.aboutToQuit.connect(lambda: INDEX.commit(force=True))
     code = app.exec()
     _leave_now_if_stuck(app, window, code)
+    _leave_now(app, window, code)
     return code
 
 
 def main() -> int:
+    from videosorter.engine import ensure_streams
+    ensure_streams()
     try:
         return run()
     except BaseException as problem:                   # noqa: BLE001
@@ -508,4 +585,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # La recherche web tourne dans un processus a part (videosorter/engine.py) :
+    # dans le programme empaquete, ce processus repasse par ici et doit
+    # devenir le moteur de recherche, pas un second Prisme.
+    import multiprocessing
+    multiprocessing.freeze_support()
     sys.exit(main())

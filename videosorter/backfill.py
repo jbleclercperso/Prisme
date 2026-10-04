@@ -240,7 +240,8 @@ class ThumbAudit(QThread):
         seen = 0
         ready = 0
         last = 0.0
-        stack = [str(self.root)]
+        from . import roots
+        stack = roots.starts(self.root)
         while stack and not self._stop:
             current = stack.pop()
             try:

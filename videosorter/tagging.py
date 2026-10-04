@@ -10,8 +10,6 @@ La comparaison ignore casse et accents : « Été » trouve « ete » et « ETE 
 from __future__ import annotations
 
 import os
-import unicodedata
-from functools import lru_cache
 from pathlib import Path
 
 import re
@@ -181,15 +179,118 @@ def top_words(videos: list, limit: int = 100, minimum: int = 2) -> list:
             if len(found) >= minimum]
 
 
-@lru_cache(maxsize=300_000)
-def fold(text: str) -> str:
-    """Ramène un texte à une forme comparable : sans accents ni majuscules."""
-    stripped = unicodedata.normalize("NFKD", text)
-    without_marks = "".join(c for c in stripped if not unicodedata.combining(c))
-    return without_marks.casefold()
+from .textfold import fold  # noqa: E402,F401  (ici depuis toujours)
 
 
-def build_tag_items(tags: list, videos: list, minimum: int = 1) -> list:
+# Un nom qui ne dit rien : « 0x56b4787xb7 », « a8f3c2d1-9e… », « IMG_2041 »,
+# « 20230512_184455 ». Aucun mot n'y range la video : il faut la regarder.
+# Les memes coupures que `words_of` -- ponctuation, chiffre, majuscule qui
+# suit une minuscule -- en une seule passe : on la fait sur toute la
+# collection, et `words_of` + `fold` coutaient 150 µs par nom.
+_WORD_RUN = re.compile(r"[A-ZÀ-Þ]+[a-zß-ÿ]*|[a-zß-ÿ]+")
+_VOWELS = re.compile(r"[aeiouyà-æè-ïò-öù-ýÿ]")
+_CONSONANTS = re.compile(r"[bcdfghjklmnpqrstvwxz]{5,}")
+
+# Ce que les telechargements collent aux noms sans rien dire de la video :
+# un bout de chemin (« Users_jbwat_Downloads »), l'outil (yt-dlp), un site
+# (« beachsome.com »). Sur le NAS, c'etait tout le « titre » de noms
+# aleatoires comme « x8k2mq7a_480…beachsome.com ».
+_NOISE = frozenset({
+    "users", "user", "downloads", "download", "desktop", "documents", "temp",
+    "tmp", "appdata", "local", "dlp", "ytdlp", "http", "https", "html", "php",
+    "index", "watch", "embed", "media", "file", "files", "videoplayback",
+    "record", "recorded", "download", "downloaded", "stream", "original",
+})
+# Un nom propre colle peut etre long ; au-dela, ce n'est plus un mot.
+_LONGEST = 24
+_TOKEN = re.compile(r"[0-9A-Za-zÀ-ÿ]+")
+_INNER_DIGIT = re.compile(r"[A-Za-zÀ-ÿ][0-9]+[A-Za-zÀ-ÿ]")
+_HEX = re.compile(r"[0-9a-fA-F]+")
+_DOMAINS = frozenset({"com", "net", "org", "tv", "io", "fr", "co", "xxx",
+                      "info", "biz", "me", "to", "cc", "es", "de", "uk"})
+
+
+def _account() -> str:
+    try:
+        import getpass
+        return getpass.getuser().casefold()
+    except Exception:                                  # noqa: BLE001
+        return ""
+
+
+_ACCOUNT = _account()
+
+
+def unreadable_name(name: str) -> bool:
+    """Vrai quand le nom du fichier ne porte aucun vrai mot.
+
+    Les mots techniques (`_NOISE`), le nom d'un site (le mot avant « com »),
+    le nom du compte Windows et les mots du dossier ou le fichier est range
+    ne comptent pas : une suite aleatoire suivie de « Downloads », de
+    « site.com » ou du nom de son propre dossier reste une suite aleatoire.
+    Un mot de trois lettres ne compte que s'il est seul (« Pee compilation ») :
+    colle a des chiffres (« 9mah2 »), c'est du hasard.
+    """
+    name = str(name)
+    cut = max(name.rfind("\\"), name.rfind("/"))
+    stem = name[cut + 1:]
+    folder = name[:cut] if cut > 0 else ""
+    folder = folder[max(folder.rfind("\\"), folder.rfind("/")) + 1:]
+    dot = stem.rfind(".")
+    if dot > 0:
+        stem = stem[:dot]
+    own = {run.lower() for run in _WORD_RUN.findall(folder)}
+    # Les jetons ou un chiffre est pris entre deux lettres (« BH7tptzi »,
+    # « h8elrtoz ») sont tires au hasard : les bouts courts qu'on y lit ne
+    # sont pas des mots. Un long (« mirandaaaask8x3 ») en reste un.
+    noise, hashes = [], []
+    for match in _TOKEN.finditer(stem):
+        token = match.group()
+        if _HEX.fullmatch(token) and len(token) >= 12:
+            hashes.append(match.span())       # une empreinte : jamais un mot
+        elif _INNER_DIGIT.search(token):
+            noise.append(match.span())
+
+    def spoken(match) -> bool:
+        where = match.start()
+        if any(a <= where < b for a, b in hashes):
+            return False
+        if not any(a <= where < b for a, b in noise):
+            return True
+        text = match.group().lower()
+        return len(text) > 6 and len(_VOWELS.findall(text)) >= 0.35 * len(text)
+
+    found = [match for match in _WORD_RUN.finditer(stem) if spoken(match)]
+    runs = [match.group().lower() for match in found]
+    for position, word in enumerate(runs):
+        if not (MIN_WORD <= len(word) <= _LONGEST) or word in STOP_WORDS:
+            continue
+        raw = found[position].group()
+        # « QBayn », « TDppoe », « CHUk » : des majuscules melees au hasard.
+        # Un mot s'ecrit en minuscules, en capitales, ou avec une initiale.
+        if len(raw) > 2 and raw[:2].isupper() and not raw.isupper():
+            continue
+        # Un nom colle (« Mirelladelicia ») est un mot ; une longue suite de
+        # consonnes, non.
+        if len(word) > MAX_WORD and len(_VOWELS.findall(word)) < 0.3 * len(word):
+            continue
+        if word in _NOISE or word in own or (_ACCOUNT and _ACCOUNT in word):
+            continue
+        if position + 1 < len(runs) and runs[position + 1] in _DOMAINS:
+            continue
+        if not _VOWELS.search(word) or _CONSONANTS.search(word):
+            continue
+        if len(word) == MIN_WORD:
+            start, end = found[position].span()
+            if ((start > 0 and stem[start - 1].isalnum())
+                    or (end < len(stem) and stem[end].isalnum())):
+                continue
+        return False
+    return True
+
+
+def build_tag_items(tags: list, videos: list, minimum: int = 1,
+                    members: dict | None = None) -> list:
     """Une catégorie par mot-clé, **chaque vidéo n'allant que dans une seule**.
 
     C'est tout l'écart avec la version précédente, qui rangeait une vidéo dans
@@ -210,7 +311,7 @@ def build_tag_items(tags: list, videos: list, minimum: int = 1) -> list:
     automatiquement des noms de fichiers, eux, se dissolvent plus volontiers :
     personne ne les a demandés, et une catégorie à une vidéo n'y range rien.
     """
-    work = iter_tag_items(tags, videos, minimum)
+    work = iter_tag_items(tags, videos, minimum, members)
     while True:
         try:
             next(work)
@@ -223,7 +324,8 @@ def build_tag_items(tags: list, videos: list, minimum: int = 1) -> list:
 _STRIDE = 128
 
 
-def iter_tag_items(tags: list, videos: list, minimum: int = 1):
+def iter_tag_items(tags: list, videos: list, minimum: int = 1,
+                   members: dict | None = None):
     """`build_tag_items`, par petites etapes : chaque `yield` rend la main.
 
     Un fil Python ne soulageait pas l'interface d'un calcul Python : il garde
@@ -231,6 +333,10 @@ def iter_tag_items(tags: list, videos: list, minimum: int = 1):
     de seconde fige pour vingt mille videos, une seconde et plus sur toute la
     collection. Mene par tranches sur le fil de l'interface, une image passe
     entre deux (`MainWindow._in_slices`). Le resultat sort par StopIteration.
+
+    `members` : des videos rangees a la main sous un mot-cle (le Labo IA),
+    {mot-cle: [chemins]}. Elles y vont quel que soit leur nom, et n'y sont
+    disputees par aucun autre mot : c'est un choix explicite.
     """
     if not tags or not videos:
         return []
@@ -245,14 +351,26 @@ def iter_tag_items(tags: list, videos: list, minimum: int = 1):
         folded.append((term.strip(), needle))
     if not folded:
         return []
+    chosen: dict = {}            # chemin -> mots-cles choisis a la main
+    for term, paths in (members or {}).items():
+        needle = fold(str(term).strip())
+        if needle in seen:
+            for path in paths or ():
+                chosen.setdefault(str(path), []).append(needle)
 
     # Premier passage : qui porte quoi. On garde les correspondances plutot que
     # de refaire le test, un nom etant relu autant de fois qu'il y a de mots.
     carried: list = []
+    manual: list = []
     counts: dict = {needle: 0 for _term, needle in folded}
     for at, video in enumerate(videos):
         if at % _STRIDE == 0:
             yield
+        if chosen:
+            picked = chosen.get(str(video))
+            if picked:
+                manual.append((video, picked))
+                continue
         # Le nom sans fabriquer de Path : cent mille fois par calcul.
         name = fold(os.path.basename(str(video)))
         hits = [needle for _term, needle in folded if needle in name]
@@ -282,6 +400,10 @@ def iter_tag_items(tags: list, videos: list, minimum: int = 1):
             # Le chemin tel quel s'il en est deja un : `Path(Path)` refait
             # l'objet, a chaque video.
             buckets[best].append(video if isinstance(video, Path) else Path(video))
+        for video, picked in manual:
+            for needle in picked:
+                buckets.setdefault(needle, []).append(
+                    video if isinstance(video, Path) else Path(video))
         thin = {needle for needle, found in buckets.items()
                 if len(found) < minimum}
         if not thin or len(thin) == len(active):
@@ -289,6 +411,7 @@ def iter_tag_items(tags: list, videos: list, minimum: int = 1):
         active -= thin
 
     labels = {needle: term for term, needle in folded}
+    ai_words = {needle for _video, picked in manual for needle in picked}
     # Les mots dissous n'ont plus de bac : rien a rendre pour eux.
     items = []
     for needle, found in buckets.items():
@@ -299,6 +422,7 @@ def iter_tag_items(tags: list, videos: list, minimum: int = 1):
         item = Item(path=Path(labels[needle]), kind=MODE_FOLDERS, videos=found,
                     video_count=len(found), file_count=len(found))
         item.is_tag = True
+        item.ai_tag = needle in ai_words
         # La taille demanderait un `stat()` par video : sur un millier de
         # fichiers en reseau, l'ouverture de l'onglet y passait des minutes,
         # pour un chiffre que la carte n'affiche meme plus.
