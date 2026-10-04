@@ -229,6 +229,16 @@ class Journal:
         return self._rows("SELECT at, label, name, video FROM favorites"
                           " ORDER BY at DESC LIMIT ?", (limit,))
 
+    def summary(self) -> dict:
+        """Par appareil, tout ce que ce journal en sait (`summarize`)."""
+        with self.lock:
+            if self.db is None:
+                return {}
+            try:
+                return summarize(self.db)
+            except sqlite3.Error:
+                return {}
+
     def clear_views(self) -> None:
         """Efface ce qui a ete regarde, et garde les connexions."""
         with self.lock:
@@ -268,6 +278,77 @@ def views_in(path: Path, limit: int = 500) -> list:
     """Les visionnages notes dans un autre journal -- celui du NAS."""
     return _rows_in(path, "SELECT seen_at, ip, label, name, seconds, video FROM views"
                           " ORDER BY seen_at DESC LIMIT ?", limit)
+
+
+def summarize(con) -> dict:
+    """Par appareil : connexions, derniere venue et son adresse, temps de
+    visionnage par video, dernieres videos, favoris. Pour les fiches des
+    visiteurs (`visitors_view.py`)."""
+    found: dict = {}
+
+    def entry(label: str) -> dict:
+        return found.setdefault(label, {
+            "visits": 0, "last": 0.0, "ip": "", "ip_at": 0.0, "videos": {},
+            "seconds": 0.0, "recent": [], "favorites": []})
+
+    for label, count, last in con.execute(
+            "SELECT label, COUNT(*), MAX(at) FROM visits WHERE event != 'refus'"
+            " GROUP BY label"):
+        one = entry(label)
+        one["visits"] = int(count)
+        one["last"] = max(one["last"], float(last or 0))
+    # L'adresse la plus recente, qu'elle vienne d'une entree ou d'un visionnage.
+    for table, moment in (("visits", "at"), ("views", "seen_at")):
+        for label, ip, at in con.execute(
+                f"SELECT label, ip, MAX({moment}) FROM {table} WHERE ip != ''"
+                " GROUP BY label"):
+            one = entry(label)
+            if float(at or 0) > one["ip_at"]:
+                one["ip"], one["ip_at"] = ip, float(at or 0)
+    for label, video, seconds, last in con.execute(
+            "SELECT label, video, SUM(seconds), MAX(seen_at) FROM views"
+            " GROUP BY label, video"):
+        one = entry(label)
+        one["videos"][video] = float(seconds or 0)
+        one["seconds"] += float(seconds or 0)
+        one["last"] = max(one["last"], float(last or 0))
+    for label, at, name, seconds, video in con.execute(
+            "SELECT label, seen_at, name, seconds, video FROM views"
+            " ORDER BY seen_at DESC LIMIT 3000"):
+        recent = entry(label)["recent"]
+        if len(recent) < 8:
+            recent.append((float(at), name, float(seconds or 0), video))
+    for label, at, name, video in con.execute(
+            "SELECT label, at, name, video FROM favorites ORDER BY at DESC"):
+        entry(label)["favorites"].append((float(at), name, video))
+    return found
+
+
+def summary_in(path: Path) -> dict:
+    """Le meme resume, tire d'un autre journal -- celui du NAS -- par une
+    copie (voir `_rows_in`)."""
+    import os
+    import shutil
+    import tempfile
+    try:
+        handle, copy = tempfile.mkstemp(suffix=".db", prefix="prisme-nas-")
+        os.close(handle)
+        shutil.copyfile(path, copy)
+    except OSError:
+        return {}
+    try:
+        con = sqlite3.connect(copy)
+        try:
+            return summarize(con)
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {}
+    finally:
+        try:
+            os.remove(copy)
+        except OSError:
+            pass
 
 
 def _rows_in(path: Path, sql: str, limit: int) -> list:

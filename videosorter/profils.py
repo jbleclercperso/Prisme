@@ -348,6 +348,28 @@ def pin_action(path, me: str, label: str, told: dict) -> dict:
     return {"ok": True, "pin": action == "set"}
 
 
+def read_all(path) -> dict:
+    """Tous les profils d'un fichier (cle -> profil), pour les fiches."""
+    if path is None:
+        return {}
+    return {key: one for key, one in _read(Path(path)).items() if isinstance(one, dict)}
+
+
+def clear_pin_of(path, key: str) -> bool:
+    """Retire le code d'un visiteur qui l'a oublie (depuis la fiche, au PC)."""
+    if path is None:
+        return False
+    with _lock:
+        profiles = _read(Path(path))
+        profile = profiles.get(key)
+        if not isinstance(profile, dict):
+            return False
+        profile.pop("pin_salt", None)
+        profile.pop("pin_hash", None)
+        _pin_fails.pop(key, None)
+        return _write(Path(path), profiles)
+
+
 def labels_of(profile: dict | None, label: str) -> list:
     labels = list((profile or {}).get("labels") or [])
     if label and label not in labels:

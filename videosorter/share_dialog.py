@@ -167,7 +167,7 @@ class ShareDialog(QDialog):
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowTitle("Partage à distance")
         self.setStyleSheet(SHARE_STYLE)
-        self.resize(760, 560)
+        self.resize(860, 640)
         self._busy = ""               # ce que Tailscale est en train de faire
         self._rows = (None, None)     # ce que les journaux montrent deja
 
@@ -182,6 +182,8 @@ class ShareDialog(QDialog):
         tabs.addTab(self._invite_pc(), "Via le PC")
         tabs.addTab(self._invite(), "Via le NAS")
         tabs.addTab(self._settings(), "Réglages")
+        # Une fiche par personne, avant le detail des journaux.
+        tabs.addTab(self._visitors(), "Visiteurs")
         tabs.addTab(self._visits(), "Connexions")
         tabs.addTab(self._views(), "Ce qui a été regardé")
         tabs.addTab(self._favorites(), "Favoris")
@@ -835,6 +837,57 @@ class ShareDialog(QDialog):
             "être relu, seulement remplacé.")
 
     # -- journaux ------------------------------------------------------------
+    def _visitors(self) -> QWidget:
+        from .visitors_view import VisitorsPage
+        self.people = VisitorsPage(self.window, self, on_change=self._people_changed)
+        self._people_kept: dict = {}
+        return self.people
+
+    def _people_changed(self) -> None:
+        self._people_kept = {}
+        self._rows = (None, None)
+        self.refresh()
+
+    def _kept_by_stamp(self, name: str, path, read):
+        """`read(path)`, refait seulement quand le fichier a change."""
+        try:
+            stamp = path.stat().st_mtime if path is not None else None
+        except OSError:
+            stamp = None
+        kept = self._people_kept.get(name)
+        if kept is None or kept[0] != stamp or kept[1] != path:
+            kept = (stamp, path, read(path) if stamp is not None else {})
+            self._people_kept[name] = kept
+        return kept[2]
+
+    def _fill_people(self) -> None:
+        """Les fiches : profils et journaux du PC et du NAS reunis."""
+        from . import profils
+        from .access import summary_in
+        from .config import PRIVATE_DIR
+        from .demandes import FILE_NAME
+        from .nas_publish import FOLDER, share_root
+        from .visitors_view import gather
+        pc_profiles = profils.path_for(PRIVATE_DIR / FILE_NAME)
+        sources = [("PC",
+                    self._kept_by_stamp("pc-journal", JOURNAL.path,
+                                        lambda _path: JOURNAL.summary()),
+                    pc_profiles,
+                    self._kept_by_stamp("pc-profiles", pc_profiles, profils.read_all))]
+        root = share_root(self.window.top_root() or "")
+        if root is not None:
+            state = root / FOLDER / "etat"
+            nas_profiles = state / profils.FILE_NAME
+            sources.append(("NAS",
+                            self._kept_by_stamp("nas-journal", state / "acces.db",
+                                                summary_in),
+                            nas_profiles,
+                            self._kept_by_stamp("nas-profiles", nas_profiles,
+                                                profils.read_all)))
+        aliases = dict(self.window.cfg["share_aliases"] or {})
+        self.people.show_people(gather(sources, aliases,
+                                       getattr(self.window, "viewers", [])))
+
     def _visits(self) -> QWidget:
         page = QWidget(self)
         box = QVBoxLayout(page)
@@ -1135,6 +1188,7 @@ class ShareDialog(QDialog):
         """
         nas_visits, nas_views = self._nas_journal()
         self._fill_favorites(getattr(self, "_nas_favorites", []))
+        self._fill_people()
         visits = [row + ("",) for row in JOURNAL.visits()]
         visits += [row + (" · NAS",) for row in nas_visits]
         visits.sort(key=lambda row: row[0], reverse=True)
