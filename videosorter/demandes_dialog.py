@@ -1,6 +1,7 @@
 """La fenetre « Demandes reçues » : ce qu'on a demande depuis le telephone."""
 from __future__ import annotations
 
+import re
 import time
 
 from PySide6.QtCore import Qt
@@ -90,10 +91,10 @@ class DemandesDialog(QDialog):
         for entry in self.entries:
             done = entry["id"] in handled
             kind = demandes.KINDS.get(entry.get("kind"), "Autre")
-            who = entry.get("who") or "un appareil"
-            text = (f"{'✓  ' if done else ''}{entry.get('text', '')}\n"
-                    f"{kind}  ·  {_when(entry.get('at'))}  ·  {who}"
-                    + ("  ·  faite" if done else ""))
+            # Qui, puis quoi et quand ; la demande elle-meme en dessous.
+            text = (f"{'✓  ' if done else ''}{self._who(entry)}  —  {kind}  ·  "
+                    f"{_when(entry.get('at'))}" + ("  ·  faite" if done else "")
+                    + f"\n{entry.get('text', '')}")
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, entry["id"])
             if done:
@@ -106,6 +107,26 @@ class DemandesDialog(QDialog):
             self.view.addItem(empty)
         self.view.setCurrentRow(0 if self.entries else -1)
         self._picked(self.view.currentRow())
+
+    # Le debut du nom d'un appareil (`access.describe`) : ce qui precede est
+    # le prenom donne a l'accueil de la page mobile.
+    DEVICES = re.compile(r"^(.+?) · ((?:Android|iPhone|iPad|Mac|Windows|Linux|appareil)"
+                         r"\b.*)$")
+
+    def _who(self, entry: dict) -> str:
+        """Le prenom s'il est connu, sinon le nom donne a l'appareil."""
+        who = str(entry.get("who") or "")
+        if entry.get("kind") == "inscription":
+            # Le prenom ouvre le texte : « Jo · jo@… — aime : … ».
+            text = str(entry.get("text") or "")
+            return text.split(" · ")[0].split(" — ")[0] or "Inscrit"
+        if entry.get("kind") == "bon":
+            return "Prisme"
+        found = self.DEVICES.match(who)
+        if found:
+            return found.group(1)
+        alias = getattr(self.window, "alias", None)
+        return (alias(who) if callable(alias) and who else who) or "Un appareil"
 
     def _current(self):
         row = self.view.currentRow()

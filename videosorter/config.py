@@ -315,6 +315,9 @@ DEFAULTS = {
     "update_source": "",
     # La version de la seance precedente : plus ancienne, on dit ce qui a change.
     "version_seen": "",
+    # La version dont la pose a ete lancee a la fermeture : au lancement
+    # suivant, si elle n'est pas la, on dit pourquoi.
+    "update_tried": "",
     "tunnel_auto": True,         # ouvrir l'adresse publique des le lancement
     # « cloudflare » : prete en dix secondes, mais elle change a chaque fois.
     # « tailscale » : la meme tous les jours, gratuite, sans nom de domaine —

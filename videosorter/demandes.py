@@ -16,7 +16,12 @@ import threading
 import time
 from pathlib import Path
 
-KINDS = {"titre": "Un titre", "style": "Un style de vidéo", "autre": "Autre"}
+KINDS = {"demande": "Une demande", "titre": "Un titre", "style": "Un style de vidéo", "lien": "Un lien à ajouter",
+         "autre": "Autre", "inscription": "Nouvel inscrit",
+         "bon": "Bon d'achat à envoyer"}
+# Ce que la page peut envoyer ; les deux autres, c'est le serveur qui les
+# écrit (`profils.py`).
+PUBLIC_KINDS = ("demande", "titre", "style", "lien", "autre")
 MAX_TEXT = 500
 # Au plus tant de demandes par appareil et par heure : un doigt qui insiste,
 # ou quelqu'un qui s'amuse, ne remplit pas le fichier.
@@ -32,21 +37,26 @@ def entry_id(entry: dict) -> str:
     return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:12]
 
 
-def append(path, who: str, kind: str, text: str) -> dict:
-    """Range une demande. Rend {"ok": True} ou {"ok": False, "error": ...}."""
+def append(path, who: str, kind: str, text: str, system: bool = False) -> dict:
+    """Range une demande. Rend {"ok": True} ou {"ok": False, "error": ...}.
+
+    `system` : écrite par le serveur lui-même (un inscrit, un bon d'achat),
+    hors du plafond par appareil."""
     text = " ".join(str(text or "").split())[:MAX_TEXT]
-    kind = kind if kind in KINDS else "autre"
+    kind = kind if kind in (KINDS if system else PUBLIC_KINDS) else "autre"
     if len(text) < 2:
         return {"ok": False, "error": "Écrivez votre demande."}
     if path is None:
         return {"ok": False, "error": "Les demandes ne sont pas reçues ici."}
     now = time.time()
     with _lock:
-        recent = [at for at in _recent.get(who, []) if now - at < 3600]
-        if len(recent) >= PER_HOUR:
-            return {"ok": False, "error": "Beaucoup de demandes d'un coup : réessayez plus tard."}
-        recent.append(now)
-        _recent[who] = recent
+        if not system:
+            recent = [at for at in _recent.get(who, []) if now - at < 3600]
+            if len(recent) >= PER_HOUR:
+                return {"ok": False,
+                        "error": "Beaucoup de demandes d'un coup : réessayez plus tard."}
+            recent.append(now)
+            _recent[who] = recent
         entry = {"at": round(now, 3), "who": str(who or "")[:80], "kind": kind, "text": text}
         try:
             Path(path).parent.mkdir(parents=True, exist_ok=True)

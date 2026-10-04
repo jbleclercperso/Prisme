@@ -43,7 +43,9 @@ WORK = "_mise-a-jour"
 # Ce que la pose remplace ; le reste du dossier (cache, reglages poses a
 # cote du programme) n'est pas touche.
 EXE = "Prisme.exe"
-CHECK_EVERY_S = 6 * 3600
+# Un petit fichier relu sur le NAS : un quart d'heure suffit pour qu'une
+# version publiee arrive sur tous les PC dans la foulee.
+CHECK_EVERY_S = 15 * 60
 TIMEOUT_S = 20
 
 
@@ -229,6 +231,7 @@ $old = {old}
 $names = @({names})
 $exe = Join-Path $dir {exe}
 try {{
+    Say 'Pose lancée : attente de la fermeture de Prisme.'
     $p = Get-Process -Id {pid} -ErrorAction SilentlyContinue
     if ($p -and -not $p.WaitForExit(300000)) {{
         Say 'Prisme ne s''est pas fermé : mise à jour abandonnée, rien n''a changé.'
@@ -300,13 +303,25 @@ def write_swap(fresh: Path, here: Path, pid: int, version: str,
 
 
 def start_swap(script: Path) -> None:
-    """Lance la pose, detachee : elle survit a la fermeture de Prisme."""
-    flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-             | getattr(subprocess, "DETACHED_PROCESS", 0))
-    subprocess.Popen(
-        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-WindowStyle", "Hidden", "-File", str(script)],
-        creationflags=flags, close_fds=True, cwd=str(script.parent))
+    """Lance la pose, sans fenetre : elle survit a la fermeture de Prisme.
+
+    Pas « DETACHED_PROCESS » : PowerShell, lance sans console, s'arretait
+    aussitot, sans une ligne au journal -- Prisme se fermait, rien n'etait
+    pose, et la meme mise a jour revenait au lancement suivant.
+    """
+    command = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+               "Bypass", "-File", str(script)]
+    flags = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
+             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    quiet = dict(close_fds=True, cwd=str(script.parent), stdin=subprocess.DEVNULL,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        # Hors du « job » de Prisme s'il en a un : la pose ne doit pas mourir
+        # avec lui.
+        subprocess.Popen(command, creationflags=flags | getattr(
+            subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0), **quiet)
+    except OSError:
+        subprocess.Popen(command, creationflags=flags, **quiet)
 
 
 def prepare(where: str, told: dict, progress=None, should_stop=None) -> Path:

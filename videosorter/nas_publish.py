@@ -29,7 +29,7 @@ FOLDER = ".prisme-partage"
 NAS_PORT = 8714
 # Les modules que le serveur du NAS importe : rien qui tire Qt.
 PROGRAM = ("__init__.py", "web.py", "access.py", "config.py", "query.py",
-           "textfold.py", "brand_data.py", "demandes.py")
+           "textfold.py", "brand_data.py", "demandes.py", "profils.py")
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -100,6 +100,20 @@ def _write_atomic(target: Path, text: str) -> None:
     temporary = target.with_name(target.name + ".tmp")
     temporary.write_text(text, encoding="utf-8")
     os.replace(temporary, target)
+
+
+def _served_is_newer(program: Path) -> bool:
+    """Le NAS sert deja une version plus recente que ce PC : un PC en retard
+    y remettait sa page, plus ancienne, et les nouveautes disparaissaient."""
+    import re
+    from . import __version__
+    from .update import newer
+    try:
+        text = (program / "videosorter" / "__init__.py").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    found = re.search(r'__version__ = "([^"]+)"', text)
+    return bool(found) and newer(found.group(1), __version__)
 
 
 def _copy_if_changed(source: Path, target: Path) -> bool:
@@ -281,9 +295,10 @@ def publish(library, root: Path, access: dict, tailnet: str = "",
 
     # -- le programme : recopie seulement s'il a change ---------------------
     program = target / "programme"
-    for name in PROGRAM:
-        _copy_if_changed(REPO / "videosorter" / name, program / "videosorter" / name)
-    _copy_if_changed(REPO / "nas" / "serveur.py", program / "serveur.py")
+    if not _served_is_newer(program):
+        for name in PROGRAM:
+            _copy_if_changed(REPO / "videosorter" / name, program / "videosorter" / name)
+        _copy_if_changed(REPO / "nas" / "serveur.py", program / "serveur.py")
     _write_installation(target / "installation", tailnet)
     # L'icone de l'application, pour l'ecran d'accueil du telephone.
     for size, image in (icons or {}).items():

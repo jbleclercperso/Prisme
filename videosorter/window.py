@@ -1125,9 +1125,8 @@ class MainWindow(QMainWindow):
         self.viewers_button.setToolTip("Personne ne regarde la bibliothèque "
                                        "partagée en ce moment.")
         self.viewers_button.clicked.connect(self._viewers_menu)
-        # Il ne parait que si quelqu'un regarde : un oeil « 0 » permanent
-        # prenait une place de l'en-tete pour ne rien dire.
-        self.viewers_button.hide()
+        # Toujours la : un oeil gris « 0 » dit aussi quelque chose (personne),
+        # et l'on sait ou regarder quand il passe au vert.
         row_one.addWidget(self.viewers_button, 0)
         self.viewers = []
         self._viewers_busy = False
@@ -5520,6 +5519,8 @@ class MainWindow(QMainWindow):
         self._update_found = found
         if not found:
             self.update_badge.hide()
+            if getattr(self, "_update_tray", None) is not None:
+                self._update_tray.hide()
             if not quiet:
                 self.show_banner(f"Prisme est à jour (version {update.__version__}).",
                                  "done")
@@ -5539,6 +5540,36 @@ class MainWindow(QMainWindow):
                 f"Prisme {version} est disponible (vous avez la {update.__version__}). "
                 "Cliquez ici pour mettre à jour — ou plus tard, par la pastille "
                 "en haut.", "info", action=self.install_update, seconds=20)
+            self._notify_update(version, notes)
+
+    def _notify_update(self, version: str, notes: str) -> None:
+        """Une notification Windows, et Prisme qui clignote dans la barre des
+        taches : le bandeau seul passait inapercu, fenetre reduite ou cachee
+        derriere une autre."""
+        QApplication.alert(self, 0)
+        from PySide6.QtWidgets import QSystemTrayIcon
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        tray = getattr(self, "_update_tray", None)
+        if tray is None:
+            tray = QSystemTrayIcon(app_icon(), self)
+            tray.messageClicked.connect(self._update_from_tray)
+            tray.activated.connect(lambda _why: self._update_from_tray())
+            self._update_tray = tray
+        tray.setToolTip(f"Prisme {version} est disponible — cliquez pour mettre à jour")
+        tray.show()
+        first = notes.splitlines()[0].lstrip("• ") if notes else ""
+        tray.showMessage(f"Prisme {version} est disponible",
+                         (first + "\n" if first else "")
+                         + "Cliquez pour mettre à jour.",
+                         QSystemTrayIcon.Information, 15000)
+
+    def _update_from_tray(self) -> None:
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self.install_update()
 
     def install_update(self) -> None:
         """Dit ce qui change, puis telecharge, verifie et pose -- d'un clic."""
@@ -5631,6 +5662,8 @@ class MainWindow(QMainWindow):
                              "Prisme peut se fermer.", "info", seconds=10)
             return
         try:
+            self.cfg["update_tried"] = (self._update_found or {}).get("version", "")
+            self.cfg.save()
             update.start_swap(script)
         except OSError as trouble:
             # Trop tard pour le dire a l'ecran : la fenetre est fermee.
@@ -5651,6 +5684,18 @@ class MainWindow(QMainWindow):
             if before and update.newer(update.__version__, before):
                 self.show_banner(f"Prisme est passé à la version {update.__version__}.",
                                  "done", seconds=10)
+        # Une pose lancee a la fermeture, et pourtant toujours l'ancienne
+        # version : on le dit, avec ce que la pose a note.
+        tried = self.cfg["update_tried"] or ""
+        if tried:
+            self.cfg["update_tried"] = ""
+            self.cfg.save_soon()
+            if update.newer(tried, update.__version__):
+                said = update.last_log_line()
+                self.show_banner(
+                    f"La mise à jour {tried} n'a pas pu se poser"
+                    + (f" : {said.split(' ', 2)[-1]}" if said else ".")
+                    + " Réessayez par la pastille en haut.", "error", seconds=20)
 
     # -- l'essai et la licence -------------------------------------------------
     def _show_trial(self) -> None:
@@ -6536,8 +6581,6 @@ class MainWindow(QMainWindow):
         if button.text() != text:
             button.setText(text)
             button.setIcon(icon("eye", "#7bd88f" if count else DIM))
-        if button.isHidden() == bool(count):
-            button.setVisible(bool(count))
         if count:
             lines = []
             for entry in self.viewers:

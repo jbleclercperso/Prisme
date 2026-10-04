@@ -188,6 +188,19 @@ class Journal:
             except sqlite3.Error:
                 return []
 
+    def seen_count(self, labels: list, minimum: float) -> int:
+        """Combien de videos differentes ces appareils ont regardees, chacune
+        au moins `minimum` secondes en tout."""
+        labels = [label for label in labels if label][:20]
+        if not labels:
+            return 0
+        marks = ",".join("?" * len(labels))
+        rows = self._rows(
+            "SELECT COUNT(*) FROM (SELECT video FROM views"
+            f" WHERE label IN ({marks}) GROUP BY video HAVING SUM(seconds) >= ?)",
+            (*labels, float(minimum)))
+        return int(rows[0][0]) if rows else 0
+
     # -- les favoris de chaque appareil -------------------------------------
     def set_favorite(self, label: str, video: str, name: str, on: bool) -> None:
         with self.lock:
