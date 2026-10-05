@@ -710,8 +710,7 @@ class Server:
             entry["ip"] = ip
 
     def set_view(self, label: str, view: str) -> None:
-        """Ou en est ce visiteur dans la page (s'il l'a accepte) : un
-        dossier, une recherche… ; "" s'il ne partage pas."""
+        """Ou en est ce visiteur dans la page : un dossier, une recherche…"""
         with self.live_lock:
             entry = self.live.setdefault(label, {"label": label, "video": "",
                                                  "name": "", "at": 0.0, "ip": "",
@@ -1098,8 +1097,6 @@ def _make_handler(server: Server):
                 return self._pin(body)
             if route == "/api/ici":
                 return self._here(body)
-            if route == "/api/suivi":
-                return self._live_consent(body)
             if route != "/login":
                 return self._send(HTTPStatus.NOT_FOUND, "Rien ici.")
             who = self._who()
@@ -1325,8 +1322,8 @@ def _make_handler(server: Server):
 
         def _here(self, body: bytes) -> None:
             """La page est ouverte : un signe toutes les vingt secondes, pour
-            que le visiteur reste compte « en ligne » tant qu'il parcourt -- et,
-            s'il l'a accepte, ou il en est."""
+            que le visiteur reste compte « en ligne » tant qu'il parcourt, et
+            ou il en est (un dossier, une recherche)."""
             if not self._allowed():
                 return self._json({"error": "lien requis"}, HTTPStatus.UNAUTHORIZED)
             try:
@@ -1335,26 +1332,9 @@ def _make_handler(server: Server):
                 told = {}
             label = self._label()
             view = str((told or {}).get("view") or "")[:120] if isinstance(told, dict) else ""
-            if view:
-                profile = profils.find(server.profiles_path, self._me(), label)
-                if not (profile and profile.get("live")):
-                    view = ""
             server.seen(label, self._who())
             server.set_view(label, view)
             self._json({"ok": True})
-
-        def _live_consent(self, body: bytes) -> None:
-            if not self._allowed():
-                return self._json({"error": "lien requis"}, HTTPStatus.UNAUTHORIZED)
-            try:
-                told = json.loads(body.decode("utf-8", "replace"))
-            except (ValueError, OSError):
-                told = {}
-            on = bool(told.get("on")) if isinstance(told, dict) else False
-            done = profils.set_live(server.profiles_path, self._me(), on)
-            if not on:
-                server.set_view(self._label(), "")
-            self._json({"ok": done, "live": on})
 
         def _labels(self) -> list:
             """Les noms d'appareil de la personne : ceux de son profil, et
@@ -2987,7 +2967,6 @@ function paintPerks() {
   $('friendEarned').textContent = ((sponsor.earned || 0) * friendPrize) + ' €';
   $('friendShare').disabled = !sponsor.code;
   paintLockRow();
-  paintLiveRow();
 }
 async function openPerks() {
   $('friendTold').textContent = '';
@@ -3447,7 +3426,7 @@ function describeView() {
 async function presence() {
   clearTimeout(presenceTimer);
   if (document.hidden || !key) return;
-  const view = profile && profile.live ? describeView() : '';
+  const view = describeView();
   try {
     await fetch('/api/ici', {method: 'POST', headers: headers({'Content-Type': 'application/json'}),
                              body: JSON.stringify({view})});
@@ -3455,25 +3434,6 @@ async function presence() {
   presenceTimer = setTimeout(presence, 20000);
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) presence(); });
-function paintLiveRow() {
-  const on = !!(profile && profile.live);
-  $('liveState').textContent = on
-    ? 'Activé : la personne qui vous a invité voit où vous êtes dans Prisme.'
-    : 'Désactivé. Jamais votre écran : seulement le dossier ou la recherche en cours.';
-  $('liveSet').textContent = on ? 'Désactiver' : 'Activer';
-}
-$('liveSet').onclick = async () => {
-  if (!profile) return;
-  const on = !profile.live;
-  try {
-    const r = await fetch('/api/suivi', {method: 'POST',
-      headers: headers({'Content-Type': 'application/json'}), body: JSON.stringify({on})});
-    const d = await r.json().catch(() => ({}));
-    if (d.ok) profile.live = on;
-  } catch (_) {}
-  paintLiveRow();
-  presence();
-};
 $('lockSet').onclick = () => pinSetup('set');
 $('lockClear').onclick = () => pinSetup('clear');
 
@@ -3682,11 +3642,6 @@ APP_PAGE = f"""<!doctype html><html lang="fr"><meta charset="utf-8">
         <b>Code de verrouillage</b><small id="lockState"></small></div></div>
       <div class="row2"><button class="wide go" id="lockSet">Choisir un code</button>
         <button class="wide soft" id="lockClear" hidden>Retirer</button></div>
-    </div>
-    <div class="reward">
-      <div class="reward-head"><span class="perk-ic sm alt line"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span><div>
-        <b>Partager ma navigation</b><small id="liveState"></small></div></div>
-      <button class="wide soft" id="liveSet">Activer</button>
     </div>
     <div class="foot">
       <button class="textlink" id="perksEdit">Modifier mon profil</button>
