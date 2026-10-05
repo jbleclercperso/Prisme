@@ -649,6 +649,31 @@ class Guard:
                     self.tries.pop(key, None)
 
 
+def _public_name(address: str) -> bool:
+    """Ce nom d'hote a-t-il, pour Internet, une adresse publique ? Demande a
+    un DNS public (Google, en https) ; dans le doute, oui."""
+    import urllib.request
+    from urllib.parse import urlparse as _parse
+    host = _parse(address).hostname or ""
+    if not host:
+        return False
+    try:
+        with urllib.request.urlopen(
+                f"https://dns.google/resolve?name={quote(host)}&type=A", timeout=5) as answer:
+            told = json.loads(answer.read().decode("utf-8", "replace"))
+    except Exception:                                   # noqa: BLE001
+        return True
+    found = [entry.get("data", "") for entry in told.get("Answer") or []
+             if entry.get("type") == 1]
+    if not found:
+        return False
+    tailnet = ipaddress.ip_network("100.64.0.0/10")
+    try:
+        return any(ipaddress.ip_address(ip) not in tailnet for ip in found)
+    except ValueError:
+        return True
+
+
 class _Listener(ThreadingHTTPServer):
     """Le serveur HTTP, seul sur son port.
 
@@ -714,6 +739,13 @@ class Server:
 
         def probe() -> None:
             import urllib.request
+            if not _public_name(address):
+                # Le nom ne mene, pour Internet, qu'au reseau Tailscale prive
+                # (100.x) : Funnel est coupe, le telephone en 4G n'y arrive pas
+                # -- meme si le NAS, lui, s'y joint.
+                result.append(False)
+                self._secure_seen = (address, time.time(), False)
+                return
             try:
                 with urllib.request.urlopen(address.rstrip("/") + "/sw.js", timeout=5) as answer:
                     result.append(answer.status == 200)
