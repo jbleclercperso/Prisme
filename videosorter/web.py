@@ -40,7 +40,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import profils
 from .access import JOURNAL
-from .brand_data import LETTRAGE_PNG
+from .brand_data import LETTRAGE_PNG, LOGO_RISME_PNG
 from .query import parse, tester
 from .textfold import fold
 
@@ -188,14 +188,16 @@ class Library:
         videos = {}
         by_folder = {}
         for item in cached_items(self.root, MODE_FOLDERS, self.expand):
-            if item.is_tag or not item.videos or under_veiled(item.path):
+            # Strict : l'interrupteur « montrer les dossiers masques » vaut
+            # pour l'ecran du PC, jamais pour le partage.
+            if item.is_tag or not item.videos or under_veiled(item.path, strict=True):
                 # Ce qui est masqué ici l'est aussi au dehors : l'adresse
                 # publique ne doit pas montrer ce que la fenêtre cache.
                 continue
             key = self.mark(item.path)
             inside = []
             for video in item.videos:
-                if under_veiled(video):
+                if under_veiled(video, strict=True):
                     continue
                 mark = self.mark(video)
                 videos[mark] = Path(video)
@@ -707,6 +709,16 @@ class Server:
             entry["seen"] = now
             entry["ip"] = ip
 
+    def set_view(self, label: str, view: str) -> None:
+        """Ou en est ce visiteur dans la page (s'il l'a accepte) : un
+        dossier, une recherche… ; "" s'il ne partage pas."""
+        with self.live_lock:
+            entry = self.live.setdefault(label, {"label": label, "video": "",
+                                                 "name": "", "at": 0.0, "ip": "",
+                                                 "playing": False, "beat": 0.0})
+            entry["seen"] = time.time()
+            entry["view"] = view
+
     def watching(self, label: str, mark: str, name: str, at: float,
                  playing: bool) -> None:
         """Ou en est ce visiteur, dans quelle video."""
@@ -1017,8 +1029,14 @@ def _make_handler(server: Server):
                 return self._folder(query.get("id", [""])[0])
             if route == "/api/search":
                 text = query.get("q", [""])[0]
+                # Les mots ajoutes par la traduction : la page les dit.
+                from .traduction import translations
+                also = list(dict.fromkeys(
+                    word for group in parse(text, translate=False)[0]
+                    for term in group for word in translations(term)))
                 return self._json({"videos": server.library.search(text),
-                                   "folders": server.library.search_folders(text)})
+                                   "folders": server.library.search_folders(text),
+                                   "also": also})
             if route == "/api/videos":
                 try:
                     start = max(0, int(query.get("start", ["0"])[0] or 0))
@@ -1078,6 +1096,10 @@ def _make_handler(server: Server):
                 return self._save_profile(body)
             if route == "/api/pin":
                 return self._pin(body)
+            if route == "/api/ici":
+                return self._here(body)
+            if route == "/api/suivi":
+                return self._live_consent(body)
             if route != "/login":
                 return self._send(HTTPStatus.NOT_FOUND, "Rien ici.")
             who = self._who()
@@ -1301,6 +1323,39 @@ def _make_handler(server: Server):
                     JOURNAL.set_favorite(one, mark, path.name, False)
             self._json({"ok": True, "on": on})
 
+        def _here(self, body: bytes) -> None:
+            """La page est ouverte : un signe toutes les vingt secondes, pour
+            que le visiteur reste compte « en ligne » tant qu'il parcourt -- et,
+            s'il l'a accepte, ou il en est."""
+            if not self._allowed():
+                return self._json({"error": "lien requis"}, HTTPStatus.UNAUTHORIZED)
+            try:
+                told = json.loads(body.decode("utf-8", "replace") or "{}")
+            except (ValueError, OSError):
+                told = {}
+            label = self._label()
+            view = str((told or {}).get("view") or "")[:120] if isinstance(told, dict) else ""
+            if view:
+                profile = profils.find(server.profiles_path, self._me(), label)
+                if not (profile and profile.get("live")):
+                    view = ""
+            server.seen(label, self._who())
+            server.set_view(label, view)
+            self._json({"ok": True})
+
+        def _live_consent(self, body: bytes) -> None:
+            if not self._allowed():
+                return self._json({"error": "lien requis"}, HTTPStatus.UNAUTHORIZED)
+            try:
+                told = json.loads(body.decode("utf-8", "replace"))
+            except (ValueError, OSError):
+                told = {}
+            on = bool(told.get("on")) if isinstance(told, dict) else False
+            done = profils.set_live(server.profiles_path, self._me(), on)
+            if not on:
+                server.set_view(self._label(), "")
+            self._json({"ok": done, "live": on})
+
         def _labels(self) -> list:
             """Les noms d'appareil de la personne : ceux de son profil, et
             celui d'ou elle demande."""
@@ -1450,6 +1505,8 @@ header { position: sticky; top: 0; z-index: 5; background: rgba(14,17,22,.96);
   background: none; border: 0; padding: 4px 2px; color: var(--ink); }
 .wordmark { display: block; height: 15px; width: auto; }
 .logo { display: block; width: 30px; height: 30px; border-radius: 8px; }
+/* Le symbole P, puis « RISME » : le logo de Prisme, en une image. */
+.logoword { display: block; height: 18px; width: auto; }
 .qbox { position: relative; flex: 1; min-width: 0; }
 .qbox #q { width: 100%; padding-right: 48px; }
 #q::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
@@ -1994,6 +2051,13 @@ let nav = 0;
 let shown = {v: 'folders'};
 // Les preferences epinglees, « Pour vous », et le mot d'une vue vide.
 let pinned = [], forYouList = [], fewText = '', emptyNote = '';
+// Le signe de vie : a chaque changement de vue (apres un instant), et toutes
+// les vingt secondes tant que la page est a l'ecran (`presence`).
+let presenceTimer = null;
+function schedulePresence() {
+  clearTimeout(presenceTimer);
+  presenceTimer = setTimeout(() => presence(), 800);
+}
 
 function showEmpty() {
   const none = !view.el.childElementCount && !view.pending.length && !view.more
@@ -2009,6 +2073,7 @@ function reveal(target) {
   grid.hidden = target !== views.videos;
   if (target === views.folders) { hits.hidden = true; hitsHead.hidden = true; videosHead.hidden = true; }
   emptyNote = '';
+  schedulePresence();
   $('few').hidden = true;
   $('forYou').hidden = !(forYouList.length && (shown.v === 'folders' || shown.v === 'videos'));
   markPins();
@@ -2198,7 +2263,7 @@ async function openFolder(id, name, push) {
   const ticket = ++nav;
   if (asking) { asking.abort(); asking = null; }
   if (push) remember({v: 'folder', id, name});
-  shown = {v: 'folder', id};
+  shown = {v: 'folder', id, name};
   const d = await getJSON('/api/folder?id=' + encodeURIComponent(id));
   if (ticket !== nav) return;
   const list = (d && d.videos) || [];
@@ -2218,8 +2283,9 @@ async function search(text, push) {
   if (push) remember({v: 'search', q: text}, true);
   shown = {v: 'search', q: text};
   const list = (d && d.videos) || [], found = (d && d.folders) || [];
-  showVideos(list, '« ' + text + ' » — ' + found.length + ' dossier(s), ' +
-             list.length + ' vidéo(s)', found);
+  const also = (d && d.also) || [];
+  showVideos(list, '« ' + text + ' »' + (also.length ? ' (+ ' + also.join(', ') + ')' : '') +
+             ' — ' + found.length + ' dossier(s), ' + list.length + ' vidéo(s)', found);
   // Peu de resultats : on invite a demander ce qui manque.
   if (list.length + found.length < 6) showFew(text);
   if (!list.length && !found.length) {
@@ -2923,6 +2989,7 @@ function paintPerks() {
   $('friendEarned').textContent = ((sponsor.earned || 0) * friendPrize) + ' €';
   $('friendShare').disabled = !sponsor.code;
   paintLockRow();
+  paintLiveRow();
 }
 async function openPerks() {
   $('friendTold').textContent = '';
@@ -3367,6 +3434,48 @@ function paintLockRow() {
   $('lockClear').hidden = !on;
 }
 $('helloPin').onclick = () => pinSetup('set');
+
+// -- en ligne, et (si on l'accepte) ou l'on est -----------------------------
+function describeView() {
+  if (player.style.display === 'block') return 'regarde une vidéo';
+  if (shown.v === 'folder') return 'dans « ' + (shown.name || 'un dossier') + ' »';
+  if (shown.v === 'search') return 'cherche « ' + shown.q + ' »';
+  if (shown.v === 'favs') return 'dans ses Favoris';
+  if (shown.v === 'videos') return 'parcourt toutes les vidéos';
+  if (shown.v === 'tag') return 'dans « ' + shown.like + ' » (épinglé)';
+  if (shown.v === 'shelf') return 'dans le rayon « ' + shown.name + ' »';
+  return 'parcourt les dossiers';
+}
+async function presence() {
+  clearTimeout(presenceTimer);
+  if (document.hidden || !key) return;
+  const view = profile && profile.live ? describeView() : '';
+  try {
+    await fetch('/api/ici', {method: 'POST', headers: headers({'Content-Type': 'application/json'}),
+                             body: JSON.stringify({view})});
+  } catch (_) {}
+  presenceTimer = setTimeout(presence, 20000);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) presence(); });
+function paintLiveRow() {
+  const on = !!(profile && profile.live);
+  $('liveState').textContent = on
+    ? 'Activé : la personne qui vous a invité voit où vous êtes dans Prisme.'
+    : 'Désactivé. Jamais votre écran : seulement le dossier ou la recherche en cours.';
+  $('liveSet').textContent = on ? 'Désactiver' : 'Activer';
+}
+$('liveSet').onclick = async () => {
+  if (!profile) return;
+  const on = !profile.live;
+  try {
+    const r = await fetch('/api/suivi', {method: 'POST',
+      headers: headers({'Content-Type': 'application/json'}), body: JSON.stringify({on})});
+    const d = await r.json().catch(() => ({}));
+    if (d.ok) profile.live = on;
+  } catch (_) {}
+  paintLiveRow();
+  presence();
+};
 $('lockSet').onclick = () => pinSetup('set');
 $('lockClear').onclick = () => pinSetup('clear');
 
@@ -3392,6 +3501,7 @@ async function welcome() {
   }
   paintGift();
   loadForYou();
+  presence();
   if (!profile && !(done === 'fait' && !kept)) {
     openHello(0);
     // Le clavier d'un telephone cacherait l'explication : seulement au PC.
@@ -3422,7 +3532,7 @@ ICON_ROUTES = {"/icon-192.png": 192, "/icon-512.png": 512, "/apple-touch-icon.pn
 # Le lettrage PRISME (brand_data) ; et la version du logo, jointe aux adresses
 # des icones : gardees une semaine par les telephones, elles ne changeaient
 # pas quand le logo changeait.
-BRAND_ROUTES = {"/lettrage.png": LETTRAGE_PNG}
+BRAND_ROUTES = {"/lettrage.png": LETTRAGE_PNG, "/logo.png": LOGO_RISME_PNG}
 LOGO_VERSION = "2"
 
 # Il ne garde rien et ne touche pas aux videos (lecture par morceaux) : il est
@@ -3481,7 +3591,7 @@ APP_PAGE = f"""<!doctype html><html lang="fr"><meta charset="utf-8">
 <header>
   <div class="top">
     <button id="home" class="brand" title="Tous les dossiers" aria-label="Prisme"><img
-      src="/icon-192.png?v={LOGO_VERSION}" alt="Prisme" class="logo"></button>
+      src="/logo.png?v={LOGO_VERSION}" alt="Prisme" class="logoword"></button>
     <div class="acts">
       <button id="tabFolders" class="tab on">Dossiers</button>
       <button id="tabVideos" class="tab">Vidéos</button>
@@ -3574,6 +3684,11 @@ APP_PAGE = f"""<!doctype html><html lang="fr"><meta charset="utf-8">
         <b>Code de verrouillage</b><small id="lockState"></small></div></div>
       <div class="row2"><button class="wide go" id="lockSet">Choisir un code</button>
         <button class="wide soft" id="lockClear" hidden>Retirer</button></div>
+    </div>
+    <div class="reward">
+      <div class="reward-head"><span class="perk-ic sm alt line"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span><div>
+        <b>Partager ma navigation</b><small id="liveState"></small></div></div>
+      <button class="wide soft" id="liveSet">Activer</button>
     </div>
     <div class="foot">
       <button class="textlink" id="perksEdit">Modifier mon profil</button>

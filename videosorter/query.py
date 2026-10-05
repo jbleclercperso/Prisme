@@ -67,11 +67,14 @@ def available() -> bool:
 _TOKEN = re.compile(r'(-?)(?:"([^"]*)"|(\S+))')
 
 
-def parse(text: str) -> tuple:
+def parse(text: str, translate: bool = True) -> tuple:
     """Rend (groupes exiges, termes exclus), tous replies.
 
     Un « groupe » est une liste d'alternatives : il suffit que l'une d'elles
     figure. Les groupes, eux, sont tous exiges.
+
+    `translate` : chaque mot vaut aussi pour ses traductions (`traduction.py`)
+    -- « deux filles » trouve « two girls ».
     """
     required: list = []
     excluded: list = []
@@ -99,6 +102,11 @@ def parse(text: str) -> tuple:
         else:
             required.append([folded])
         pending_or = False
+    if translate:
+        from .traduction import expand, translations
+        required = [expand(group) for group in required]
+        excluded = list(dict.fromkeys(
+            excluded + [word for term in excluded for word in translations(term)]))
     return required, excluded
 
 

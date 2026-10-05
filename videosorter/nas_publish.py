@@ -31,7 +31,9 @@ NAS_PORT = 8714
 PROGRAM = ("__init__.py", "web.py", "access.py", "config.py", "query.py",
            "textfold.py", "brand_data.py", "demandes.py", "profils.py",
            # Les liens du telephone, telecharges par le NAS lui-meme.
-           "liens.py", "downloader.py", "mediafind.py")
+           "liens.py", "downloader.py", "mediafind.py",
+           # La traduction de la recherche (« deux filles » → « two girls »).
+           "traduction.py")
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -348,8 +350,11 @@ def publish(library, root: Path, access: dict, tailnet: str = "",
     left_alone = (author and author != me
                   and len(entries) < count * CATALOGUE_KEEP)
     if not left_alone:
+        from .scan import VEILED
         catalogue = {"version": f"{time.time_ns():x}",
                      "made": time.strftime("%Y-%m-%d %H:%M:%S"), "by": me,
+                     # Les noms masques : le NAS les ecarte aussi, au cas ou.
+                     "veiled": sorted(VEILED),
                      "folders": folders, "by_folder": kept, "videos": entries}
         _write_atomic(target / "catalogue.json",
                       json.dumps(catalogue, ensure_ascii=False, separators=(",", ":")))
