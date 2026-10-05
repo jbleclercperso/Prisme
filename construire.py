@@ -276,6 +276,45 @@ def sign(folder: Path) -> bool:
     return True
 
 
+# L'installateur Windows (Inno Setup 6, gratuit) : « installer sur ce PC » ou
+# « version portable », au choix de l'utilisateur. Sans Inno Setup, seule
+# l'archive portable est faite.
+ISS = HERE / "installateur" / "prisme.iss"
+
+
+def _iscc() -> str:
+    import os
+    found = shutil.which("iscc") or shutil.which("ISCC")
+    if found:
+        return found
+    for base in (os.environ.get("ProgramFiles(x86)", ""), os.environ.get("ProgramFiles", ""),
+                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
+        candidate = Path(base) / "Inno Setup 6" / "ISCC.exe"
+        if base and candidate.is_file():
+            return str(candidate)
+    return ""
+
+
+def installer(version: str) -> Path | None:
+    """Prisme-<version>-installation.exe, a partir de dist/Prisme ; None sans
+    Inno Setup (ou s'il echoue)."""
+    iscc = _iscc()
+    if not iscc:
+        print("Inno Setup absent : pas d'installateur, l'archive portable seule.")
+        return None
+    if not (OUT / "Prisme.exe").is_file():
+        print("dist/Prisme est vide : construisez d'abord.")
+        return None
+    print("Installateur…", flush=True)
+    code = subprocess.call([iscc, "/Q", f"/DAppVersion={version}", str(ISS)])
+    made = HERE / "dist" / f"Prisme-{version}-installation.exe"
+    if code != 0 or not made.is_file():
+        print("Installateur impossible (Inno Setup a échoué).")
+        return None
+    print(f"dist/{made.name}   {made.stat().st_size / 1024 / 1024:.0f} Mo")
+    return made
+
+
 def set_version(version: str) -> None:
     import re
     place = HERE / "videosorter" / "__init__.py"
@@ -338,6 +377,15 @@ def publish(version: str, notes: list, into: str = "") -> int:
                   key=lambda p: p.stat().st_mtime)
     for old in olds[:-1]:
         old.unlink(missing_ok=True)
+    # L'installateur, a cote : pour un nouveau PC (la mise a jour, elle, passe
+    # par l'archive).
+    setup = installer(version)
+    if setup is not None:
+        shutil.copyfile(setup, target / (setup.name + ".partiel"))
+        (target / (setup.name + ".partiel")).replace(target / setup.name)
+        for old in target.glob("Prisme-*-installation.exe"):
+            if old.name != setup.name:
+                old.unlink(missing_ok=True)
     print(f"\nPrisme {version} publié : les PC le verront dans les six heures, "
           "ou tout de suite par le menu : Aide, Rechercher une mise à jour.")
     return 0
@@ -352,6 +400,11 @@ def _option(name: str) -> list:
 
 
 if __name__ == "__main__":
+    if "--installateur" in sys.argv:
+        # L'installateur seul, depuis le dist/Prisme deja construit.
+        chosen = _option("--installateur")
+        from videosorter import __version__
+        sys.exit(0 if installer(chosen[0] if chosen else __version__) else 1)
     if "--publier" in sys.argv:
         chosen = _option("--publier")
         sys.exit(publish(chosen[0] if chosen else "", _option("--notes"),
