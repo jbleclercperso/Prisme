@@ -6639,6 +6639,7 @@ class MainWindow(QMainWindow):
     def _viewers_ready(self, found: list) -> None:
         self._viewers_busy = False
         self.viewers = found or []
+        self._follow_step()
         count = len(self.viewers)
         button = self.viewers_button
         text = str(count)
@@ -6649,7 +6650,7 @@ class MainWindow(QMainWindow):
             lines = []
             for entry in self.viewers:
                 what = (f"regarde « {entry.get('name')} »" if entry.get("name")
-                        else "parcourt la bibliothèque")
+                        else entry.get("view") or "parcourt la bibliothèque")
                 lines.append(f"• {self.alias(entry.get('label', ''))} "
                              f"({entry.get('where')}) : {what}")
             tip = (f"{count} personne(s) connectée(s)\n" + "\n".join(lines)
@@ -6667,14 +6668,24 @@ class MainWindow(QMainWindow):
             head = menu.addAction(
                 f"{self.alias(entry.get('label', ''))}  —  par le {entry.get('where')}")
             head.setEnabled(False)
+            if entry.get("view"):
+                # Ce qu'il a accepte de partager : ou il en est dans la page.
+                menu.addAction(f"    {entry['view']}").setEnabled(False)
             if entry.get("name"):
                 at = human_duration(entry.get("at", 0) or 0)
                 state = "" if entry.get("playing") else " (en pause)"
                 menu.addAction(icon("picture-in-picture-2"),
                                f"    Regarder avec : « {entry['name']} » à {at}{state}",
                                lambda e=dict(entry): self.watch_along(e))
-            else:
+            elif not entry.get("view"):
                 menu.addAction("    parcourt la bibliothèque").setEnabled(False)
+            following = self._following_key() == (entry.get("label"), entry.get("where"))
+            follow = menu.addAction(
+                "    Arrêter de le suivre" if following else
+                "    Suivre en direct (le lecteur flottant suit sa vidéo)",
+                (lambda: self.stop_following()) if following else
+                (lambda e=dict(entry): self.follow_viewer(e)))
+            follow.setEnabled(True)
             menu.addAction("    Nommer cet appareil…",
                            lambda label=entry.get("label", ""): self.name_device(label))
         menu.addSeparator()
@@ -6705,6 +6716,67 @@ class MainWindow(QMainWindow):
         self.cfg.save()
         self._viewers_ready(self.viewers)
         return True
+
+    # -- suivre un visiteur en direct ------------------------------------------
+    def _following_key(self):
+        follow = getattr(self, "_following", None)
+        return (follow["label"], follow["where"]) if follow else None
+
+    def follow_viewer(self, entry: dict) -> None:
+        """Le lecteur flottant suit ce visiteur : sa video, a son instant,
+        en pause quand il l'est -- relu a chaque nouvelle des visiteurs."""
+        self._following = {"label": entry.get("label", ""), "where": entry.get("where", ""),
+                           "video": "", "missed": 0}
+        self.show_banner(f"Suivi en direct de {self.alias(entry.get('label', ''))} : le "
+                         "lecteur flottant suit sa vidéo. L'œil, en haut, pour arrêter.",
+                         "info", seconds=8)
+        self._follow_step()
+
+    def stop_following(self, said: str = "") -> None:
+        if getattr(self, "_following", None) is None:
+            return
+        self._following = None
+        self.show_banner(said or "Suivi en direct arrêté.", "quiet")
+
+    def _follow_step(self) -> None:
+        follow = getattr(self, "_following", None)
+        if not follow:
+            return
+        entry = next((e for e in self.viewers if e.get("label") == follow["label"]
+                      and e.get("where") == follow["where"]), None)
+        if entry is None:
+            # Un battement manque parfois : on laisse une demi-minute.
+            follow["missed"] += 1
+            if follow["missed"] >= 6:
+                self.stop_following(f"{self.alias(follow['label'])} n'est plus connecté : "
+                                    "suivi arrêté.")
+            return
+        follow["missed"] = 0
+        mark = entry.get("video") or ""
+        if not mark:
+            return
+        at_ms = int(float(entry.get("at", 0) or 0) * 1000)
+        if mark != follow["video"]:
+            path = self.video_for_mark(mark)
+            if path is None:
+                return
+            follow["video"] = mark
+            follow["path"] = str(path)
+            self.play_floating_path(path, at_ms)
+            return
+        floating = self.floating
+        if not floating.isVisible():
+            # On a ferme le lecteur : on ne suit plus.
+            return self.stop_following()
+        if str(getattr(floating, "path", "")) != follow.get("path"):
+            return
+        player = floating.player.player
+        if abs(floating.position() - at_ms) > 8000:
+            player.setPosition(at_ms)
+        if entry.get("playing") and not floating.playing():
+            player.play()
+        elif not entry.get("playing") and floating.playing():
+            player.pause()
 
     def watch_along(self, entry: dict) -> None:
         """La video que regarde un visiteur, dans le lecteur flottant, au meme

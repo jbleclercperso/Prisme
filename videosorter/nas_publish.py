@@ -31,7 +31,9 @@ NAS_PORT = 8714
 PROGRAM = ("__init__.py", "web.py", "access.py", "config.py", "query.py",
            "textfold.py", "brand_data.py", "demandes.py", "profils.py",
            # Les liens du telephone, telecharges par le NAS lui-meme.
-           "liens.py", "downloader.py", "mediafind.py")
+           "liens.py", "downloader.py", "mediafind.py",
+           # La traduction de la recherche (« deux filles » → « two girls »).
+           "traduction.py")
 REPO = Path(__file__).resolve().parents[1]
 
 
