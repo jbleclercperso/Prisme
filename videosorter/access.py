@@ -188,6 +188,21 @@ class Journal:
             except sqlite3.Error:
                 return []
 
+    def rename_video(self, old: str, new: str) -> None:
+        """Une video a change d'empreinte (rangee dans la collection) : ses
+        favoris et ses visionnages la suivent."""
+        with self.lock:
+            if self.db is None:
+                return
+            try:
+                self.db.execute("UPDATE OR IGNORE favorites SET video = ? WHERE video = ?",
+                                (new, old))
+                self.db.execute("DELETE FROM favorites WHERE video = ?", (old,))
+                self.db.execute("UPDATE views SET video = ? WHERE video = ?", (new, old))
+                self.db.commit()
+            except sqlite3.Error:
+                pass
+
     def seen_count(self, labels: list, minimum: float) -> int:
         """Combien de videos differentes ces appareils ont regardees, chacune
         au moins `minimum` secondes en tout."""

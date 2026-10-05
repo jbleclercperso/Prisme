@@ -29,7 +29,9 @@ FOLDER = ".prisme-partage"
 NAS_PORT = 8714
 # Les modules que le serveur du NAS importe : rien qui tire Qt.
 PROGRAM = ("__init__.py", "web.py", "access.py", "config.py", "query.py",
-           "textfold.py", "brand_data.py", "demandes.py", "profils.py")
+           "textfold.py", "brand_data.py", "demandes.py", "profils.py",
+           # Les liens du telephone, telecharges par le NAS lui-meme.
+           "liens.py", "downloader.py", "mediafind.py")
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -100,6 +102,65 @@ def _write_atomic(target: Path, text: str) -> None:
     temporary = target.with_name(target.name + ".tmp")
     temporary.write_text(text, encoding="utf-8")
     os.replace(temporary, target)
+
+
+def import_downloads(top) -> int:
+    """Les videos que le NAS a telechargees pour les telephones
+    (`.prisme-partage/telechargements`) : rangees dans la collection, sous
+    « Téléchargés depuis le téléphone ». Leur empreinte change : le NAS en
+    est prevenu (`etat/renommes.jsonl`), favoris et visionnages suivent.
+    Rend le nombre de videos rangees."""
+    from .liens import FOLDER_NAME, VIDEO_EXT, temp_mark
+    from .web import Library
+    share = share_root(top)
+    if share is None:
+        return 0
+    source = Path(share) / FOLDER / "telechargements"
+    try:
+        found = sorted(p for p in source.iterdir()
+                       if p.is_file() and p.suffix.lower() in VIDEO_EXT
+                       and time.time() - p.stat().st_mtime > 60)
+    except OSError:
+        return 0
+    if not found:
+        return 0
+    target = Path(top) / FOLDER_NAME
+    share_text = unc(share).rstrip("\\/")
+    thumbs = Path(share) / FOLDER / "vignettes"
+    notes, moved = [], 0
+    for path in found:
+        final = target / path.name
+        stem, suffix, n = final.stem, final.suffix, 2
+        while final.exists():
+            final = target / f"{stem} ({n}){suffix}"
+            n += 1
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(final))
+        except OSError:
+            continue
+        moved += 1
+        old, new = temp_mark(path.name), Library.mark(final)
+        text = unc(final)
+        rel = text[len(share_text):].lstrip("\\/").replace("\\", "/") \
+            if text.lower().startswith(share_text.lower()) else ""
+        # La vignette faite par le NAS sert sous la nouvelle empreinte.
+        try:
+            shutil.copyfile(thumbs / f"{old}.jpg", thumbs / f"{new}.jpg")
+        except OSError:
+            pass
+        if rel:
+            notes.append(json.dumps({"old": old, "new": new, "rel": rel,
+                                     "at": time.time()}, ensure_ascii=False))
+    if notes:
+        try:
+            place = Path(share) / FOLDER / "etat" / "renommes.jsonl"
+            place.parent.mkdir(parents=True, exist_ok=True)
+            with open(place, "a", encoding="utf-8") as handle:
+                handle.write("".join(note + "\n" for note in notes))
+        except OSError:
+            pass
+    return moved
 
 
 def _served_is_newer(program: Path) -> bool:

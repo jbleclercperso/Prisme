@@ -26,9 +26,44 @@ import re
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
+try:
+    from PySide6.QtCore import QObject, Signal
+except ImportError:
+    # Sur le NAS, sans Qt (`liens.py`) : les memes signaux, en simples
+    # rappels, appeles dans le fil qui les emet.
+    class _Bound:
+        def __init__(self):
+            self.slots = []
 
-from .websearch import USER_AGENT
+        def connect(self, slot) -> None:
+            self.slots.append(slot)
+
+        def emit(self, *args) -> None:
+            for slot in list(self.slots):
+                slot(*args)
+
+    class Signal:                                   # noqa: D101
+        def __init__(self, *_types):
+            self.name = ""
+
+        def __set_name__(self, _owner, name):
+            self.name = name
+
+        def __get__(self, obj, _owner=None):
+            if obj is None:
+                return self
+            return obj.__dict__.setdefault("_signal_" + self.name, _Bound())
+
+    class QObject:                                  # noqa: D101
+        def __init__(self, parent=None):
+            pass
+
+try:
+    from .websearch import USER_AGENT
+except ImportError:
+    # Le NAS n'a pas BeautifulSoup : seule l'identite du navigateur servait.
+    USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 # Au plus deux telechargements a la fois : un NAS et une connexion ont leurs
 # limites, et les sites aussi.
