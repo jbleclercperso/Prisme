@@ -187,8 +187,7 @@ def public(profile: dict | None) -> dict | None:
         return None
     return {"name": profile.get("name", ""), "email": profile.get("email", ""),
             "likes": list(profile.get("likes") or []),
-            "pin": bool(profile.get("pin_hash")),
-            "live": bool(profile.get("live"))}
+            "pin": bool(profile.get("pin_hash"))}
 
 
 def save(path, requests_path, me: str, label: str, told: dict) -> dict:
@@ -352,21 +351,6 @@ def pin_action(path, me: str, label: str, told: dict) -> dict:
         if not _write(Path(path), profiles):
             return {"ok": False, "error": "Impossible d'enregistrer le code."}
     return {"ok": True, "pin": action == "set"}
-
-
-def set_live(path, me: str, on: bool) -> bool:
-    """« Partager ma navigation » : la personne accepte, ou non, que son hôte
-    voie en direct où elle est dans Prisme (jamais son écran)."""
-    me = valid_me(me)
-    if path is None or not me:
-        return False
-    with _lock:
-        profiles = _read(Path(path))
-        profile = profiles.get(me)
-        if not isinstance(profile, dict):
-            return False
-        profile["live"] = bool(on)
-        return _write(Path(path), profiles)
 
 
 def labels_of(profile: dict | None, label: str) -> list:
