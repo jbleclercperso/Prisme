@@ -167,6 +167,10 @@ class Library:
         self._lock = threading.Lock()
         self._whole = None            # (version, json, json compresse)
         self._folded = None           # (version, [(empreinte, nom replie)])
+        # Les videos arrivees depuis la derniere analyse (les liens envoyes du
+        # telephone, `liens.py`) : empreinte -> (chemin, infos). Montrees dans
+        # leur dossier tant que le catalogue ne les connait pas.
+        self.extras: dict = {}
         self.refresh()
 
     @staticmethod
@@ -210,12 +214,58 @@ class Library:
         now = time.time()
         with self._lock:
             self.folders, self.videos, self.by_folder = folders, videos, by_folder
+            self._merge_extras(catalogue=True)
             self.built_at = now
             self.version = f"{time.time_ns():x}"
             # Le reste se refait a la premiere demande, sur le fil du serveur :
             # replier cent mille noms ici retarderait la fenetre.
             self._whole = None
             self._folded = None
+
+    # Le dossier des videos arrivees du telephone, en tete de la liste.
+    EXTRAS_ID = "telecharges"
+
+    def add_download(self, path, mark: str = "", info: dict | None = None) -> str:
+        """Une video arrivee du telephone : visible tout de suite, sans
+        attendre l'analyse. Rend son empreinte."""
+        mark = mark or self.mark(path)
+        with self._lock:
+            self.extras[mark] = (Path(path), dict(info or {}))
+            self._merge_extras()
+            self.version = f"{time.time_ns():x}"
+            self._whole = None
+            self._folded = None
+        return mark
+
+    def _merge_extras(self, catalogue: bool = False) -> None:
+        """Sous le verrou : les videos arrivees, dans leur dossier. `catalogue` :
+        `videos` vient d'etre relu -- ce qu'il connait n'est plus a part."""
+        from .liens import FOLDER_NAME
+        if not self.extras:
+            return
+        for mark, (path, _info) in list(self.extras.items()):
+            if (catalogue and mark in self.videos) or not path.exists():
+                del self.extras[mark]
+                if not catalogue:
+                    self.videos.pop(mark, None)
+        self.folders = [f for f in self.folders if f.get("id") != self.EXTRAS_ID]
+        self.by_folder.pop(self.EXTRAS_ID, None)
+        fresh = list(self.extras)
+        if not fresh:
+            return
+        for mark in fresh:
+            self.videos[mark] = self.extras[mark][0]
+        fresh.sort(key=lambda mark: -self._extra_time(mark))
+        self.by_folder[self.EXTRAS_ID] = fresh
+        self.folders.insert(0, {"id": self.EXTRAS_ID, "name": FOLDER_NAME,
+                                "count": len(fresh), "size": "", "cover": fresh[0],
+                                "shelf": ""})
+
+    def _extra_time(self, mark: str) -> float:
+        try:
+            return self.extras[mark][0].stat().st_mtime
+        except OSError:
+            return 0.0
 
     def _shelf_of(self, item) -> str:
         """Le dossier « + » de la racine d'ou vient ce dossier, ou ""."""
@@ -256,7 +306,9 @@ class Library:
                 top.append(entry)
             entry["count"] += f.get("count", 0)
             entry["folders"] += 1
-        top.sort(key=lambda entry: entry["name"].lower())
+        # Les videos arrivees du telephone d'abord : c'est la qu'on les attend.
+        top.sort(key=lambda entry: (entry.get("id") != self.EXTRAS_ID,
+                                    entry["name"].lower()))
         with self._lock:
             if self.version == version:
                 self._top = (version, top)
@@ -312,6 +364,12 @@ class Library:
         path = self.videos.get(mark)
         if path is None:
             return None
+        if mark in self.extras:
+            info = self.extras[mark][1]
+            if info.get("duration") or info.get("height"):
+                return {"id": mark, "name": path.name, "folder": path.parent.name,
+                        "duration": info.get("duration", ""),
+                        "height": info.get("height", 0)}
         info = INDEX.probe(path) or {}
         return {
             "id": mark,
@@ -629,6 +687,9 @@ class Server:
         # Ou ranger les demandes envoyees du telephone (`demandes.py`) :
         # le PC et le NAS le disent chacun ; None, aucune n'est recue.
         self.requests_path = None
+        # La file des liens envoyes du telephone (`liens.LinkJobs`), ou None :
+        # un lien n'est alors qu'une demande, a traiter a la main.
+        self.downloads = None
         self.host, self.port = host, port
         self.httpd = None
         self.thread = None
@@ -925,6 +986,10 @@ def _make_handler(server: Server):
 
             if route == "/api/install":
                 return self._json({"secure": server.secure})
+            if route == "/api/liens":
+                # Ou en sont les liens de la personne.
+                jobs = server.downloads.mine(self._labels()) if server.downloads else []
+                return self._json({"jobs": jobs, "auto": server.downloads is not None})
             if route == "/api/profil":
                 return self._profile()
             if route == "/api/pourvous":
@@ -1140,9 +1205,22 @@ def _make_handler(server: Server):
             # Le prenom, s'il a ete donne : Prisme dit qui demande.
             profile = profils.find(server.profiles_path, self._me(), label)
             who = f"{profile['name']} · {label}" if profile and profile.get("name") else label
-            done = demandes.append(server.requests_path, who,
-                                   str(told.get("kind", "")), str(told.get("text", "")))
-            self._json(done, HTTPStatus.OK if done.get("ok") else HTTPStatus.BAD_REQUEST)
+            kind, text = str(told.get("kind", "")), str(told.get("text", ""))
+            auto = False
+            if kind == "lien" and server.downloads is not None:
+                # Le serveur telecharge lui-meme ; la video ira dans les
+                # favoris de la personne (`liens.py`).
+                from .liens import first_url
+                started = server.downloads.submit(first_url(text), label, who)
+                if not started.get("ok"):
+                    return self._json(started, HTTPStatus.BAD_REQUEST)
+                auto = True
+                if started.get("already"):
+                    return self._json({"ok": True, "auto": True, "already": True})
+                text = f"{text} (téléchargement automatique)"
+            done = demandes.append(server.requests_path, who, kind, text)
+            done["auto"] = auto
+            self._json(done, HTTPStatus.OK if done.get("ok") or auto else HTTPStatus.BAD_REQUEST)
 
         def _me(self) -> str:
             """L'identifiant que la page s'est donne (`profils.py`)."""
@@ -2055,6 +2133,37 @@ async function loadFavs() {
   favs = new Set(((d && d.videos) || []).map((v) => v.id));
   return (d && d.videos) || [];
 }
+// -- les liens envoyes : ou en est leur telechargement ------------------------
+let linksTimer = null;
+function linkLine(jobs) {
+  const live = jobs.filter((j) => j.state === 'attente' || j.state === 'en cours');
+  const recent = Date.now() / 1000 - 6 * 3600;
+  const failed = jobs.filter((j) => j.state === 'échec' && j.at > recent);
+  const parts = [];
+  if (live.length) {
+    const now = live.find((j) => j.state === 'en cours');
+    parts.push('⏳ ' + live.length + ' vidéo(s) en téléchargement' +
+      (now && now.progress > 0 ? ' — ' + Math.round(now.progress * 100) + ' %' : ''));
+  }
+  if (failed.length) parts.push('✕ ' + failed[0].error);
+  return parts.join(' · ');
+}
+async function watchLinks() {
+  clearTimeout(linksTimer);
+  const d = await getJSON('/api/liens');
+  const jobs = (d && d.jobs) || [];
+  const live = jobs.some((j) => j.state === 'attente' || j.state === 'en cours');
+  if (shown.v === 'favs') {
+    const line = linkLine(jobs);
+    const base = views.videos.where.split(' · ⏳')[0].split(' · ✕')[0];
+    crumb.textContent = line ? base + ' · ' + line : base;
+    // Une video vient d'arriver : la liste des favoris se refait.
+    const arrived = jobs.some((j) => j.state === 'fait' && j.mark && !favs.has(j.mark));
+    if (arrived) { showFavorites(false); return; }
+  }
+  if (live) linksTimer = setTimeout(watchLinks, 5000);
+}
+
 async function showFavorites(push) {
   const ticket = ++nav;
   if (asking) { asking.abort(); asking = null; }
@@ -2066,6 +2175,7 @@ async function showFavorites(push) {
   mark('tabFavs');
   showVideos(list, list.length ? 'Favoris — ' + list.length + ' vidéo(s)'
                                : 'Pas encore de favori : l’étoile du lecteur en ajoute.');
+  watchLinks();
 }
 
 async function openFolder(id, name, push) {
@@ -2708,9 +2818,10 @@ $('askGo').onclick = async () => {
       body: JSON.stringify({kind: askKind, text: text})});
     const d = await r.json().catch(() => ({}));
     if (r.ok && d.ok) {
-      told.textContent = askKind === 'lien'
-        ? '✓ Reçu : elle sera dans vos favoris sous 24 h'
-        : '✓ Demande envoyée : réponse sous 24 h';
+      told.textContent = askKind !== 'lien' ? '✓ Demande envoyée : réponse sous 24 h'
+        : d.auto ? '✓ Téléchargement lancé : la vidéo arrive dans vos Favoris'
+        : '✓ Reçu : elle sera dans vos favoris sous 24 h';
+      if (askKind === 'lien' && d.auto) watchLinks();
       told.className = 'told ok';
       $('askText').value = '';
       setTimeout(askClose, 1600);

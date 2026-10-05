@@ -483,6 +483,26 @@ class _GlobalQuietKey(QObject):
         self.ok = False
 
 
+def _phone_links(server, top):
+    """La file des liens envoyes du telephone, pour le partage du PC : les
+    videos arrivent dans la collection, et dans les favoris de qui les a
+    envoyees. None si la racine n'est pas un vrai dossier."""
+    from . import roots
+    from .config import PRIVATE_DIR
+    from .downloader import available
+    from .liens import FOLDER_NAME, LinkJobs
+    if top is None or roots.is_union(top):
+        return None
+
+    def arrived(job: dict, path: Path) -> str:
+        mark = server.library.add_download(path)
+        JOURNAL.set_favorite(job.get("label", ""), mark, path.name, True)
+        return mark
+
+    return LinkJobs(Path(top) / FOLDER_NAME, PRIVATE_DIR / "liens.json", arrived,
+                    ffmpeg=lambda: Tools.ffmpeg, available=available)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, cfg: Config):
         super().__init__()
@@ -5407,6 +5427,29 @@ class MainWindow(QMainWindow):
                          name="labo-suit").start()
 
     # -- les demandes du telephone ------------------------------------------------
+    def _import_phone_videos(self) -> None:
+        """Les videos que le NAS a telechargees pour les telephones : rangees
+        dans la collection, hors du fil de l'interface (`nas_publish`)."""
+        from . import roots
+        top = self.top_root()
+        if (top is None or roots.is_union(top) or getattr(self, "_phone_importing", False)
+                or time.time() - getattr(self, "_phone_imported_at", 0.0) < 120):
+            return
+        from .nas_publish import import_downloads
+        from .tunnel import Chore
+        self._phone_importing = True
+        self._phone_imported_at = time.time()
+
+        def then(count) -> None:
+            self._phone_importing = False
+            if count:
+                from .liens import FOLDER_NAME
+                self.show_banner(
+                    f"{count} vidéo(s) envoyée(s) depuis le téléphone, rangée(s) dans "
+                    f"« {FOLDER_NAME} ».", "done", seconds=10)
+
+        Chore(lambda: import_downloads(top), self, fallback=0, then=then).start()
+
     def _demande_paths(self) -> list:
         """Ou les demandes arrivent : chez Prisme (page servie par le PC), et
         dans le partage du NAS (page servie par le NAS)."""
@@ -5423,6 +5466,7 @@ class MainWindow(QMainWindow):
     def _poll_demandes(self) -> None:
         if self._closing or getattr(self, "_asks_reading", False):
             return
+        self._import_phone_videos()
         from . import demandes
         from .tunnel import Chore
         paths = self._demande_paths()
@@ -6129,6 +6173,7 @@ class MainWindow(QMainWindow):
                 from .config import PRIVATE_DIR
                 from .demandes import FILE_NAME
                 server.requests_path = PRIVATE_DIR / FILE_NAME
+                server.downloads = _phone_links(server, top)
                 server.start()
                 return server
             except OSError as exc:
@@ -6365,6 +6410,8 @@ class MainWindow(QMainWindow):
         self._share_again = False
         self.stop_tunnel(wait)
         if self.share_server is not None:
+            if self.share_server.downloads is not None:
+                self.share_server.downloads.close()
             self.share_server.stop()
             self.share_server = None
 
