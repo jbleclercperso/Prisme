@@ -47,6 +47,13 @@ def share_root(top) -> Path | None:
             found = share_root(member)
             if found is not None:
                 return found
+        # Au demarrage, la verification d'acces des racines n'est pas encore
+        # finie : on prend la racine cochee qui est sur un partage. Sans cela,
+        # « Toutes les racines » ignorait le NAS (visiteurs, demandes, fiches).
+        for member in roots.chosen_on():
+            found = share_root(member)
+            if found is not None:
+                return found
         return None
     anchor = PureWindowsPath(unc(top)).anchor
     if not anchor.startswith("\\\\"):

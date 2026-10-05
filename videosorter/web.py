@@ -699,6 +699,33 @@ class Server:
     # Un visiteur sans signe de vie depuis ce temps n'est plus « connecte ».
     LIVE_SECONDS = 90
 
+    def secure_works(self) -> bool:
+        """L'adresse https (Tailscale Funnel) repond-elle d'Internet ? Verifie
+        au plus toutes les cinq minutes."""
+        if not self.secure.startswith("https://"):
+            return False
+        now = time.time()
+        known = getattr(self, "_secure_seen", None)
+        if known is not None and known[0] == self.secure and now - known[1] < 300:
+            return known[2]
+        # A part, et trois secondes d'attente au plus : la resolution du nom
+        # n'obeit pas au delai, et pouvait retenir la page longtemps.
+        address, result = self.secure, []
+
+        def probe() -> None:
+            import urllib.request
+            try:
+                with urllib.request.urlopen(address.rstrip("/") + "/sw.js", timeout=5) as answer:
+                    result.append(answer.status == 200)
+            except Exception:                           # noqa: BLE001
+                result.append(False)
+            self._secure_seen = (address, time.time(), result[0])
+
+        worker = threading.Thread(target=probe, name="prisme-https", daemon=True)
+        worker.start()
+        worker.join(3.0)
+        return bool(result and result[0])
+
     def seen(self, label: str, ip: str = "") -> None:
         """Un visiteur vient de demander quelque chose."""
         now = time.time()
@@ -1002,7 +1029,11 @@ def _make_handler(server: Server):
                                   HTTPStatus.UNAUTHORIZED)
 
             if route == "/api/install":
-                return self._json({"secure": server.secure})
+                # L'adresse https seulement si elle repond : la page y envoyait
+                # le telephone pour poser l'icone, et s'il n'y avait rien au
+                # bout (Funnel coupe), on tournait en rond.
+                return self._json({"secure": server.secure if server.secure_works() else "",
+                                   "declared": server.secure})
             if route == "/api/liens":
                 # Ou en sont les liens de la personne.
                 jobs = server.downloads.mine(self._labels()) if server.downloads else []
@@ -2785,14 +2816,18 @@ function askInstall() {
   let said = '';
   try { said = localStorage.getItem('prisme-icone') || ''; } catch (_) {}
   if ((said === 'jamais' || said === 'posee') && !cameToInstall) return;
+  // « Non » : on ne redemande pas avant une semaine (a chaque visite, c'etait
+  // lassant).
+  const later = /^tard:(\\d+)$/.exec(said);
+  if (later && Date.now() - Number(later[1]) < 7 * 86400000 && !cameToInstall) return;
   openSheet('install');
 }
 $('installNo').onclick = () => {
   // « Non » : la question revient a la prochaine visite -- sauf si l'on a
   // coche « Ne plus me le demander ».
-  if ($('installNever').checked) {
-    try { localStorage.setItem('prisme-icone', 'jamais'); } catch (_) {}
-  }
+  try {
+    localStorage.setItem('prisme-icone', $('installNever').checked ? 'jamais' : 'tard:' + Date.now());
+  } catch (_) {}
   closeSheet('install');
 };
 $('installYes').onclick = async () => {
