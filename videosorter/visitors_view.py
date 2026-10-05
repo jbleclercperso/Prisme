@@ -124,8 +124,11 @@ def gather(sources: list, aliases: dict, live: list) -> list:
             people.append(_person(where, labels, summary, profile, key, path, profiles,
                                   aliases))
     for where, summary, path, _profiles in sources:
-        for label in summary:
-            if (where, label) not in claimed:
+        for label, one in summary.items():
+            # Un appareil sans profil n'a sa fiche que s'il a fait quelque
+            # chose : chaque entree par le lien laisse un nom de navigateur,
+            # qui ne faisait que des fiches vides.
+            if (where, label) not in claimed and (one["videos"] or one["favorites"]):
                 people.append(_person(where, [label], summary, None, "", path, {},
                                       aliases))
     for person in people:
