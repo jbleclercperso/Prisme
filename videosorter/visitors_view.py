@@ -385,6 +385,9 @@ class VisitorsPage(QWidget):
         while self.column.count():
             item = self.column.takeAt(0)
             if item.widget() is not None:
+                # Cachee tout de suite : detruite plus tard, l'ancienne fiche
+                # restait dessinee sous la nouvelle.
+                item.widget().hide()
                 item.widget().deleteLater()
         online = sum(1 for one in people if one["online"])
         self.head.setText(f"{len(people)} visiteur(s)" + (
