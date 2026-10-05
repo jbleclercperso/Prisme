@@ -12,8 +12,9 @@ tags dont elle est la plus proche.
 - Un moteur multilingue : on ecrit en francais. Une demande se comprend
   idee par idee (`parse_query`) : chacune doit se retrouver dans l'image.
 - Les bibliotheques (torch, open_clip…) sont facultatives : Prisme marche
-  sans elles, et le labo propose de les installer (lance depuis les sources
-  seulement : pas dans le programme empaquete).
+  sans elles, et le labo propose de les installer. Dans le programme vendu
+  (portable ou installe), elles vont dans un Python a part, que Prisme se
+  procure lui-meme (iapython).
 - Les empreintes se gardent sur le disque : on n'indexe qu'une fois.
 
 Sans Qt : la fenetre (labo.py) fournit les images (`frame_of`).
@@ -32,6 +33,7 @@ import sys
 import threading
 from pathlib import Path
 
+from . import iapython
 from .config import PRIVATE_DIR
 
 # Les moteurs, du plus rapide au plus precis. Mesure sur un i7 de portable
@@ -102,15 +104,15 @@ def missing() -> list:
     """Les paquets pip qui manquent au labo (vide : tout est la). Les caches
     d'import sont vides d'abord : apres une installation, Python croyait
     encore les paquets absents."""
-    importlib.invalidate_caches()
-    return [package for module, package in NEEDED
-            if importlib.util.find_spec(module) is None]
+    return [package for module, package in NEEDED if not iapython.has(module)]
 
 
 def console_python() -> str:
     """Le Python a console pour lancer pip : Prisme tourne souvent sous
     pythonw.exe (sans console), et pip, lance par lui, s'arretait en route --
     l'installation restait a moitie faite."""
+    if iapython.external():
+        return str(iapython.python())
     here = Path(sys.executable)
     if here.name.lower() == "pythonw.exe":
         beside = here.with_name("python.exe")
@@ -121,9 +123,9 @@ def console_python() -> str:
 
 def can_install() -> str:
     """"" si l'on peut installer d'ici, sinon pourquoi pas."""
-    if getattr(sys, "frozen", False):
-        return ("Le labo IA ne fonctionne que lorsque Prisme est lancé depuis ses sources "
-                "(python main.py), pas depuis le programme empaqueté.")
+    if iapython.external():
+        # Le programme vendu se procure son Python (iapython.prepare).
+        return "" if os.name == "nt" else "Le labo IA n'est prévu que pour Windows."
     if importlib.util.find_spec("pip") is None:
         return "pip est introuvable pour ce Python."
     return ""
@@ -162,11 +164,7 @@ def has_nvidia() -> bool:
 def torch_build() -> str:
     """La version de PyTorch installee (« 2.14.1+cpu »), sans l'importer :
     l'importer dans la fenetre coutait deux secondes et des centaines de Mo."""
-    try:
-        from importlib.metadata import version
-        return version("torch")
-    except Exception:                                       # noqa: BLE001
-        return ""
+    return iapython.version("torch")
 
 
 def gpu_status() -> tuple:
@@ -196,11 +194,7 @@ def gpu_switch_commands() -> list:
     if not build or "+cu" in build:
         return []
     base = build.split("+")[0]
-    try:
-        from importlib.metadata import version
-        vision = version("torchvision").split("+")[0]
-    except Exception:                                       # noqa: BLE001
-        vision = ""
+    vision = iapython.version("torchvision").split("+")[0]
     wanted = [f"torch=={base}+{CUDA_TAG}"] + ([f"torchvision=={vision}+{CUDA_TAG}"] if vision else [])
     return [[console_python(), "-m", "pip", "install", "--disable-pip-version-check",
              "--force-reinstall", "--no-deps"] + wanted + ["--index-url", CUDA_INDEX]]
@@ -213,10 +207,13 @@ def install_commands() -> list:
     wanted = missing()
     if not wanted:
         return []
+    # Le programme vendu : d'abord son Python a lui (une fois).
+    first = [iapython.PrepareStep()] if iapython.external() and not iapython.prepared() else []
     if has_nvidia() and ("torch" in wanted or "torchvision" in wanted):
         rest = [p for p in wanted if p not in ("torch", "torchvision")]
-        return [pip + ["torch", "torchvision", "--index-url", CUDA_INDEX]] + ([pip + rest] if rest else [])
-    return [pip + wanted]
+        return first + [pip + ["torch", "torchvision", "--index-url", CUDA_INDEX]] + (
+            [pip + rest] if rest else [])
+    return first + [pip + wanted]
 
 
 # -- les moteurs ------------------------------------------------------------------------
@@ -523,13 +520,10 @@ class RemoteClip:
     def _ensure(self) -> None:
         if self._process is not None and self._process.is_alive():
             return
-        import multiprocessing
-        context = multiprocessing.get_context("spawn")
-        self._requests, self._answers = context.Queue(), context.Queue()
-        self._process = context.Process(target=_clip_child, daemon=True,
-                                        args=(self.name, self._requests, self._answers),
-                                        name="prisme-labo-modele")
-        self._process.start()
+        # Depuis les sources, un processus fils ; dans le programme vendu, le
+        # Python du labo (iapython) -- le meme dialogue de part et d'autre.
+        self._process, self._requests, self._answers = iapython.spawn(
+            _clip_child, (self.name,), "prisme-labo-modele")
 
     def _ask(self, kind: str, payload, timeout: float):
         import queue as _queue

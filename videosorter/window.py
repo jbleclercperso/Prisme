@@ -18,7 +18,7 @@ import shiboken6
 from PySide6.QtGui import QAction, QCursor, QIcon, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtCore import (
-    QEvent, QObject, QPoint, QRect, QSize, QThread, QTimer, QUrl, Qt, Signal,
+    QEvent, QEventLoop, QObject, QPoint, QRect, QSize, QThread, QTimer, QUrl, Qt, Signal,
 )
 from PySide6.QtWidgets import (
     QSplitter,
@@ -15109,12 +15109,57 @@ class MainWindow(QMainWindow):
 
 
 def check_tools(parent=None) -> bool:
+    """ffmpeg et ffprobe sont-ils la ? Sinon, Prisme propose de les
+    telecharger lui-meme : sur un PC neuf, le programme vendu s'arretait."""
     if Tools.ffmpeg and Tools.ffprobe:
+        return True
+    from . import ffmpeg_fetch
+    ask = QMessageBox(QMessageBox.Question, "ffmpeg nécessaire",
+                      f"{APP_NAME} a besoin de ffmpeg et ffprobe pour lire les vidéos et "
+                      "fabriquer les aperçus.\n\nLes télécharger maintenant ? "
+                      f"({ffmpeg_fetch.SIZE_TEXT}, une seule fois, depuis gyan.dev)", parent=parent)
+    fetch = ask.addButton("Télécharger", QMessageBox.AcceptRole)
+    ask.addButton("Quitter", QMessageBox.RejectRole)
+    ask.setDefaultButton(fetch)
+    ask.exec()
+    if ask.clickedButton() is not fetch:
+        return False
+    progress = QProgressDialog("Téléchargement de ffmpeg…", "Annuler", 0, 1000, parent)
+    progress.setWindowTitle(APP_NAME)
+    progress.setWindowModality(Qt.ApplicationModal)
+    progress.setMinimumDuration(0)
+    progress.setValue(0)
+    state = {"done": 0, "total": 0, "error": None, "over": False}
+
+    def work() -> None:
+        try:
+            ffmpeg_fetch.fetch(lambda done, total: state.update(done=done, total=total),
+                               lambda: progress.wasCanceled())
+        except Exception as exc:                            # noqa: BLE001
+            state["error"] = str(exc) or type(exc).__name__
+        state["over"] = True
+    threading.Thread(target=work, daemon=True, name="prisme-ffmpeg").start()
+    loop = QEventLoop()
+    timer = QTimer()
+
+    def tick() -> None:
+        if state["total"]:
+            progress.setValue(min(999, state["done"] * 1000 // state["total"]))
+            progress.setLabelText(f"Téléchargement de ffmpeg… {state['done'] // 2**20} / "
+                                  f"{state['total'] // 2**20} Mo")
+        if state["over"]:
+            loop.quit()
+    timer.timeout.connect(tick)
+    timer.start(100)
+    loop.exec()
+    timer.stop()
+    progress.close()
+    if state["error"] is None and Tools.resolve():
         return True
     QMessageBox.critical(
         parent, "ffmpeg introuvable",
-        f"{APP_NAME} a besoin de ffmpeg et ffprobe pour fabriquer les aperçus.\n\n"
-        "Installez-les (winget install Gyan.FFmpeg) ou renseignez leur chemin "
-        "dans le fichier de configuration.",
+        f"ffmpeg n'a pas pu être téléchargé ({state['error'] or 'fichiers absents'}).\n\n"
+        "Installez-le (winget install Gyan.FFmpeg), ou posez ffmpeg.exe et ffprobe.exe "
+        f"dans {ffmpeg_fetch.folder()}, puis relancez {APP_NAME}.",
     )
     return False

@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import ia
+from . import ia, iapython
 
 # Tout est ecrit en clair sur fond sombre : les onglets et les boutons natifs
 # de Windows sortaient en gris pale sur gris, illisibles.
@@ -896,6 +896,8 @@ class LaboWindow(QWidget):
             self.log.appendPlainText("Terminé.")
             return self._engine_changed()
         argv = self._commands.pop(0)
+        if callable(argv):
+            return self._run_step(argv)
         self.log.appendPlainText("$ " + " ".join(argv))
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
@@ -903,7 +905,22 @@ class LaboWindow(QWidget):
             lambda: self._pip_output(process))
         process.finished.connect(lambda code, _status: self._pip_done(code))
         self._process = process
-        process.start(argv[0], argv[1:])
+        with iapython._clean_dll_path():
+            process.start(argv[0], argv[1:])
+
+    def _run_step(self, step) -> None:
+        """Une etape qui n'est pas une commande (preparer le Python du labo,
+        dans le programme vendu) : dans un fil, qui raconte dans le journal."""
+        self.log.appendPlainText(getattr(step, "label", "…"))
+
+        def work() -> None:
+            try:
+                step(lambda line: self.mail.put(("log", line)))
+            except Exception as exc:                         # noqa: BLE001
+                self.mail.put(("step", str(exc) or type(exc).__name__))
+            else:
+                self.mail.put(("step", ""))
+        threading.Thread(target=work, daemon=True, name="prisme-labo-python").start()
 
     def _pip_output(self, process) -> None:
         text = bytes(process.readAllStandardOutput()).decode("utf-8", "replace")
@@ -997,6 +1014,15 @@ class LaboWindow(QWidget):
                     self._set_task("job", f"{label} : {done:,} / {total:,}{part}".replace(",", " "))
             elif kind == "said":
                 self._say(value)
+            elif kind == "log":
+                self.log.appendPlainText(value)
+            elif kind == "step":
+                if value:
+                    self.log.appendPlainText(f"Échec : {value}")
+                    self._commands = []
+                    self.install_button.setEnabled(True)
+                else:
+                    self._next_command()
             elif kind == "device":
                 self._show_index_state()
             elif kind == "gpu":

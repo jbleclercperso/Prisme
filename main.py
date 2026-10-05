@@ -590,4 +590,8 @@ if __name__ == "__main__":
     # devenir le moteur de recherche, pas un second Prisme.
     import multiprocessing
     multiprocessing.freeze_support()
+    if "--verifier" in sys.argv:
+        # Le bilan de sante du programme (Prisme-diagnostic.exe --verifier).
+        from videosorter.selftest import run as verify
+        sys.exit(verify(sys.argv))
     sys.exit(main())
