@@ -188,14 +188,16 @@ class Library:
         videos = {}
         by_folder = {}
         for item in cached_items(self.root, MODE_FOLDERS, self.expand):
-            if item.is_tag or not item.videos or under_veiled(item.path):
+            # Strict : l'interrupteur « montrer les dossiers masques » vaut
+            # pour l'ecran du PC, jamais pour le partage.
+            if item.is_tag or not item.videos or under_veiled(item.path, strict=True):
                 # Ce qui est masqué ici l'est aussi au dehors : l'adresse
                 # publique ne doit pas montrer ce que la fenêtre cache.
                 continue
             key = self.mark(item.path)
             inside = []
             for video in item.videos:
-                if under_veiled(video):
+                if under_veiled(video, strict=True):
                     continue
                 mark = self.mark(video)
                 videos[mark] = Path(video)

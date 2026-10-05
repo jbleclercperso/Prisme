@@ -306,13 +306,16 @@ def veiled(name: str) -> bool:
 _VEIL_MEMO: dict = {}
 
 
-def under_veiled(path) -> bool:
+def under_veiled(path, strict: bool = False) -> bool:
     """Ce chemin traverse-t-il un dossier masque ?
 
     L'index garde ce qu'il a vu autrefois : masquer a l'enumeration ne suffit
     donc pas, il faut aussi ecarter a l'affichage ce qui y dort deja.
+
+    `strict` : masque meme quand l'interrupteur montre tout -- le partage.
+    Ce qu'on reaffiche sur son ecran ne part pas vers les telephones.
     """
-    if SHOW_VEILED or not VEILED:
+    if (SHOW_VEILED and not strict) or not VEILED:
         return False
     text = str(path)
     cut = max(text.rfind("\\"), text.rfind("/"))

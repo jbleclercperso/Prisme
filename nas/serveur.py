@@ -69,13 +69,32 @@ class NasLibrary(web.Library):
             print(f"catalogue illisible : {trouble}", flush=True)
             return
         videos, entries = {}, {}
+        # Les dossiers masques sur le PC (BIN…) : jamais montres ici, meme
+        # si un catalogue les contient (publie avec « tout montrer » leve).
+        veiled = {str(name).casefold() for name in (told.get("veiled") or ["bin"])}
         for mark, entry in (told.get("videos") or {}).items():
-            path = LIBRARY_ROOT / Path(*entry["rel"].split("/"))
+            parts = entry["rel"].split("/")
+            if any(part.casefold() in veiled for part in parts):
+                continue
+            path = LIBRARY_ROOT / Path(*parts)
             videos[mark] = path
             entries[mark] = entry
+        by_folder = {key: [mark for mark in marks if mark in videos]
+                     for key, marks in (told.get("by_folder") or {}).items()}
+        by_folder = {key: marks for key, marks in by_folder.items() if marks}
+        folders = []
+        for folder in told.get("folders") or []:
+            marks = by_folder.get(folder.get("id"))
+            if not marks:
+                continue
+            if len(marks) != folder.get("count"):
+                folder = dict(folder, count=len(marks),
+                              cover=folder.get("cover") if folder.get("cover") in marks
+                              else marks[0])
+            folders.append(folder)
         with self._lock:
-            self.folders = told.get("folders") or []
-            self.by_folder = told.get("by_folder") or {}
+            self.folders = folders
+            self.by_folder = by_folder
             self.videos = videos
             self.entries = entries
             self.version = str(told.get("version") or f"{time.time_ns():x}")
