@@ -348,6 +348,10 @@ DEFAULTS = {
     "view": "browse",            # conserve pour compatibilite
     "tab": "folders",            # onglet : folders | videos | tags
     "tag_family": "mine",        # mots-cles affiches : mine | top
+    # La bande des mots epingles, sous l'en-tete (`wordstrip.py`) : les mots,
+    # dans l'ordre, et si elle s'affiche.
+    "word_pins": [],
+    "word_pins_shown": True,
     "tree_action": "send",       # clic dans l arborescence : send | go
     "tags": [],
     # Les racines reunies (NAS, disque externe, dossier du PC). « root » peut

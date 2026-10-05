@@ -1263,6 +1263,7 @@ class MainWindow(QMainWindow):
                 ("-", None),
                 ("Arborescence des destinations", self.toggle_tree),
                 ("Lecteur flottant automatique", self.toggle_float_auto),
+                ("Bande des mots épinglés", self.toggle_word_strip),
                 ("Durée du diaporama…", self.edit_slideshow_seconds),
                 ("-", None),
                 ("Avancé", [
@@ -1345,6 +1346,11 @@ class MainWindow(QMainWindow):
         after_star.setIcon(icon("star"))
         self._dress_decoding_menu()
         self._dress_quiet_menu()
+        strip = self._menu_by_text["Bande des mots épinglés"]
+        strip.setCheckable(True)
+        strip.setChecked(bool(self.cfg["word_pins_shown"]))
+        strip.setToolTip("Sous l'en-tête, les mots-clés épinglés (l'épingle d'un mot, "
+                         "dans l'onglet « Mots-clés ») : un clic montre leurs vidéos")
         floating = self._menu_by_text["Lecteur flottant automatique"]
         floating.setCheckable(True)
         floating.setChecked(bool(self.cfg["float_auto"]))
@@ -1601,6 +1607,17 @@ class MainWindow(QMainWindow):
         top_box.setSpacing(8)
         top_box.addLayout(row_one)
         top_box.addLayout(row_two)
+        # Les mots epingles : une ligne fine, comme sur la page mobile.
+        from .wordstrip import WordStrip
+        self.word_strip = WordStrip(self.top_bar)
+        self.word_strip.chosen.connect(self.open_word)
+        self.word_strip.removeRequested.connect(self.unpin_word)
+        self.word_strip.moveRequested.connect(self.move_word)
+        self.word_strip.hideRequested.connect(lambda: self.toggle_word_strip(False))
+        self.word_strip.moreRequested.connect(self._pin_more_words)
+        self.word_strip.set_words(list(self.cfg["word_pins"] or []))
+        self.word_strip.hide()
+        top_box.addWidget(self.word_strip)
         layout.addWidget(self.top_bar)
 
         # Le bandeau d'information flotte au-dessus du contenu, le temps de
@@ -1677,7 +1694,7 @@ class MainWindow(QMainWindow):
         # L'etoile de la vignette survolee : le favori d'un clic, sans fiche.
         self.board.favoriteToggled.connect(self.on_board_favorite)
         self.board.pinToggled.connect(self.on_board_pin)
-        self.board.pinned_of = self._is_pinned
+        self.board.pinned_of = self._board_pinned
         self.board.flipNeeded.connect(self.on_board_flip)
         self.viewer.addWidget(self.grid)
         self.viewer.addWidget(self.single)
@@ -9192,6 +9209,7 @@ class MainWindow(QMainWindow):
         sheet = not self.browsing and not wall
         self.tag_chips.setVisible(self.tab == TAB_TAGS and not sheet)
         self.tags_button.setVisible(self.tab == TAB_TAGS and not sheet)
+        self._show_word_strip()
         # L'etat de la collection vit dans le menu ⋯ : sur la premiere ligne,
         # il se faisait rogner jusqu'a chevaucher les boutons voisins.
         self.state_button.hide()
@@ -11143,10 +11161,21 @@ class MainWindow(QMainWindow):
     def _is_pinned(self, path) -> bool:
         return bool(path) and self._pin_key(path) in self._pin_keys()
 
+    def _board_pinned(self, path) -> bool:
+        """L'epingle d'une tuile : un mot-cle (chemin sans dossier) est-il dans
+        la bande ? un dossier ou une video, en tete de sa liste ?"""
+        if path and not Path(str(path)).is_absolute():
+            return fold(Path(str(path)).name) in {
+                fold(word) for word in self.cfg["word_pins"] or []}
+        return self._is_pinned(path)
+
     def toggle_pin(self, item) -> None:
         """Epingle ou desepingle un dossier ou une video : l'element passe en
-        tete de sa liste (ou reprend sa place), et la liste se reclasse."""
-        if item is None or item.is_tag:
+        tete de sa liste (ou reprend sa place), et la liste se reclasse. Un
+        mot-cle, lui, va dans la bande des mots epingles."""
+        if item is not None and item.is_tag:
+            return self.toggle_word_pin(item)
+        if item is None:
             return
         key = self._pin_key(item.path)
         pins = [p for p in (self.cfg["pins"] or []) if self._pin_key(p) != key]
@@ -11168,6 +11197,114 @@ class MainWindow(QMainWindow):
                 break
         if self.current is item:
             self.pin_button.set_value(wanted)
+
+    # -- la bande des mots epingles (`wordstrip.py`) ---------------------------
+    def toggle_word_pin(self, item) -> None:
+        """L'epingle d'un mot-cle : dans la bande, ou hors d'elle."""
+        word = Path(str(item.path)).name
+        if word in (PINNED_UNREAD, PINNED_LOOSE):
+            return self.show_banner("Cette liste ne s'épingle pas : ce n'est pas un mot.",
+                                    "quiet")
+        words = list(self.cfg["word_pins"] or [])
+        kept = [w for w in words if fold(w) != fold(word)]
+        wanted = len(kept) == len(words)
+        if wanted:
+            kept.append(word)
+        self._set_word_pins(kept)
+        if wanted and not self.cfg["word_pins_shown"]:
+            self.toggle_word_strip(True)
+        self.show_banner(f"« {word} » épinglé dans la bande du haut : un clic, et ses "
+                         "vidéos s'affichent, de n'importe quel onglet." if wanted
+                         else f"« {word} » retiré de la bande", "quiet", seconds=6)
+        for position, other in enumerate(self.board.items):
+            if other is item:
+                self.board.set_pinned(position, wanted)
+                break
+
+    def _set_word_pins(self, words: list) -> None:
+        self.cfg["word_pins"] = words
+        self.cfg.save_soon()
+        self.word_strip.set_words(words)
+        self._show_word_strip()
+
+    def unpin_word(self, word: str) -> None:
+        self._set_word_pins([w for w in self.cfg["word_pins"] or [] if fold(w) != fold(word)])
+        # La tuile du mot, si elle est a l'ecran, perd son epingle.
+        for position, other in enumerate(self.board.items):
+            if other.is_tag and fold(Path(str(other.path)).name) == fold(word):
+                self.board.set_pinned(position, False)
+
+    def move_word(self, word: str, step: int) -> None:
+        words = list(self.cfg["word_pins"] or [])
+        if word not in words:
+            return
+        index = words.index(word)
+        target = max(0, min(len(words) - 1, index + step))
+        words.insert(target, words.pop(index))
+        self._set_word_pins(words)
+
+    def toggle_word_strip(self, on=None) -> None:
+        """Montre ou masque la bande (⋯ › Réglages, ou son clic droit)."""
+        shown = (not self.cfg["word_pins_shown"]) if on is None else bool(on)
+        self.cfg["word_pins_shown"] = shown
+        self.cfg.save_soon()
+        action = self._menu_by_text.get("Bande des mots épinglés")
+        if action is not None:
+            action.setChecked(shown)
+        self._show_word_strip()
+        if not shown:
+            self.show_banner("Bande des mots épinglés masquée : ⋯ › Réglages pour la "
+                             "remettre.", "quiet", seconds=6)
+
+    def _show_word_strip(self) -> None:
+        """Visible s'il y a des mots, qu'on la veut, et qu'on parcourt une planche
+        (sur une fiche ou le mur, la place va a l'image)."""
+        strip = getattr(self, "word_strip", None)
+        if strip is None:
+            return
+        wall = (self.tab == TAB_SPLIT and getattr(self, "wall", None) is not None
+                and self.viewer.currentWidget() is self.wall)
+        strip.setVisible(bool(self.cfg["word_pins"]) and bool(self.cfg["word_pins_shown"])
+                         and self.browsing and not wall)
+        strip.set_current(getattr(self, "_list_leaf", "") or "")
+
+    def _pin_more_words(self) -> None:
+        """« + épingler » : l'onglet des mots-cles, ou chaque mot a son epingle."""
+        if self.tab != TAB_TAGS:
+            self.set_tab(TAB_TAGS)
+        self.show_banner("Survolez un mot-clé et touchez son épingle : il rejoint la "
+                         "bande du haut.", "info", seconds=8)
+
+    def open_word(self, word: str) -> None:
+        """Un mot de la bande : les videos qui le portent, comme un mot-cle,
+        sans quitter l'onglet ou l'on est. Calcule par tranches : sur cent
+        mille noms, la fenetre ne fige pas."""
+        if self.root is None:
+            return self.show_banner("Ouvrez d'abord une collection.", "quiet")
+        videos = [video for item in self._collection() for video in item.videos]
+        members = {k: v for k, v in (self.cfg["tag_members"] or {}).items()
+                   if fold(k) == fold(word)}
+        self._word_wanted = word
+        old = getattr(self, "_word_slicer", None)
+        if old is not None and shiboken6.isValid(old):
+            old.stop()
+            old.deleteLater()
+        self.word_strip.set_current(word)
+        self._word_slicer = self._in_slices(
+            iter_tag_items([word], videos, 1, members),
+            lambda found, w=word: self._word_ready(w, found))
+
+    def _word_ready(self, word: str, found: list) -> None:
+        if word != getattr(self, "_word_wanted", ""):
+            return
+        self._word_slicer = None
+        videos = [video for item in found for video in item.videos]
+        if not videos:
+            self.word_strip.set_current(self._list_leaf or "")
+            return self.show_banner(f"Aucune vidéo ne porte « {word} » pour l'instant.",
+                                    "quiet")
+        self.browse_videos(word, videos)
+        self._show_word_strip()
 
     def pin_current(self) -> None:
         """L'epingle de la fiche."""

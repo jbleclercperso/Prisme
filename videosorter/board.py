@@ -613,13 +613,19 @@ class HoverHandles(FloatGuard, QWidget):
         self.star.style().unpolish(self.star)
         self.star.style().polish(self.star)
 
-    def set_pin(self, pinned: bool) -> None:
-        if self._pin_on == bool(pinned):
+    def set_pin(self, pinned: bool, word: bool = False) -> None:
+        if self._pin_on == (bool(pinned), word):
             return
-        self._pin_on = bool(pinned)
+        self._pin_on = (bool(pinned), word)
         self.pin.setIcon(icon("pin", PIN_ON if pinned else PIN_OFF))
-        self.pin.setToolTip("Désépingler" if pinned else
-                            "Épingler : en tête de la liste, dans son onglet")
+        if word:
+            # Un mot-cle s'epingle dans la bande du haut (`wordstrip.py`).
+            self.pin.setToolTip("Retirer de la bande du haut" if pinned else
+                                "Épingler dans la bande du haut : un clic, et ses "
+                                "vidéos, de n'importe quel onglet")
+        else:
+            self.pin.setToolTip("Désépingler" if pinned else
+                                "Épingler : en tête de la liste, dans son onglet")
 
     def sync(self, card) -> None:
         """Reprend l'etat de la carte : coche, favori, epingle."""
@@ -629,10 +635,12 @@ class HoverHandles(FloatGuard, QWidget):
             self.pick.blockSignals(False)
         self.set_star(card.stars_value > 0)
         # Un mot-cle ne se met pas en favori : son etoile ne faisait rien.
-        self.set_pin(card.pinned_value)
         item = card.item
-        self.star.setVisible(not (item is not None and item.is_tag))
-        self.pin.setVisible(not (item is not None and item.is_tag))
+        tag = item is not None and item.is_tag
+        self.set_pin(card.pinned_value, word=tag)
+        self.star.setVisible(not tag)
+        # L'epingle d'un mot-cle le met dans la bande des mots epingles.
+        self.pin.setVisible(True)
 
     def attach(self, card, rect: QRect) -> None:
         """Se pose sur cette carte, et relaie ses gestes a ses propres poignees."""
