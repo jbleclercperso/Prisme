@@ -246,8 +246,34 @@ class LinkJobs:
         # fin n'arrivait jamais.
         loader._emit = progress
         loader._emit_done = finished
+        # Une erreur dans le telechargement faisait tomber son fil sans rien
+        # dire : la file attendait une fin qui ne venait jamais. Elle finit le
+        # lien, avec sa raison, et le detail va dans `liens-pile.txt`.
+        attempt = loader._download
+
+        def guarded(number, url, folder, browser) -> None:
+            try:
+                attempt(number, url, folder, browser)
+            except Exception as trouble:                # noqa: BLE001
+                import traceback
+                try:
+                    self.state.with_name("liens-pile.txt").write_text(
+                        f"{time.strftime('%d/%m %H:%M:%S')} {url}\n\n"
+                        + traceback.format_exc(), encoding="utf-8")
+                except OSError:
+                    pass
+                finished(number, "", f"erreur interne ({type(trouble).__name__}: {trouble})")
+
+        loader._download = guarded
         number = loader.add(job["url"], str(work))
-        if not done.wait(JOB_TIMEOUT_S):
+        # Un telechargement qui traine : ou il en est, ecrit a cote de la file
+        # (`liens-pile.txt`), pour comprendre sans acces au serveur.
+        waited = 0
+        while not done.wait(60) and waited < JOB_TIMEOUT_S:
+            waited += 60
+            if waited in (120, 600):
+                self._dump(job)
+        if not done.is_set():
             loader.cancel(number)
             done.wait(60)
             shutil.rmtree(work, ignore_errors=True)
@@ -277,6 +303,17 @@ class LinkJobs:
                   mark=marks[0] if marks else "", ended=time.time(),
                   count=len(names))
         self._save()
+
+    def _dump(self, job: dict) -> None:
+        import faulthandler
+        try:
+            with open(self.state.with_name("liens-pile.txt"), "w", encoding="utf-8") as out:
+                out.write(f"{time.strftime('%d/%m %H:%M:%S')} {job.get('url')} — "
+                          f"{job.get('text')}\n\n")
+                out.flush()
+                faulthandler.dump_traceback(file=out, all_threads=True)
+        except (OSError, ValueError):
+            pass
 
     def _place(self, source: Path) -> Path | None:
         """La video finie, a sa place, sans ecraser une homonyme."""
