@@ -40,7 +40,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import profils
 from .access import JOURNAL
-from .brand_data import LETTRAGE_PNG, LOGO_RISME_PNG
+from .brand_data import LETTRAGE_PNG
 from .query import parse, tester
 from .textfold import fold
 
@@ -1505,8 +1505,6 @@ header { position: sticky; top: 0; z-index: 5; background: rgba(14,17,22,.96);
   background: none; border: 0; padding: 4px 2px; color: var(--ink); }
 .wordmark { display: block; height: 15px; width: auto; }
 .logo { display: block; width: 30px; height: 30px; border-radius: 8px; }
-/* Le symbole P, puis « RISME » : le logo de Prisme, en une image. */
-.logoword { display: block; height: 18px; width: auto; }
 .qbox { position: relative; flex: 1; min-width: 0; }
 .qbox #q { width: 100%; padding-right: 48px; }
 #q::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
@@ -3532,7 +3530,7 @@ ICON_ROUTES = {"/icon-192.png": 192, "/icon-512.png": 512, "/apple-touch-icon.pn
 # Le lettrage PRISME (brand_data) ; et la version du logo, jointe aux adresses
 # des icones : gardees une semaine par les telephones, elles ne changeaient
 # pas quand le logo changeait.
-BRAND_ROUTES = {"/lettrage.png": LETTRAGE_PNG, "/logo.png": LOGO_RISME_PNG}
+BRAND_ROUTES = {"/lettrage.png": LETTRAGE_PNG}
 LOGO_VERSION = "2"
 
 # Il ne garde rien et ne touche pas aux videos (lecture par morceaux) : il est
@@ -3591,7 +3589,7 @@ APP_PAGE = f"""<!doctype html><html lang="fr"><meta charset="utf-8">
 <header>
   <div class="top">
     <button id="home" class="brand" title="Tous les dossiers" aria-label="Prisme"><img
-      src="/logo.png?v={LOGO_VERSION}" alt="Prisme" class="logoword"></button>
+      src="/lettrage.png" alt="Prisme" class="wordmark"></button>
     <div class="acts">
       <button id="tabFolders" class="tab on">Dossiers</button>
       <button id="tabVideos" class="tab">Vidéos</button>
