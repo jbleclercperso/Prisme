@@ -110,7 +110,8 @@ class NasLibrary(web.Library):
 
 # -- les liens envoyes du telephone -------------------------------------------
 def _install_tools() -> None:
-    """yt-dlp (lire les sites), requests, et un ffmpeg tout fait pour ce
+    """yt-dlp (lire les sites), requests et BeautifulSoup (lire les pages, comme
+    la recherche web du PC), et un ffmpeg tout fait pour ce
     processeur (imageio-ffmpeg) : installes dans le partage au premier
     lancement, remis a jour chaque semaine -- les sites changent, yt-dlp suit."""
     stamp = TOOLS / ".installe"
@@ -119,6 +120,7 @@ def _install_tools() -> None:
     except OSError:
         fresh = False
     try:
+        import bs4  # noqa: F401
         import requests  # noqa: F401
         import yt_dlp  # noqa: F401
         have = True
@@ -131,7 +133,7 @@ def _install_tools() -> None:
             done = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade",
                  "--disable-pip-version-check", "--no-cache-dir", "--target", str(TOOLS),
-                 "yt-dlp", "requests", "imageio-ffmpeg"],
+                 "yt-dlp", "requests", "beautifulsoup4", "imageio-ffmpeg"],
                 capture_output=True, text=True, timeout=1800)
             if done.returncode == 0:
                 stamp.touch()
