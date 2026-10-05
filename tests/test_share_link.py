@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 os.environ.setdefault("PRISME_SANDBOX",
@@ -187,8 +188,13 @@ def main() -> int:
         check(code == 401, "l'adresse https d'installation ne se lit pas sans clé")
         server.secure = "https://prisme-nas.exemple.ts.net"
         code, _h, body = ask("/api/install", with_key)
+        told = json.loads(body)
+        check(code == 200 and told["declared"] == server.secure and told["secure"] == "",
+              "une adresse https qui ne répond pas n'est pas proposée (on tournait en rond)")
+        server._secure_seen = (server.secure, time.time(), True)
+        code, _h, body = ask("/api/install", with_key)
         check(code == 200 and json.loads(body)["secure"] == server.secure,
-              "avec la clé, le lien Wi-Fi apprend où poser l'icône (https)")
+              "avec la clé, le lien Wi-Fi apprend où poser l'icône (https qui répond)")
 
         print("\n[7] Un nouveau lien")
         server.invite = new_invite()
