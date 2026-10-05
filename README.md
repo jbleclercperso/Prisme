@@ -781,8 +781,16 @@ de leurs noms de fichiers, à réunir dans un dossier.
   fois (l'index se garde à côté des réglages, `labo/`, en float32 : environ 20 Ko
   par vidéo), et l'on peut arrêter et reprendre.
 - Les bibliothèques sont **facultatives** (`requirements-ia.txt`) : le labo
-  propose de les installer lui-même (plusieurs Go). Il ne fonctionne que lancé
-  depuis les sources. Le premier usage télécharge le modèle.
+  propose de les installer lui-même (plusieurs Go). Depuis les sources, elles
+  vont dans le Python de Prisme ; dans le programme vendu (portable ou
+  installé), Prisme se procure d'abord un Python à lui — l'archive officielle
+  de python.org, dans `%LOCALAPPDATA%\Prisme\ia` — et y fait tourner le
+  moteur, qui lui parle par une connexion locale (`iapython.py`). La saisie
+  vocale passe par le même Python. Le premier usage télécharge le modèle.
+- **Bilan du programme** : `Prisme-diagnostic.exe --verifier` essaie chaque
+  pièce dont le programme empaqueté dépend (numpy, recherche web, navigateur
+  invisible, ffmpeg, Python du labo) ; `--avec-python` et `--avec-clip`
+  vont jusqu'au moteur.
 - Double-clic sur un résultat : la vidéo se lit dans le lecteur flottant, au
   moment de l'image trouvée.
 - **Collections par nom** (onglet) : un même morceau de nom, à la lettre près —
@@ -849,8 +857,11 @@ signées par le même éditeur.
 ## Installation et lancement
 
 Prérequis : **Python 3.10+** et **ffmpeg/ffprobe** accessibles (déjà installés ici
-via `winget install Gyan.FFmpeg` ; l'application les cherche dans le `PATH` puis
-dans le dossier winget).
+via `winget install Gyan.FFmpeg` ; l'application les cherche dans le `PATH`, dans
+le dossier winget, puis dans le sien). S'ils manquent, Prisme propose au
+lancement de les télécharger (gyan.dev, environ 115 Mo, empreinte vérifiée) :
+à côté du programme pour la version portable, sinon dans
+`%LOCALAPPDATA%\Prisme\ffmpeg`.
 
 ```bash
 python -m pip install -r requirements.txt

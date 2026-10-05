@@ -31,7 +31,8 @@ _WINGET_GLOB = "AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg*/*/bin"
 
 
 def _find_tool(name: str, configured: str = "") -> str:
-    """Localise ffmpeg/ffprobe : config explicite, puis PATH, puis winget."""
+    """Localise ffmpeg/ffprobe : config explicite, puis PATH, puis winget,
+    puis celui que Prisme a telecharge (ou pose a cote du programme)."""
     if configured and Path(configured).exists():
         return configured
     found = shutil.which(name)
@@ -40,6 +41,11 @@ def _find_tool(name: str, configured: str = "") -> str:
     for candidate in Path.home().glob(_WINGET_GLOB):
         exe = candidate / f"{name}.exe"
         if exe.exists():
+            return str(exe)
+    from .ffmpeg_fetch import candidates
+    for candidate in candidates():
+        exe = candidate / f"{name}.exe"
+        if exe.is_file():
             return str(exe)
     return ""
 

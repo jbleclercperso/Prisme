@@ -13,8 +13,8 @@ machine y est copié dans `cache/` : le programme le trouve tout seul et
 retrouve les vignettes sur n'importe quel ordinateur, sans rien refabriquer.
 
 ffmpeg n'y est pas : les deux binaires pèsent plus de quatre cents mégaoctets
-à eux seuls, et l'application dit clairement comment les installer si elle ne
-les trouve pas.
+à eux seuls ; s'il manque, l'application propose de le télécharger
+(ffmpeg_fetch).
 """
 from __future__ import annotations
 
@@ -28,19 +28,22 @@ HERE = Path(__file__).resolve().parent
 OUT = HERE / "dist" / "Prisme"
 
 # Les modules Qt dont l'application ne se sert pas. Sans cette liste,
-# PyInstaller emporte le moteur web et les outils de conception : deux cents
-# mégaoctets pour rien.
+# PyInstaller emporte les outils de conception : des mégaoctets pour rien.
+# Le moteur web, lui, reste : la recherche sur Internet s'en sert pour les
+# sites qui ne cherchent qu'en JavaScript, et pour repérer la vidéo d'une
+# page (webpage.py). Il tire avec lui QtQuick, QtQml et QtWebChannel.
 EXCLUDES = [
-    "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngine",
     "PySide6.QtQuick3D", "PySide6.QtCharts", "PySide6.QtDataVisualization",
     "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtDesigner",
     "PySide6.QtBluetooth", "PySide6.QtNfc", "PySide6.QtSerialPort",
     "PySide6.QtTest", "PySide6.QtSql", "PySide6.QtHelp", "PySide6.QtPdf",
-    "PySide6.QtWebSockets", "PySide6.QtWebChannel", "PySide6.QtQuick",
-    "PySide6.QtQml", "matplotlib", "numpy", "scipy", "PIL", "tkinter",
-    # Le labo IA : il ne marche que depuis les sources (ia.can_install le dit),
-    # mais s'il est installé sur la machine qui construit, PyInstaller suit
-    # ses imports et emporte plusieurs gigaoctets de torch.
+    "PySide6.QtWebSockets", "matplotlib", "scipy", "PIL", "tkinter",
+    # numpy reste : le labo, les vidéos similaires, les doublons et la voix
+    # s'en servent dans la fenêtre même (une vingtaine de Mo).
+    # Le labo IA : ses bibliothèques vivent dans un Python à part, que le
+    # programme se procure lui-même (iapython) ; s'il est installé sur la
+    # machine qui construit, PyInstaller suivrait ses imports et emporterait
+    # plusieurs gigaoctets de torch.
     "torch", "torchvision", "torchaudio", "transformers", "open_clip",
     "huggingface_hub", "safetensors", "tokenizers", "timm", "sympy",
     "faster_whisper", "ctranslate2", "onnxruntime", "sklearn", "pandas",
@@ -84,6 +87,52 @@ def gather_cache(into: Path) -> tuple:
     return count, weight
 
 
+# Le moteur web emporte avec lui ce dont Prisme n'a pas l'usage : ses fichiers
+# de débogage, ses outils de développement, l'interface dans toutes les langues,
+# et QtQuick avec ses thèmes et sa 3D (Prisme est en widgets). Retirés après
+# coup : « Prisme-diagnostic.exe --verifier » fait tourner le moteur web, et dit
+# si une pièce manquait.
+PRUNE_GLOBS = (
+    "resources/*.debug.*", "resources/qtwebengine_devtools_resources*",
+    "qml",
+    "Qt6Quick3D*", "Qt63D*", "Qt6Graphs*", "Qt6QuickControls2*", "Qt6QuickDialogs2*",
+    "Qt6QuickTemplates2*", "Qt6QuickParticles*", "Qt6QuickShapes*", "Qt6QuickTimeline*",
+    "Qt6QuickEffects*", "Qt6QuickLayouts*", "Qt6QuickVectorImage*", "Qt6WebEngineQuick*",
+    "Qt6Charts*", "Qt6DataVisualization*", "Qt6Pdf*", "Qt6ShaderTools*",
+)
+KEEP_LANGUAGES = ("fr", "en")
+
+
+def prune(qt: Path) -> int:
+    """Retire de Qt ce que Prisme n'utilise pas ; rend les octets gagnés."""
+    def weight(path: Path) -> int:
+        if path.is_file():
+            return path.stat().st_size
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+    doomed = [path for pattern in PRUNE_GLOBS for path in qt.glob(pattern)]
+    translations = qt / "translations"
+    for path in translations.glob("*.qm"):
+        # module_langue[_PAYS].qm (qt_fr, qtbase_pt_BR, qt_help_fr…)
+        words = path.stem.split("_")
+        language = words[-2] if len(words) > 2 and words[-1].isupper() else words[-1]
+        if language not in KEEP_LANGUAGES:
+            doomed.append(path)
+    for path in (translations / "qtwebengine_locales").glob("*.pak"):
+        if path.stem.split("-")[0] not in KEEP_LANGUAGES:
+            doomed.append(path)
+    saved = 0
+    for path in doomed:
+        if not path.exists():
+            continue
+        saved += weight(path)
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    return saved
+
+
 def build(complete: bool = False, source: str = "") -> int:
     for folder in (HERE / "build", HERE / "dist"):
         shutil.rmtree(folder, ignore_errors=True)
@@ -100,6 +149,8 @@ def build(complete: bool = False, source: str = "") -> int:
         cwd=str(HERE))
     if code != 0:
         return code
+    saved = prune(OUT / "_internal" / "PySide6")
+    print(f"Allégé de {saved / 2**20:.0f} Mo (Qt inutile).", flush=True)
 
     # Un exemple à côté du programme : il suffit de le renommer pour partager
     # les vignettes entre deux ordinateurs.
@@ -150,12 +201,18 @@ from PyInstaller.utils.hooks import collect_all
 
 extra_datas, extra_binaries, extra_hidden = collect_all("PySide6.QtMultimedia")
 
-# Le serveur du NAS se publie à partir des sources : nas_publish recopie ces
-# fichiers tels quels sur le partage. Empaquetés en bytecode, ils manqueraient.
-extra_datas += [(r"{here}\videosorter\\" + name, "videosorter")
-                for name in ("__init__.py", "web.py", "access.py", "config.py", "query.py",
-                             "textfold.py", "brand_data.py", "demandes.py")]
+# Le serveur du NAS se publie à partir des sources : nas_publish recopie ses
+# fichiers (PROGRAM) tels quels sur le partage. Empaquetés en bytecode, ils
+# manqueraient : toutes les sources, pour qu'aucun nouveau n'y échappe.
+import glob
+extra_datas += [(path, "videosorter") for path in glob.glob(r"{here}\videosorter\*.py")]
 extra_datas += [(r"{here}\nas\serveur.py", "nas")]
+
+# Le Python du labo IA importe les sources de Prisme telles quelles : elles
+# voyagent aussi dans « prisme-src » (iapython.sources), seules -- le
+# dossier du programme porte des paquets qui ne sont pas les siens.
+extra_datas += [(path, "prisme-src/videosorter")
+                for path in glob.glob(r"{here}\videosorter\*.py")]
 
 a = Analysis(
     [r"{here}\main.py"],
@@ -163,7 +220,8 @@ a = Analysis(
     binaries=extra_binaries,
     datas=extra_datas,
     hiddenimports=extra_hidden + ["PySide6.QtMultimediaWidgets", "PySide6.QtSvg", "rapidfuzz",
-                                  "segno", "yt_dlp", "truststore"],
+                                  "segno", "yt_dlp", "truststore", "numpy",
+                                  "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets"],
     excludes={excludes},
     noarchive=False,
 )
@@ -193,11 +251,15 @@ Rien d'autre à installer : Python et Qt sont dedans.
 
 IL FAUT FFMPEG
 Prisme s'en sert pour fabriquer les vignettes. S'il ne le trouve pas, il
-le dit au démarrage. Pour l'installer, dans une invite de commandes :
+propose au démarrage de le télécharger lui-même (environ 115 Mo, une seule
+fois). Ou bien, dans une invite de commandes :
 
     winget install Gyan.FFmpeg
 
-Puis relancez Prisme. (Fermez et rouvrez l'invite après l'installation.)
+LE LABO IA
+Au premier usage (⋯ › Collection › Labo IA), Prisme installe ce dont l'IA a
+besoin : un Python à lui, puis ses bibliothèques (plusieurs Go, une fois).
+Tout tourne sur ce PC.
 
 PARTAGER LES VIGNETTES ENTRE DEUX ORDINATEURS
 Fabriquer les vignettes est le travail le plus long. Deux machines qui

@@ -10,19 +10,15 @@ L'enregistrement s'arrete tout seul quand on se tait, ou d'un second clic.
 """
 from __future__ import annotations
 
-import importlib.util
 import os
 import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-MODEL = "openai/whisper-small"
-MODEL_SIZE = "970 Mo"
-RATE = 16000                 # ce qu'attend Whisper : 16 kHz, mono
-# Les fichiers utiles du depot : il porte aussi les poids TensorFlow, Flax et
-# l'ancien format, trois fois le telechargement pour rien.
-PATTERNS = ["*.json", "model.safetensors", "*.txt"]
+from . import iapython, voice_model
+
+from .voice_model import MODEL, MODEL_SIZE, PATTERNS, RATE  # noqa: F401
 
 # Le silence qui clot la phrase, et les bornes de l'ecoute (secondes).
 SILENCE_END = 1.3
@@ -36,8 +32,7 @@ SPEECH_FLOOR = 0.008
 def available() -> bool:
     """torch et transformers sont-ils la ? (Les paquets du Labo IA.) Sans
     rien importer : le demander ne doit rien couter."""
-    return all(importlib.util.find_spec(name) is not None
-               for name in ("torch", "transformers", "numpy"))
+    return all(iapython.has(name) for name in ("torch", "transformers", "numpy"))
 
 
 def _hub_cache() -> Path:
@@ -88,21 +83,13 @@ def download_progress():
 
 def download() -> None:
     """Telecharge le modele (une fois). Long : hors du fil de l'interface.
-
-    Sans console, la barre de progression de huggingface_hub ecrivait dans
-    un sys.stderr absent : le telechargement s'arretait des le depart, et le
-    micro restait bleu pour rien. Plus de barre ; le pourcentage se lit sur
-    le disque (`downloaded_bytes`)."""
+    Le pourcentage se lit sur le disque (`downloaded_bytes`). Dans le
+    programme vendu, c'est le Python du labo qui telecharge : huggingface_hub
+    n'est que la-bas."""
     global _downloading
-    from .engine import ensure_streams
-    ensure_streams()
-    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-    from huggingface_hub import snapshot_download
-    from huggingface_hub.utils import disable_progress_bars
-    disable_progress_bars()
     _downloading = True
     try:
-        snapshot_download(MODEL, allow_patterns=PATTERNS)
+        iapython.call(voice_model.fetch_model, (), name="prisme-voix-modele")
     finally:
         _downloading = False
     if not model_on_disk():
@@ -110,68 +97,6 @@ def download() -> None:
 
 
 # -- le processus de la reconnaissance -----------------------------------------
-def _voice_child(requests, answers) -> None:
-    import multiprocessing
-    import queue as _queue
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    from .engine import _lower_priority, ensure_streams
-    from .ia import _die_with
-    ensure_streams()
-    _lower_priority()
-    parent = multiprocessing.parent_process()
-    _die_with(parent)
-    model = processor = None
-    while True:
-        try:
-            kind, payload = requests.get(timeout=2)
-        except _queue.Empty:
-            if parent is not None and not parent.is_alive():
-                return
-            continue
-        except (EOFError, OSError):
-            return
-        if kind == "quit":
-            return
-        try:
-            import numpy as np
-            import torch
-            if model is None:
-                from transformers import WhisperForConditionalGeneration, WhisperProcessor
-                torch.set_num_threads(max(1, (os.cpu_count() or 4) - 1))
-                processor = WhisperProcessor.from_pretrained(MODEL)
-                model = WhisperForConditionalGeneration.from_pretrained(MODEL)
-                model.eval()
-                device, dtype = "cpu", torch.float32
-                try:
-                    # La carte NVIDIA, si elle a la place : une phrase y est
-                    # reconnue en moins d'une seconde, contre huit sur le
-                    # processeur d'un portable.
-                    if torch.cuda.is_available() and torch.cuda.mem_get_info()[0] > 900 * 2**20:
-                        model = model.to("cuda", dtype=torch.float16)
-                        device, dtype = "cuda", torch.float16
-                except Exception:                           # noqa: BLE001
-                    model = model.to("cpu", dtype=torch.float32)
-                    device, dtype = "cpu", torch.float32
-            if kind == "load":
-                # Une seconde de silence, une fois : la carte prepare ses
-                # calculs maintenant, et non pendant la premiere phrase.
-                silence = processor(np.zeros(RATE, dtype=np.float32), sampling_rate=RATE,
-                                    return_tensors="pt").input_features.to(device, dtype=dtype)
-                with torch.inference_mode():
-                    model.generate(silence, task="transcribe", max_new_tokens=4)
-                answers.put(("ok", device))
-                continue
-            audio = np.frombuffer(payload, dtype=np.float32)
-            features = processor(audio, sampling_rate=RATE,
-                                 return_tensors="pt").input_features.to(device, dtype=dtype)
-            with torch.inference_mode():
-                ids = model.generate(features, task="transcribe", max_new_tokens=96)
-            text = processor.batch_decode(ids, skip_special_tokens=True)[0]
-            answers.put(("ok", text.strip()))
-        except Exception as exc:                            # noqa: BLE001
-            answers.put(("error", f"{type(exc).__name__} : {exc}"))
-
-
 class _Recognizer:
     """La reconnaissance, dans son processus ; un seul pour tout Prisme."""
 
@@ -183,13 +108,8 @@ class _Recognizer:
     def _ensure(self) -> None:
         if self._process is not None and self._process.is_alive():
             return
-        import multiprocessing
-        context = multiprocessing.get_context("spawn")
-        self._requests, self._answers = context.Queue(), context.Queue()
-        self._process = context.Process(target=_voice_child, daemon=True,
-                                        args=(self._requests, self._answers),
-                                        name="prisme-voix")
-        self._process.start()
+        self._process, self._requests, self._answers = iapython.spawn(
+            voice_model.voice_child, (), "prisme-voix")
 
     def _ask(self, kind: str, payload, timeout: float):
         import queue as _queue

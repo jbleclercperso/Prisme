@@ -151,6 +151,19 @@ def main() -> int:
     commands = ia.install_commands()
     check(all(c[:3] == [sys.executable, "-m", "pip"] for c in commands),
           "l'installation passe par pip, pour ce Python-ci")
+    # Le programme vendu : d'abord son Python a lui, puis pip pour celui-la.
+    from videosorter import iapython
+    iapython.FROZEN = True
+    os.environ["PRISME_IA_HOME"] = str(Path(BOX) / "ia")
+    try:
+        sold = ia.install_commands()
+        check(bool(sold) and isinstance(sold[0], iapython.PrepareStep)
+              and all(c[:3] == [str(iapython.python()), "-m", "pip"] for c in sold[1:]),
+              "programme vendu : son Python se prépare d'abord, puis pip pour lui")
+        check(ia.can_install() == "", "programme vendu : l'installation est permise")
+    finally:
+        iapython.FROZEN = False
+        os.environ.pop("PRISME_IA_HOME", None)
 
     print("\n[5] La fenêtre du labo")
     from videosorter.labo import LaboWindow
@@ -159,6 +172,20 @@ def main() -> int:
     host = FakeWindow(videos)
     lab = LaboWindow(host_widget(host), engine=engine, frame_of=frame_of)
     lab._duration = lambda v: 100.0
+
+    # Une etape en Python (preparer le Python du labo) puis une commande :
+    # le journal raconte l'une, puis l'autre s'enchaine.
+    def step(log):
+        log("Python du labo prêt.")
+    lab._commands = [step, [sys.executable, "-c", "print('pip fini')"]]
+    lab._next_command()
+    deadline = time.monotonic() + 20
+    while "Terminé." not in lab.log.toPlainText() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.02)
+    told = lab.log.toPlainText()
+    check("Python du labo prêt." in told and "pip fini" in told and "Terminé." in told,
+          "installation : l'étape Python, puis la commande, puis « Terminé. »")
     lab.index = ia.SceneIndex("factice", Path(BOX) / "labo")
     lab.show()
     lab._index()
