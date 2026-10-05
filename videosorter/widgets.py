@@ -8,8 +8,8 @@ from pathlib import Path
 from collections import OrderedDict
 
 from PySide6.QtCore import (
-    QEvent, QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, QThread,
-    QThreadPool, QTimer, QUrl, Qt, Signal,
+    QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize,
+    QThread, QThreadPool, QTimer, QUrl, Qt, QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
     QColor, QCursor, QGuiApplication, QIcon, QImage, QImageReader, QPainter,
@@ -2305,8 +2305,14 @@ class SinglePlayer(QWidget):
             return self.mousePressEvent(event)
 
     def _scrub_move(self, event) -> None:
-        """Glisser sur l'image : toute la largeur vaut toute la duree."""
+        """Glisser sur l'image : toute la largeur vaut toute la duree. Apres
+        un zoom bouton tenu, glisser promene l'image agrandie : avancer dans
+        la video la faisait sauter, et la barre avec."""
         if self._scrub_x0 is None or not (event.buttons() & Qt.LeftButton):
+            return
+        if self._zoomed_while_held:
+            self._pan_by(event.globalPosition())
+            event.accept()
             return
         dx = event.globalPosition().x() - self._scrub_x0
         if not self._scrubbing and abs(dx) < 6:
@@ -2784,9 +2790,11 @@ class SinglePlayer(QWidget):
                 max(0.0, min(1.0, local.x() / area.width())),
                 max(0.0, min(1.0, local.y() / area.height())),
             )
-        self.zoom = max(1.0, min(6.0, self.zoom * (1.25 ** notches)))
-        self._apply_zoom()
-        self.position_label.setText(f"×{self.zoom:.1f}" if self.zoom > 1 else "×1")
+        goal = max(1.0, min(6.0, self._zoom_goal * (1.25 ** notches)))
+        self._zoom_to(goal)
+        if self._zoomed_while_held:
+            self._pan_last = QCursor.pos()
+        self.position_label.setText(f"×{goal:.1f}" if goal > 1 else "×1")
         self.position_label.adjustSize()
         # La pastille est fille du cadre video : ses coordonnees sont celles du
         # cadre, pas de la fenetre.
@@ -2812,7 +2820,52 @@ class SinglePlayer(QWidget):
         self.still.setGeometry(left, top, width, height)
         self.peek.setGeometry(area)
 
+    @property
+    def _zoom_goal(self) -> float:
+        """Le facteur vise : plusieurs crans rapides s'additionnent, meme
+        pendant que l'image s'agrandit encore."""
+        anim = getattr(self, "_zoom_anim", None)
+        if anim is not None and anim.state() == QVariantAnimation.Running:
+            return float(anim.endValue())
+        return self.zoom
+
+    def _zoom_to(self, goal: float) -> None:
+        """Le zoom glisse jusqu'a `goal` en un instant, au lieu de sauter."""
+        anim = getattr(self, "_zoom_anim", None)
+        if anim is None:
+            anim = self._zoom_anim = QVariantAnimation(self)
+            anim.setDuration(140)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.valueChanged.connect(self._zoom_frame)
+        anim.stop()
+        anim.setStartValue(float(self.zoom))
+        anim.setEndValue(float(goal))
+        anim.start()
+
+    def _zoom_frame(self, value) -> None:
+        self.zoom = float(value)
+        self._apply_zoom()
+
+    def _pan_by(self, where) -> None:
+        """Deplace l'image agrandie avec la souris."""
+        last = getattr(self, "_pan_last", None)
+        self._pan_last = where.toPoint() if hasattr(where, "toPoint") else where
+        if last is None or self.zoom <= 1.0:
+            return
+        area = self.video_area.rect()
+        span_x = area.width() * (self.zoom - 1.0)
+        span_y = area.height() * (self.zoom - 1.0)
+        dx = self._pan_last.x() - last.x()
+        dy = self._pan_last.y() - last.y()
+        fx = self.zoom_focus.x() - (dx / span_x if span_x > 0 else 0.0)
+        fy = self.zoom_focus.y() - (dy / span_y if span_y > 0 else 0.0)
+        self.zoom_focus = QPointF(max(0.0, min(1.0, fx)), max(0.0, min(1.0, fy)))
+        self._apply_zoom()
+
     def reset_zoom(self) -> None:
+        anim = getattr(self, "_zoom_anim", None)
+        if anim is not None:
+            anim.stop()
         self.zoom = 1.0
         self.zoom_focus = QPointF(0.5, 0.5)
         self._apply_zoom()

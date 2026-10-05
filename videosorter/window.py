@@ -1736,6 +1736,7 @@ class MainWindow(QMainWindow):
         # L'etoile d'un panneau : le mur demande, la fenetre enregistre.
         self.wall.favoriteToggled.connect(self.on_wall_favorite)
         self.wall.set_favorite_of(self._is_favorite)
+        self.wall.set_position_of(self._wall_position)
         # La forme de chaque video compose la mosaique ; chaque video tient
         # entiere dans sa case, ou la remplit.
         self.wall.set_aspect_of(self._aspect_of)
@@ -13857,6 +13858,25 @@ class MainWindow(QMainWindow):
             self.wall.stay = on
             for pane in self.wall.panes:
                 pane.set_stay(on)
+
+    def _wall_position(self, path: str) -> str:
+        """« 3 / 12 » pour une case du mur : sa place dans son dossier, tiree
+        de ce que la collection sait deja -- jamais du disque, c'est demande
+        a chaque survol."""
+        if not path:
+            return ""
+        if self._siblings_gen != self._collection_gen:
+            self._siblings_cache = {}
+            self._siblings_gen = self._collection_gen
+        folder = str(Path(path).parent)
+        listing = self._siblings_cache.get(folder)
+        if listing is None:
+            listing = self._known_folder_videos(folder)
+            if listing is not None:
+                self._siblings_cache[folder] = listing
+        if not listing or path not in listing:
+            return ""
+        return f"{listing.index(path) + 1} / {len(listing)}"
 
     def _folder_videos(self, path: str) -> list:
         """Les videos du dossier de ce fichier, dans l'ordre des noms.
