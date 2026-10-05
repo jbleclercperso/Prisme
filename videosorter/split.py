@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import random
 
-from PySide6.QtCore import QPoint, QRect, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import (
+    QEasingCurve, QPoint, QRect, QTimer, QUrl, Qt, QVariantAnimation, Signal,
+)
 from PySide6.QtGui import QCursor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -259,7 +261,10 @@ class SplitPane(QFrame):
         self.marks = PlayMarks(self, rail=True, left=True)
         self.bare = False
         self.bar = OverBar(self)
-        self.bar.left.hide()          # le temps restant est deja en haut a droite
+        # La barre de la fiche : nom, place dans le dossier (« 3 / 12 »),
+        # temps restant, gestes. Le temps quitte le coin de l'image quand
+        # elle est la.
+        self.position_of = lambda _path: ""
         self.name = self.bar.name
         self.name.setText("—")
         # Le bandeau pilote tout : revenir a la precedente, pause, la
@@ -274,15 +279,15 @@ class SplitPane(QFrame):
             ("▸", "Une autre : au hasard, ou dans ce dossier si la case est cochée"
              "   (Espace)", self._forward),
             ("⌸", "Montrer ce fichier dans l'explorateur", self._reveal),
-            # ⊙ et non ⛶ : ⛶ ne veut dire que « plein ecran », partout.
-            ("⊙", "Cette vidéo seule, sur tout le mur — Échap pour revenir",
+            # La meme icone « plein ecran » que partout dans Prisme.
+            ("⛶", "Cette vidéo seule, sur tout le mur — Échap pour revenir",
              self._solo),
         ):
             self.bar.add_gesture(text, tip, slot)
         self.pause_button = self.bar.pause_button
         # Un panneau etroit ne garde que l'essentiel : l'explorateur s'efface
         # le premier, puis le grand ecran, puis la precedente.
-        self.bar.spare = [self.bar.by_glyph[g] for g in ("⌸", "⊙", "◂")]
+        self.bar.spare = [self.bar.by_glyph[g] for g in ("⌸", "⛶", "◂")]
         self.bar.add_stay("Rester dans ce dossier : ▸ prend la suivante du "
                           "même dossier au lieu d'une vidéo au hasard",
                           False, self.stayToggled)
@@ -322,6 +327,13 @@ class SplitPane(QFrame):
         self._slide_started = 0.0
         self.zoom = 1.0
         self.zoom_focus = (0.5, 0.5)
+        # Le zoom des videos, comme sur la fiche : bouton gauche tenu (ou
+        # Ctrl) et molette ; glisser ensuite promene l'image ; clic droit,
+        # retour a la taille normale.
+        self._zoom_anim = None
+        self._held = False
+        self._zoomed_while_held = False
+        self._pan_last = None
         self.player.playbackStateChanged.connect(self._show_pause)
         self._show_pause()
         self.player.positionChanged.connect(self._on_position)
@@ -451,6 +463,9 @@ class SplitPane(QFrame):
         # inconnue, l'ancienne reste le temps que la premiere image arrive --
         # le mur ne se recompose pas deux fois.
         self.learn_aspect(boxed or self.aspect_of(path) or 0.0)
+        # Une autre video repart a sa taille normale.
+        self._stop_zoom()
+        self.zoom, self.zoom_focus = 1.0, (0.5, 0.5)
         self.bar.set_name(path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1])
         self.name.setToolTip(path)
         self.set_favorite(self.favorite_of(path))
@@ -493,8 +508,9 @@ class SplitPane(QFrame):
             self.marks.hide()
             return
         # Sur une photo, le trait suffit : le compte a rebours des secondes
-        # n'apprenait rien et chargeait l'image.
-        self.marks.with_left = not self.photo
+        # n'apprenait rien et chargeait l'image. Au survol, le temps est dans
+        # la barre, comme sur la fiche.
+        self.marks.with_left = not self.photo and not hovered
         if self.photo:
             # Le trait d'une photo : ce qui reste avant la suivante.
             if self.slideshow.isActive():
@@ -506,6 +522,7 @@ class SplitPane(QFrame):
                 self.bar.set_progress(0, 0)
         if hovered:
             self.marks.with_rail = False
+            self.bar.set_position(self.position_of(self.video_path) if not self.photo else "")
             self.bar.place_on(self.stage)
             self.bar.reveal()
         else:
@@ -597,10 +614,10 @@ class SplitPane(QFrame):
         self._dress_forward(self.stay)
 
     def _dress_forward(self, stay: bool) -> None:
-        """▸ dit ce qu'il fera : la suivante du dossier, ou une autre au
-        hasard (le meme chevron que « suivante » trompait)."""
+        """▸ garde son chevron « suivante », comme partout ; la bulle dit ce
+        qu'il fera : la suivante du dossier, ou une autre au hasard."""
         button = self.bar.by_glyph["▸"]
-        dress(button, "chevron-right" if stay else "shuffle", 20)
+        dress(button, "chevron-right", 20)
         button.setToolTip("La suivante, dans le dossier de cette vidéo" if stay
                           else "Une autre vidéo, au hasard")
 
@@ -680,13 +697,70 @@ class SplitPane(QFrame):
     # -- avancement ------------------------------------------------------
     def _place(self) -> None:
         area = self.stage.rect()
-        self.video.setGeometry(area)
         self.peek.setGeometry(area)
-        # La photo s'agrandit dans son cadre, autour du point vise.
+        # L'image s'agrandit dans son cadre, autour du point vise : la photo,
+        # et la video comme sur la fiche (le cadre rogne ce qui deborde).
         width, height = int(area.width() * self.zoom), int(area.height() * self.zoom)
         fx, fy = self.zoom_focus
-        self.still.setGeometry(int(fx * (area.width() - width)),
-                               int(fy * (area.height() - height)), width, height)
+        zoomed = QRect(int(fx * (area.width() - width)),
+                       int(fy * (area.height() - height)), width, height)
+        self.video.setGeometry(zoomed)
+        self.still.setGeometry(zoomed)
+
+    # -- le zoom ---------------------------------------------------------------
+    def _zoom_goal(self) -> float:
+        anim = self._zoom_anim
+        if anim is not None and anim.state() == QVariantAnimation.Running:
+            return float(anim.endValue())
+        return self.zoom
+
+    def _zoom_to(self, goal: float) -> None:
+        """Le zoom glisse jusqu'a `goal` en un instant, au lieu de sauter."""
+        if self._zoom_anim is None:
+            self._zoom_anim = QVariantAnimation(self)
+            self._zoom_anim.setDuration(140)
+            self._zoom_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._zoom_anim.valueChanged.connect(self._zoom_frame)
+        self._zoom_anim.stop()
+        self._zoom_anim.setStartValue(float(self.zoom))
+        self._zoom_anim.setEndValue(float(goal))
+        self._zoom_anim.start()
+
+    def _zoom_frame(self, value) -> None:
+        self.zoom = float(value)
+        self._place()
+
+    def _stop_zoom(self) -> None:
+        if self._zoom_anim is not None:
+            self._zoom_anim.stop()
+
+    def reset_zoom(self) -> None:
+        self._stop_zoom()
+        self.zoom, self.zoom_focus = 1.0, (0.5, 0.5)
+        self._place()
+
+    def _zoom_wheel(self, notches: float) -> None:
+        """Agrandit ou reduit en gardant fixe le point sous la souris."""
+        area = self.stage
+        local = area.mapFromGlobal(QCursor.pos())
+        if area.width() > 0 and area.height() > 0:
+            self.zoom_focus = (max(0.0, min(1.0, local.x() / area.width())),
+                               max(0.0, min(1.0, local.y() / area.height())))
+        self._zoom_to(max(1.0, min(6.0, self._zoom_goal() * (1.25 ** notches))))
+
+    def _pan_to(self, where: QPoint) -> None:
+        """Deplace l'image agrandie avec la souris."""
+        last, self._pan_last = self._pan_last, where
+        if last is None or self.zoom <= 1.0:
+            return
+        area = self.stage.rect()
+        span_x = area.width() * (self.zoom - 1.0)
+        span_y = area.height() * (self.zoom - 1.0)
+        fx, fy = self.zoom_focus
+        fx -= (where.x() - last.x()) / span_x if span_x > 0 else 0.0
+        fy -= (where.y() - last.y()) / span_y if span_y > 0 else 0.0
+        self.zoom_focus = (max(0.0, min(1.0, fx)), max(0.0, min(1.0, fy)))
+        self._place()
 
     def _on_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -733,16 +807,15 @@ class SplitPane(QFrame):
         notches = event.angleDelta().y() / 120.0
         if not notches or not self.video_path:
             return super().wheelEvent(event)
-        if self.photo:
+        held = bool(event.buttons() & Qt.LeftButton)
+        if self.photo or held or event.modifiers() & Qt.ControlModifier:
             # Une photo n'a pas de temps a parcourir : la molette zoome la ou
-            # pointe la souris ; revenue a x1, elle se recadre entiere.
-            area = self.stage
-            local = area.mapFromGlobal(QCursor.pos())
-            if area.width() > 0 and area.height() > 0:
-                self.zoom_focus = (max(0.0, min(1.0, local.x() / area.width())),
-                                   max(0.0, min(1.0, local.y() / area.height())))
-            self.zoom = max(1.0, min(6.0, self.zoom * (1.25 ** notches)))
-            self._place()
+            # pointe la souris. Une video aussi, bouton gauche tenu ou Ctrl,
+            # comme sur la fiche ; revenue a x1, l'image se recadre entiere.
+            if held:
+                self._zoomed_while_held = True
+                self._pan_last = QCursor.pos()
+            self._zoom_wheel(notches)
             event.accept()
             return
         # Le meme sens que sur la fiche : un cran vers le haut avance. Le mur
@@ -755,7 +828,35 @@ class SplitPane(QFrame):
         self.player.setPosition(max(0, target))
         event.accept()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._held = True
+            self._zoomed_while_held = False
+            self._pan_last = QCursor.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # Bouton tenu apres un zoom : on promene l'image agrandie.
+        if self._held and self._zoomed_while_held and event.buttons() & Qt.LeftButton:
+            self._pan_to(QCursor.pos())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._zoomed_while_held:
+            # Le bouton servait au zoom : ce n'etait pas un clic de pause.
+            self._held = False
+            self._zoomed_while_held = False
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton:
+            self._held = False
+        if event.button() == Qt.RightButton and self.zoom > 1.0:
+            # Le clic droit defait d'abord le zoom, comme sur la fiche.
+            self.reset_zoom()
+            event.accept()
+            return
         if event.button() == Qt.RightButton and self.video_path:
             # Le clic droit sert a ranger : ce sont les destinations qui
             # apparaissent, comme sur la fiche. Les neuf instants restent
@@ -1232,6 +1333,12 @@ class SplitWall(QWidget):
             pane.favorite_of = lookup
             pane.set_favorite(bool(pane.video_path) and lookup(pane.video_path))
 
+    def set_position_of(self, lookup) -> None:
+        """« 3 / 12 » : la place d'une video dans son dossier (la fenetre)."""
+        self.position_of = lookup
+        for pane in self.panes:
+            pane.position_of = lookup
+
     def set_favorite(self, path: str, on: bool) -> None:
         """Le favori de cette video a change : les panneaux qui la montrent
         suivent."""
@@ -1272,6 +1379,7 @@ class SplitWall(QWidget):
             pane.revealRequested.connect(self.revealRequested)
             pane.favoriteToggled.connect(self.favoriteToggled)
             pane.favorite_of = self.favorite_of
+            pane.position_of = getattr(self, "position_of", pane.position_of)
             pane.aspect_of = self.aspect_of
             pane.reshaped.connect(self._reshaped)
             pane.tight = self.fit == "full"
