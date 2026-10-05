@@ -165,13 +165,16 @@ def _write(path: Path, profiles: dict) -> bool:
 
 
 def find(path, me: str, label: str) -> dict | None:
-    """Le profil de cet appareil : par son identifiant, sinon par son nom
-    d'appareil (une page ouverte avant que l'identifiant existe)."""
+    """Le profil de cet appareil : par son identifiant -- et par son nom
+    d'appareil seulement quand la page n'en donne pas (une page d'avant
+    l'identifiant). Un appareil qui a un identifiant sans profil n'en a pas :
+    par le nom, il recevait celui d'un autre (meme telephone, meme Chrome)."""
     if path is None:
         return None
     profiles = _read(Path(path))
-    if me and isinstance(profiles.get(me), dict):
-        return profiles[me]
+    if me:
+        found = profiles.get(me)
+        return found if isinstance(found, dict) else None
     for profile in profiles.values():
         if isinstance(profile, dict) and label in (profile.get("labels") or []):
             return profile
@@ -296,6 +299,8 @@ def _key(profiles: dict, me: str, label: str) -> str:
     connait deja ce nom d'appareil."""
     if isinstance(profiles.get(me), dict):
         return me
+    if me:
+        return ""
     for key, profile in profiles.items():
         if isinstance(profile, dict) and label in (profile.get("labels") or []):
             return key

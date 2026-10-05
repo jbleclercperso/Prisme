@@ -59,11 +59,16 @@ GAP = 600.0
 MAX_BEAT = 60.0
 
 
-def describe(ip: str, agent: str) -> str:
+def describe(ip: str, agent: str, tag: str = "") -> str:
     """Un nom court et stable pour un visiteur, sans prétendre l'identifier.
 
     On ne sait pas qui c'est — on sait seulement que c'est le même appareil
     que la dernière fois. Le nom dit l'essentiel : d'où, avec quoi.
+
+    `tag` : tiré de l'identifiant que la page s'est donné (`profils.py`).
+    Sans lui, le nom venait du seul texte du navigateur -- or Chrome sur
+    Android donne le même à tous les téléphones d'une même version : deux
+    personnes n'en faisaient qu'une (profil, favoris, compteur du bon).
     """
     agent = agent or ""
     if "Android" in agent:
@@ -79,12 +84,17 @@ def describe(ip: str, agent: str) -> str:
     else:
         what = "appareil"
     for name in ("Firefox", "Edg", "Chrome", "Safari"):
+        # Avec l'identifiant de la page, l'appareil suffit : sur iPhone,
+        # Safari et l'icone de l'ecran d'accueil ne se presentent pas pareil,
+        # et une meme personne avait deux noms.
+        if tag:
+            break
         if name in agent:
             what += " · " + ("Edge" if name == "Edg" else name)
             break
     # Quatre caracteres tires de l'appareil : deux visiteurs Android depuis
     # la meme adresse ne se confondent plus.
-    tag = hashlib.sha1(agent.encode("utf-8", "replace")).hexdigest()[:4]
+    tag = tag or hashlib.sha1(agent.encode("utf-8", "replace")).hexdigest()[:4]
     return f"{what} ({tag})"
 
 
@@ -121,9 +131,10 @@ class Journal:
                 self.db = None
 
     # -- ecriture ---------------------------------------------------------
-    def entered(self, ip: str, agent: str, event: str = "entree") -> str:
+    def entered(self, ip: str, agent: str, event: str = "entree",
+                label: str = "") -> str:
         """Note une entrée — ou un essai refusé — et rend le nom du visiteur."""
-        label = describe(ip, agent)
+        label = label or describe(ip, agent)
         with self.lock:
             if self.db is not None:
                 try:

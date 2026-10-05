@@ -785,9 +785,14 @@ def _make_handler(server: Server):
             return self.headers.get("User-Agent", "")
 
         def _label(self) -> str:
-            """Le nom du visiteur, retenu avec sa session -- ou, entre par la
-            seule cle du lien, tire de son appareil."""
+            """Le nom du visiteur : tire de l'identifiant que la page s'est
+            donne, d'abord -- une personne, un nom, quel que soit son
+            telephone. Sans lui (mot de passe, page d'avant), celui de sa
+            session, ou de son appareil."""
             from .access import describe
+            me = self._me()
+            if me:
+                return describe(self._who(), self._agent(), tag=me[:6])
             return (server.guard.label(self._token())
                     or describe(self._who(), self._agent()))
 
@@ -928,6 +933,7 @@ def _make_handler(server: Server):
             parsed = urlparse(self.path)
             route = unquote(parsed.path)
             query = parse_qs(parsed.query)
+            self._query = query
 
             if route == "/login":
                 # Le mot de passe n'est plus qu'un secours : sans lui, il n'y a
@@ -1223,8 +1229,12 @@ def _make_handler(server: Server):
             self._json(done, HTTPStatus.OK if done.get("ok") or auto else HTTPStatus.BAD_REQUEST)
 
         def _me(self) -> str:
-            """L'identifiant que la page s'est donne (`profils.py`)."""
-            return profils.valid_me(self.headers.get("X-Prisme-Moi", ""))
+            """L'identifiant que la page s'est donne (`profils.py`) : dans
+            l'en-tete, ou dans l'adresse d'une image, d'une video."""
+            given = self.headers.get("X-Prisme-Moi", "")
+            if not given:
+                given = (getattr(self, "_query", {}).get("moi") or [""])[0]
+            return profils.valid_me(given)
 
         def _seen(self, labels: list) -> int:
             return JOURNAL.seen_count(labels, profils.MIN_SECONDS)
@@ -1232,6 +1242,10 @@ def _make_handler(server: Server):
         def _profile(self) -> None:
             """Qui est cet appareil, et ou il en est du bon d'achat."""
             label = self._label()
+            if getattr(self, "_query", {}).get("ouverture"):
+                # La page vient de s'ouvrir : une connexion, au nom de la
+                # personne (le lien, lui, n'a que le nom du navigateur).
+                JOURNAL.entered(self._who(), self._agent(), "page", label=label)
             # Un navigateur de plus pour la meme personne (l'icone de l'ecran
             # d'accueil, un Chrome mis a jour) : ses favoris la suivent.
             profils.attach(server.profiles_path, self._me(), label)
@@ -1861,7 +1875,9 @@ if (key && location.hash !== selfHash()) {
   history.replaceState(null, '', '/' + selfHash());
 }
 function withKey(url) {
-  return key ? url + (url.includes('?') ? '&' : '?') + 'cle=' + encodeURIComponent(key) : url;
+  // L'identifiant aussi : une image, une video comptent pour la bonne personne.
+  return key ? url + (url.includes('?') ? '&' : '?') + 'cle=' + encodeURIComponent(key) +
+    '&moi=' + me : url;
 }
 function headers(extra) {
   const h = Object.assign({}, extra || {});
@@ -3355,7 +3371,7 @@ $('lockSet').onclick = () => pinSetup('set');
 $('lockClear').onclick = () => pinSetup('clear');
 
 async function welcome() {
-  const d = await getJSON('/api/profil');
+  const d = await getJSON('/api/profil?ouverture=1');
   if (!d) { lockHide(); return; }
   profile = d.profile;
   seen = d.seen || 0;
