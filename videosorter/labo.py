@@ -839,6 +839,31 @@ class LaboWindow(QWidget):
             self.mail.put(("index", (number, found)))
         threading.Thread(target=work, daemon=True, name="prisme-labo-index").start()
 
+    def _rebase_index(self, index, tries: int = 0) -> None:
+        """Des scans faits sur un autre PC, ou la collection a un autre chemin
+        (lecteur Z: contre \\\\as1104t) : ils se recalent sur les chemins
+        d'ici au lieu de repartir de zero."""
+        if index is not self.index:
+            return
+        videos = [] if (self._busy and self._indexing) else self._videos()
+        if not videos:
+            # Prisme lit encore la collection (ou indexe) : on repasse plus tard.
+            if tries < 40:
+                QTimer.singleShot(3000, lambda: self._rebase_index(index, tries + 1))
+            return
+
+        def work() -> None:
+            try:
+                found = index.rebase(videos)
+                if found:
+                    index.save_head()
+                    self.mail.put(("said", f"{found:,} vidéos déjà scannées retrouvées sous "
+                                           "leur chemin sur ce PC.".replace(",", " ")))
+                    self.mail.put(("rebased", index))
+            except Exception as exc:                         # noqa: BLE001
+                self.mail.put(("error", f"recalage de l'index : {exc}"))
+        threading.Thread(target=work, daemon=True, name="prisme-labo-recalage").start()
+
     def _show_index_state(self) -> None:
         if self.index is None:
             return
@@ -1060,6 +1085,10 @@ class LaboWindow(QWidget):
                 number, found = value
                 if number == self._loading and self.index is None:
                     self.index = found
+                    self._show_index_state()
+                    self._rebase_index(found)
+            elif kind == "rebased":
+                if value is self.index:
                     self._show_index_state()
             elif kind == "results":
                 target, rows = value
