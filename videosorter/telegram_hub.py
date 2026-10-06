@@ -126,52 +126,66 @@ def already_in_library(name: str, size: int, keys: set[tuple[str, int]]) -> bool
 
 
 
-def public_links(query: str) -> list[dict]:
-    """Liens t.me et discord.gg déjà publiés sur le web pour ce mot-clé."""
+def public_links(query: str) -> tuple[list[dict], str]:
+    """Liens t.me et discord.gg déjà publiés. Renvoie aussi pourquoi c'est vide."""
     import urllib.parse, urllib.request
     query = query.strip()
     if not query:
-        return []
+        return [], "Mot-clé vide."
     rows = []
     seen = set()
-    searches = [
-        f"site:t.me {query}",
-        f"site:t.me/s {query}",
-        f"discord.gg {query}",
-    ]
-    for q in searches:
-        url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": q})
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Prisme"})
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                html = resp.read().decode("utf-8", "replace")
-        except Exception:
-            continue
+    notes = []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                             "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
+
+    def harvest(html: str) -> None:
+        html = urllib.parse.unquote(html)
         for kind, pattern in (
-            ("telegram", r"https?://t\.me/(?:s/)?([A-Za-z0-9_]{4,})"),
-            ("discord", r"https?://discord\.gg/([A-Za-z0-9-]+)"),
+            ("telegram", r"https?://t\.me/(?:s/)?([A-Za-z0-9_]{5,})"),
+            ("discord", r"https?://discord\.gg/([A-Za-z0-9-]{4,})"),
         ):
             for name in re.findall(pattern, html):
-                if name.lower() in {"joinchat", "share", "addstickers"} or name in seen:
+                if name.lower() in {"joinchat", "share", "addstickers", "telegram"} or name in seen:
                     continue
                 seen.add(name)
                 if kind == "telegram":
                     rows.append({
-                        "title": name, "username": name,
-                        "url": f"https://t.me/{name}", "kind": "telegram",
-                        "abonnes": 0, "medias": 0, "protege": False, "demande": False,
-                        "acces": "lien public", "vivant": "?", "dernier": "annoncé sur le web",
-                        "score": 0,
+                        "title": name, "username": name, "url": f"https://t.me/{name}",
+                        "kind": "telegram", "abonnes": 0, "medias": 0, "protege": False,
+                        "demande": False, "acces": "lien public", "vivant": "?",
+                        "dernier": "publié sur le web", "score": 0,
                     })
                 else:
                     rows.append({
-                        "title": name, "username": name,
-                        "url": f"https://discord.gg/{name}", "kind": "discord",
-                        "abonnes": 0, "medias": 0, "protege": False, "demande": True,
-                        "acces": "invitation", "vivant": "?", "dernier": "annoncé sur le web",
-                        "score": 0,
+                        "title": name, "username": name, "url": f"https://discord.gg/{name}",
+                        "kind": "discord", "abonnes": 0, "medias": 0, "protege": False,
+                        "demande": True, "acces": "invitation", "vivant": "?",
+                        "dernier": "publié sur le web", "score": 0,
                     })
-    return rows
+
+    searches = [
+        ("Bing", "https://www.bing.com/search?" + urllib.parse.urlencode({"q": f"site:t.me {query}"})),
+        ("Bing Discord", "https://www.bing.com/search?" + urllib.parse.urlencode({"q": f"discord.gg {query}"})),
+        ("DuckDuckGo", "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": f"site:t.me {query}"})),
+    ]
+    for name, url in searches:
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                html = resp.read().decode("utf-8", "replace")
+        except Exception as exc:
+            notes.append(f"{name} injoignable")
+            continue
+        if "anomaly" in html.lower() or "captcha" in html.lower():
+            notes.append(f"{name} a bloqué le script")
+            continue
+        before = len(rows)
+        harvest(html)
+        if len(rows) == before:
+            notes.append(f"{name} : aucun lien")
+    if not rows:
+        return [], "Aucun lien. " + " ; ".join(notes) + ". Colle des liens depuis tgstat.com."
+    return rows, ""
 
 
 def username_of(text: str) -> str:
@@ -806,9 +820,9 @@ class TelegramDialog(QDialog):
         self._start("login")
 
     def search_public(self) -> None:
-        rows = public_links(self.query.text())
+        rows, why = public_links(self.query.text())
         if not rows:
-            self.status.setText("Aucun lien public trouvé pour ce mot. Essaie un terme plus précis.")
+            self.status.setText(why)
             return
         self.found = rows
         self._apply_filter()
