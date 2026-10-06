@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
@@ -38,27 +38,32 @@ DOWNLOADS = APP_DIR / "telegram-downloads"
 URL_RE = re.compile(r"(?:https?://)?t\.me/([A-Za-z0-9_]{4,})", re.I)
 
 STYLE = """
-QDialog { background: #0e1116; }
+QDialog { background: #101318; color: #e8edf2; }
 QLabel { color: #c9d1db; }
-QLabel#tgHead { color: #ffffff; font-size: 18px; font-weight: 700; }
-QLabel#tgLead { color: #aab4c0; font-size: 12px; }
-QLabel#tgTotal { color: #8fd0ff; font-size: 14px; font-weight: 600; }
+QLabel#tgHead { color: #ffffff; font-size: 20px; font-weight: 700; }
+QLabel#tgLead { color: #8b97a6; font-size: 12px; }
+QLabel#tgStatus { color: #d5e6ff; background: #1a2433; border-radius: 8px; padding: 6px 10px; }
+QLabel#tgTotal { color: #9fd0ff; font-size: 14px; font-weight: 600; }
 QLineEdit, QTextEdit, QSpinBox {
-    background: #0b0e12; border: 1px solid #242b35; border-radius: 6px;
-    color: #e6e8ea; padding: 6px; }
-QTableWidget { background: #0b0e12; border: 1px solid #242b35; border-radius: 8px;
-               color: #e6e8ea; gridline-color: #1c2430; }
-QHeaderView::section { background: #161c24; color: #c9d1db; border: none; padding: 6px; }
-QTableWidget::item:selected { background: #1d2a40; }
-QPushButton { background: #232a34; border: 1px solid #364050; border-radius: 6px;
-              padding: 7px 14px; color: #eef1f4; }
-QPushButton:hover { background: #2c3541; }
-QPushButton:disabled { color: #6f7a87; background: #1a1f27; }
-QPushButton#tgPrimary { background: #2f6fed; border-color: #2f6fed; font-weight: 600; }
-QCheckBox { color: #c9d1db; }
-QTabWidget::pane { border: 1px solid #242b35; }
-QTabBar::tab { background: #161c24; color: #c9d1db; padding: 8px 14px; }
-QTabBar::tab:selected { background: #2f6fed; color: white; }
+    background: #0c0f14; border: 1px solid #2a3340; border-radius: 8px;
+    color: #eef2f6; padding: 7px 8px; }
+QLineEdit:focus, QTextEdit:focus { border-color: #3d7eff; }
+QTableWidget, QListWidget {
+    background: #0c0f14; border: 1px solid #2a3340; border-radius: 10px;
+    color: #e8edf2; }
+QHeaderView::section { background: #171d26; color: #9aa6b4; border: none; padding: 8px; }
+QTableWidget::item { padding: 4px; }
+QTableWidget::item:selected, QListWidget::item:selected { background: #243652; color: white; }
+QPushButton { background: #1c2430; border: 1px solid #334052; border-radius: 8px;
+              padding: 8px 14px; color: #eef2f6; }
+QPushButton:hover { background: #273140; }
+QPushButton:disabled { color: #66717e; background: #161b22; }
+QPushButton#tgPrimary { background: #2f6fed; border-color: #2f6fed; font-weight: 650; }
+QPushButton#tgPrimary:hover { background: #3d7cff; }
+QCheckBox { color: #d5dde6; spacing: 6px; }
+QTabWidget::pane { border: 1px solid #2a3340; border-radius: 10px; top: -1px; }
+QTabBar::tab { background: transparent; color: #9aa6b4; padding: 8px 16px; margin-right: 4px; }
+QTabBar::tab:selected { color: white; border-bottom: 2px solid #2f6fed; }
 """
 
 
@@ -435,9 +440,9 @@ class TelegramWorker(QThread):
 class TelegramDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Telegram — recherche et alertes")
+        self.setWindowTitle("Prisme — Telegram")
         self.setStyleSheet(STYLE)
-        self.resize(980, 640)
+        self.resize(1080, 700)
         self.state = load_state()
         self.worker: TelegramWorker | None = None
         self.rows: list[dict] = []
@@ -446,14 +451,14 @@ class TelegramDialog(QDialog):
         head.setObjectName("tgHead")
         box.addWidget(head)
         lead = QLabel(
-            "Compte perso uniquement. api_id et api_hash se créent sur my.telegram.org. "
-            "La recherche Telegram est un échantillon : colle aussi des liens t.me trouvés "
-            "sur un annuaire pour les noter (abonnés, médias récents, channel vivant).",
+            "Compte perso. La recherche Telegram est un échantillon : colle des liens t.me "
+            "pour élargir. Discord ne se cherche pas par mot-clé, seulement par invitation.",
             self)
         lead.setObjectName("tgLead")
         lead.setWordWrap(True)
         box.addWidget(lead)
         self.status = QLabel("Pas encore connecté.", self)
+        self.status.setObjectName("tgStatus")
         box.addWidget(self.status)
         tabs = QTabWidget(self)
         tabs.addTab(self._account_tab(), "Compte")
@@ -497,7 +502,7 @@ class TelegramDialog(QDialog):
         self.src_tg.setChecked(True)
         row.addWidget(self.src_tg)
         self.src_dc = QCheckBox("Discord", page)
-        self.src_dc.setChecked(True)
+        self.src_dc.setChecked(False)
         row.addWidget(self.src_dc)
         self.query = QLineEdit(page)
         self.query.setPlaceholderText("mot-clé Telegram, ou invitations Discord")
@@ -508,7 +513,7 @@ class TelegramDialog(QDialog):
         row.addWidget(self.min_subs)
         self.min_medias = QSpinBox(page)
         self.min_medias.setRange(0, 40)
-        self.min_medias.setValue(0)
+        self.min_medias.setValue(5)
         self.min_medias.setPrefix("min médias ")
         row.addWidget(self.min_medias)
         go = QPushButton("Chercher", page)
@@ -528,6 +533,7 @@ class TelegramDialog(QDialog):
         self.f_ask = QCheckBox("à demander", page)
         self.f_ask.setChecked(True)
         self.f_hide_protected = QCheckBox("masquer les protégés", page)
+        self.f_hide_protected.setChecked(True)
         self.f_alive = QCheckBox("vivants seulement", page)
         for box in (self.f_free, self.f_ask, self.f_hide_protected, self.f_alive):
             box.toggled.connect(self._apply_filter)
@@ -731,7 +737,7 @@ class TelegramDialog(QDialog):
                 row.get("title") or "",
                 row.get("acces") or ("à demander" if row.get("demande") else "entrée libre"),
                 row.get("kind") or "",
-                str(row.get("abonnes") or 0),
+                f"{int(row.get('abonnes') or 0):,}".replace(",", " "),
                 str(row.get("medias") or 0),
                 f"{row.get('vivant') or '?'} · {row.get('dernier') or ''}",
                 "oui" if row.get("protege") else "non",
@@ -925,12 +931,13 @@ class MediaBank(QDialog):
         head = QLabel(f"t.me/{username}", self)
         head.setObjectName("tgHead")
         box.addWidget(head)
-        lead = QLabel("Médias lus avec ton compte. Double-clic : télécharge et lit dans Prisme.", self)
+        lead = QLabel("Coche les vignettes, ou double-clique pour lire dans Prisme.", self)
         lead.setObjectName("tgLead")
         box.addWidget(lead)
         self.grid = QListWidget(self)
         self.grid.setViewMode(QListWidget.IconMode)
-        self.grid.setIconSize(self.grid.iconSize().__class__(168, 96))
+        self.grid.setIconSize(QSize(220, 124))
+        self.grid.setUniformItemSizes(False)
         self.grid.setResizeMode(QListWidget.Adjust)
         self.grid.setSpacing(8)
         self.grid.setWordWrap(True)
@@ -951,6 +958,12 @@ class MediaBank(QDialog):
         bulk = QPushButton("Télécharger les cochés", self)
         bulk.clicked.connect(self._download_checked)
         row.addWidget(bulk)
+        all_ = QPushButton("Tout cocher", self)
+        all_.clicked.connect(lambda: self._check_all(True))
+        row.addWidget(all_)
+        none = QPushButton("Tout décocher", self)
+        none.clicked.connect(lambda: self._check_all(False))
+        row.addWidget(none)
         row.addStretch(1)
         box.addLayout(row)
 
@@ -968,7 +981,7 @@ class MediaBank(QDialog):
             if thumb:
                 pix = QPixmap(thumb)
                 if not pix.isNull():
-                    row.setIcon(QIcon(pix.scaled(168, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+                    row.setIcon(QIcon(pix.scaled(220, 124, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)))
             row.setData(Qt.UserRole, item)
             self.grid.addItem(row)
         self.setWindowTitle(f"Banque — {self.username} ({len(self.items)})")
@@ -1014,6 +1027,11 @@ class MediaBank(QDialog):
             self.detail.setText("Coche au moins une vignette.")
             return
         self.owner.download_many(self.username, ids)
+
+    def _check_all(self, on: bool) -> None:
+        state = Qt.Checked if on else Qt.Unchecked
+        for i in range(self.grid.count()):
+            self.grid.item(i).setCheckState(state)
 
 
 class Player(QDialog):
