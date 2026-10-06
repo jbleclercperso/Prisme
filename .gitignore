@@ -15,3 +15,7 @@ ConchyPro/
 site-a-reporter/
 site-a-reporter.zip
 reparateur/
+
+# session Telegram (compte perso, ne pas publier)
+*.session
+*.session-journal

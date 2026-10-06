@@ -1276,6 +1276,7 @@ class MainWindow(QMainWindow):
                 ("-", None),
                 ("Partage à distance…", self.open_share),
                 ("Recherche vidéo sur le web…", self.open_web_search),
+                ("Telegram : recherche et alertes…", self.open_telegram),
                 ("Demandes reçues…", self.open_demandes),
             ]),
             ("Réglages", [
@@ -5545,6 +5546,17 @@ class MainWindow(QMainWindow):
             self.ask_badge.show()
         else:
             self.ask_badge.hide()
+
+    def open_telegram(self) -> None:
+        """Recherche de channels publics et alertes sur ceux qu'on suit."""
+        from .telegram_hub import TelegramDialog
+        dialog = getattr(self, "_telegram_dialog", None)
+        if dialog is None or not shiboken6.isValid(dialog):
+            dialog = TelegramDialog(self)
+            self._telegram_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def open_demandes(self) -> None:
         """Les demandes reçues ; les ouvrir, c'est les avoir vues."""
