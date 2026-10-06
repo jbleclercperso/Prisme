@@ -306,6 +306,9 @@ class TelegramWorker(QThread):
             elif self.job == "follow":
                 n = await self._follow(client)
                 self.batch_done.emit(n)
+            elif self.job == "export":
+                n = await self._export(client)
+                self.batch_done.emit(n)
         finally:
             await client.disconnect()
 
@@ -545,6 +548,27 @@ class TelegramWorker(QThread):
 
 
 
+
+    async def _export(self, client) -> int:
+        """Photos et vidéos du channel, sans reprendre ce qui est déjà sur le disque."""
+        if not self.known:
+            self.known = library_keys()
+        n = 0
+        self.skipped = 0
+        self.channel = self.channel
+        async for msg in client.iter_messages(self.channel, limit=None):
+            if not (msg.video or msg.photo or (msg.file and (msg.file.mime_type or "").startswith(("video", "image")))):
+                continue
+            self.message_id = msg.id
+            if await self._download(client):
+                n += 1
+            if n and n % 20 == 0:
+                self.status.emit(f"{n} nouveaux, {self.skipped} déjà présents")
+            await asyncio.sleep(0.3)
+        self.status.emit(f"Export fini : {n} nouveaux, {self.skipped} déjà sur le disque")
+        return n
+
+
     async def _follow(self, client) -> int:
         """Télécharge les vidéos nouvelles des chaînes suivies."""
         if not self.known:
@@ -698,6 +722,9 @@ class TelegramDialog(QDialog):
         bank.setObjectName("tgPrimary")
         bank.clicked.connect(self.open_selected_bank)
         row2.addWidget(bank)
+        exp = QPushButton("Exporter photos et vidéos", page)
+        exp.clicked.connect(self.export_selected)
+        row2.addWidget(exp)
         row2.addStretch(1)
         lay.addLayout(row2)
         self.table.itemDoubleClicked.connect(lambda _item: self.open_selected_bank())
@@ -997,6 +1024,31 @@ class TelegramDialog(QDialog):
         if not indexes or indexes[0] >= len(self.rows):
             return ""
         return self.rows[indexes[0]].get("username") or ""
+
+    def export_selected(self) -> None:
+        name = self._selected_username()
+        if not name:
+            self.status.setText("Choisis un channel dans le tableau.")
+            return
+        self._export_channel(name)
+
+    def _export_channel(self, username: str) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            self.status.setText("Une opération Telegram est déjà en cours.")
+            return
+        self._save_account()
+        self.worker = TelegramWorker(self.state)
+        self.worker.job = "export"
+        self.worker.channel = username
+        self.worker.skip_known = True
+        self.worker.known = library_keys()
+        self.worker.status.connect(self.status.setText)
+        self.worker.failed.connect(self._failed)
+        self.worker.need_code.connect(self._ask_code)
+        self.worker.need_password.connect(self._ask_password)
+        self.worker.batch_done.connect(self._batch_done)
+        self.worker.start()
+        self.status.setText(f"Export de {username}…")
 
     def open_selected_bank(self) -> None:
         name = self._selected_username()
