@@ -1339,6 +1339,14 @@ class MainWindow(QMainWindow):
         self.dupes_result_action.triggered.connect(self.show_found_dupes)
         collection.insertAction(after_dupes, self.dupes_result_action)
         self.dupes_result_action.setVisible(False)
+        self.dupes_watch_action = QAction("Vérifier les nouvelles vidéos (doublons)", collection)
+        self.dupes_watch_action.setCheckable(True)
+        self.dupes_watch_action.setChecked(bool(self.cfg["dupes_watch"]))
+        self.dupes_watch_action.setToolTip(
+            "À chaque arrivée de vidéos, Prisme regarde si elles ne sont pas déjà "
+            "dans la collection")
+        self.dupes_watch_action.toggled.connect(self._set_dupes_watch)
+        collection.insertAction(after_dupes, self.dupes_watch_action)
         # Le dernier resultat a survecu a la fermeture : l'entree revient.
         QTimer.singleShot(0, self._reload_found_dupes)
         # Les racines recentes : l'accueil, qui les listait, ne parait plus
@@ -3355,7 +3363,46 @@ class MainWindow(QMainWindow):
             self._keep_found_dupes(groups, by_image, self._pending_partial)
         return self._still_here(groups)
 
-    def show_found_dupes(self) -> None:
+    def show_found_dupes(self, groups: list | None = None, fresh=()) -> None:
+        """Ouvre la revue des doublons : chaque groupe cote a cote, le dossier
+        de chaque copie, et une regle pour choisir ce qu'on garde.
+
+        `groups` : seulement ceux-la (le guetteur des nouvelles videos) ;
+        sinon, le dernier resultat retenu."""
+        if not isinstance(groups, list):
+            groups = None          # le « checked » d'une action de menu
+        if groups is None:
+            pending = self._pending_dupes
+            if not pending:
+                self.show_banner("Aucun résultat de doublons en attente.", "quiet")
+                return
+            if self.root is None:
+                return
+            groups = self._fresh_dupes(pending[0])
+        else:
+            groups = self._still_here(list(groups))
+        if not groups:
+            self.show_banner("Plus aucun doublon à examiner : ce qui a été "
+                             "trouvé a été écarté ou rangé depuis.", "quiet")
+            return
+        from .dupes_view import DupesReview
+        old = getattr(self, "_dupes_review", None)
+        if old is not None:
+            try:
+                old.close()
+            except RuntimeError:
+                pass
+        review = DupesReview(self, groups, fresh=fresh)
+        review.setAttribute(Qt.WA_DeleteOnClose, True)
+        review.destroyed.connect(
+            lambda *_a, r=review: setattr(self, "_dupes_review", None)
+            if getattr(self, "_dupes_review", None) is r else None)
+        self._dupes_review = review
+        review.show()
+        review.raise_()
+        review.activateWindow()
+
+    def show_found_dupes_board(self) -> None:
         """Montre le dernier resultat de doublons, comme une planche ordinaire.
 
         Une liste de passage : la relecture de la collection continue en
@@ -4834,6 +4881,11 @@ class MainWindow(QMainWindow):
                 self._note_state(videos=counted, scanned_at=self._stamp())
             # Les videos seules dans leur dossier : proposees au regroupement.
             QTimer.singleShot(1500, self._propose_solos)
+            if thread is not None and shiboken6.isValid(thread) and getattr(
+                    thread, "rescanned", 0):
+                # Des videos sont arrivees (ou ont change) : le guetteur des
+                # doublons regarde si elles ne sont pas deja la.
+                QTimer.singleShot(8000, self._watch_new_dupes)
         if self.tab != TAB_TAGS or (self._at_tag_list()
                                     and not self._tags_up_to_date()):
             self._add_tag_items()
@@ -9147,6 +9199,90 @@ class MainWindow(QMainWindow):
         self._dupes_from_sigs = True
         self.dupes = SignatureGroupScan(top, self)
         self._start_dupes(f"Comparaison des empreintes sous {top}…")
+
+    # -- le guetteur des doublons --------------------------------------------
+    # Au-dela, ce n'est plus « quelques nouvelles videos » mais une premiere
+    # fois : on ne la lance pas sans le dire (« Chercher les doublons »).
+    WATCH_MAX = 400
+
+    def _set_dupes_watch(self, on: bool) -> None:
+        self.cfg["dupes_watch"] = bool(on)
+        self.show_banner("Les nouvelles vidéos seront comparées à la collection à chaque "
+                         "arrivée." if on else "Plus de vérification automatique des "
+                         "doublons.", "quiet")
+        if on:
+            QTimer.singleShot(500, self._watch_new_dupes)
+
+    def _watch_new_dupes(self) -> None:
+        """Le guetteur : des videos sont arrivees, sont-elles deja la ?
+
+        Seules les videos sans empreinte (les nouvelles) sont sondees, puis
+        comparees a toute la collection, en fond et sans bandeau. Rien ne se
+        dit s'il n'y a rien ; sinon un bandeau ouvre leur comparaison. Il
+        attend qu'une premiere recherche de doublons ait releve la
+        collection : sans elle, tout serait « nouveau »."""
+        if (self._closing or self.root is None or not self.cfg["dupes_watch"]
+                or self.sig_scan is not None or self.dupes is not None
+                or INDEX.db is None):
+            return
+        try:
+            from . import roots as _roots
+            known = sum(INDEX.sig_count_under(m) for m in _roots.members(self.top_root()))
+        except Exception:                               # noqa: BLE001
+            return
+        missing = self._sigs_missing()
+        if not known or not missing or missing > self.WATCH_MAX:
+            return
+        scan = SignatureScan(self.top_root(), self.cfg["thumb_width"],
+                             self.cfg["skip_hidden"], self)
+        scan.watch = True
+        self.sig_scan = scan
+        self._own_thread(scan, "sig_scan")
+        scan.progress.connect(lambda done, total: self._task_said(
+            "sig_scan", f"doublons : nouvelles vidéos {done} / {total}"))
+        scan.done.connect(lambda seen, total, s=scan: self._watch_sigs_done(s, seen, total))
+        scan.start()
+
+    def _watch_sigs_done(self, scan, seen: int, total: int) -> None:
+        if self.sig_scan is scan:
+            self.sig_scan = None
+        if self._closing:
+            return
+        if getattr(self, "_dupes_after_sigs", False):
+            # « Chercher les doublons » a ete demande pendant ce temps.
+            return self._told_sigs(seen, total)
+        fresh = list(getattr(scan, "fresh", []) or [])
+        if not fresh or self.dupes is not None:
+            return
+        keys = {os.path.normcase(p) for p in fresh}
+        compare = SignatureGroupScan(self.top_root(), self)
+        compare.watch = True
+        self.dupes = compare
+        self._own_thread(compare, "dupes")
+        compare.found.connect(lambda groups, c=compare, k=keys, f=fresh:
+                              self._watch_found(c, groups, k, f))
+        compare.start()
+
+    def _watch_found(self, compare, groups: list, keys: set, fresh: list) -> None:
+        if self.dupes is compare:
+            self.dupes = None
+        if self._closing or not groups:
+            return
+        from .dupes_memory import NOT_DUPES
+        groups = [g for g in groups
+                  if any(os.path.normcase(str(p)) in keys for p in g.paths)]
+        groups = NOT_DUPES.filtrer_groupes(groups)
+        groups = self._one_spelling(self._only_in_collection(groups))
+        if not groups:
+            return
+        new = sum(1 for g in groups for p in g.paths if os.path.normcase(str(p)) in keys)
+        self._watch_result = (groups, fresh)
+        self.show_banner(
+            f"⚠ {new} nouvelle(s) vidéo(s) déjà dans la collection "
+            f"({len(groups)} groupe(s)). Cliquez ici pour comparer et choisir "
+            "quelle copie garder.", "info",
+            action=lambda g=groups, f=fresh: self.show_found_dupes(g, fresh=f),
+            seconds=40)
 
     def scan_scenes(self) -> None:
         """Releve les changements de plan sous la racine, en fond.

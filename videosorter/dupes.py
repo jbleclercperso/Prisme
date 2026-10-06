@@ -1404,6 +1404,9 @@ class SignatureScan(QThread):
         self.skip_hidden = skip_hidden
         self.failed_count = 0
         self._stop = False
+        # Les videos sondees cette fois : le guetteur des doublons ne compare
+        # qu'elles au reste de la collection.
+        self.fresh: list = []
         # Porte les ffmpeg des empreintes : l'arret les coupe net, au lieu
         # d'attendre jusqu'a quatre images de vingt-cinq secondes chacune
         # pendant que la fenetre se ferme.
@@ -1440,6 +1443,8 @@ class SignatureScan(QThread):
         if failed and len(values) < min(AGREE, tried):
             return -1
         INDEX.put_sig(video, stamp, values, size)
+        if values:
+            self.fresh.append(str(video))
         return 1 if values else 0
 
     def run(self) -> None:
