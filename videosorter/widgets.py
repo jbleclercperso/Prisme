@@ -2034,6 +2034,7 @@ class SinglePlayer(QWidget):
     # premier clic a deja mis en pause, sans attendre de savoir s'il en
     # viendrait un second ; le double-clic defait cette pause.
     cinemaRequested = Signal()
+    nextRequested = Signal()     # clic molette : la suivante, comme Espace
     # ⏯, Entree ou un clic sur une photo : le diaporama demarre, ou s'arrete.
     slideshowToggled = Signal()
     slideshow_on = False
@@ -2299,19 +2300,25 @@ class SinglePlayer(QWidget):
             self._scrub_pos0 = self.player.position()
             self._scrubbing = False
             self._zoomed_while_held = False
+            self._panned = False
+            self._pan_last = QCursor.pos()
             event.accept()
             return
         if event.button() == Qt.RightButton:
             return self.mousePressEvent(event)
 
     def _scrub_move(self, event) -> None:
-        """Glisser sur l'image : toute la largeur vaut toute la duree. Apres
-        un zoom bouton tenu, glisser promene l'image agrandie : avancer dans
-        la video la faisait sauter, et la barre avec."""
+        """Glisser sur l'image : toute la largeur vaut toute la duree. Image
+        agrandie (zoom), glisser la promene : on ne pouvait plus s'y deplacer
+        une fois le bouton relache, glisser avancait dans la video. A x1,
+        glisser avance ; la molette avance toujours, zoom ou non."""
         if self._scrub_x0 is None or not (event.buttons() & Qt.LeftButton):
             return
-        if self._zoomed_while_held:
-            self._pan_by(event.globalPosition())
+        if self._zoomed_while_held or self.zoom > 1.0:
+            moved = abs(event.globalPosition().x() - self._scrub_x0)
+            if self._panned or self._zoomed_while_held or moved >= 4:
+                self._panned = True
+                self._pan_by(event.globalPosition())
             event.accept()
             return
         dx = event.globalPosition().x() - self._scrub_x0
@@ -2331,7 +2338,9 @@ class SinglePlayer(QWidget):
     def _scrub_release(self, event) -> None:
         if event.button() != Qt.LeftButton or self._scrub_x0 is None:
             return
-        was_click = not self._scrubbing and not self._zoomed_while_held
+        was_click = (not self._scrubbing and not self._zoomed_while_held
+                     and not getattr(self, "_panned", False))
+        self._panned = False
         self._scrub_x0 = None
         self._scrubbing = False
         self._click_paused = was_click and not getattr(self, "ultra", None)
@@ -2888,6 +2897,10 @@ class SinglePlayer(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             return self._scrub_press(event)
+        if event.button() == Qt.MiddleButton:
+            # Le clic molette : la suivante, comme Espace.
+            event.accept()
+            return self.nextRequested.emit()
         if event.button() == Qt.RightButton and getattr(self, "ultra", None):
             # Ultra tri : le clic droit supprime, sans menu.
             event.accept()

@@ -1706,6 +1706,7 @@ class MainWindow(QMainWindow):
         # Un double-clic sur l'image : le plein ecran, et retour.
         self.single.cinemaRequested.connect(lambda: self.toggle_cinema())
         self.single.radialRequested.connect(self.open_radial)
+        self.single.nextRequested.connect(self.act_skip)
         self.single.peek.chosen.connect(self.peek_seek)
         self.radial = RadialMenu(self)
         self.radial.chosen.connect(self._radial_chosen)
@@ -1872,6 +1873,7 @@ class MainWindow(QMainWindow):
         # Le lecteur de cote enchaine lui aussi : une video finie appelle la
         # suivante de la planche, sans qu'on ait a y revenir.
         self.aside_player.finished.connect(lambda: self.aside_step(1))
+        self.aside_player.nextRequested.connect(lambda: self.aside_step(1))
         # Double-clic sur la video de cote : la meme que ⛶, en plein ecran.
         self.aside_player.cinemaRequested.connect(self.aside_fullscreen)
         aside_box.addWidget(self.aside_player, 1)
