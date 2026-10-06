@@ -1188,10 +1188,10 @@ def _make_handler(server: Server):
             finally:
                 server.guard.settle(seat, verdict)
             if not verdict:
-                JOURNAL.entered(who, self._agent(), "refus")
+                JOURNAL.entered(who, self._agent(), "refus", label=self._known_label())
                 return self._json({"error": "Mot de passe refusé."},
                                   HTTPStatus.UNAUTHORIZED)
-            label = JOURNAL.entered(who, self._agent())
+            label = JOURNAL.entered(who, self._agent(), label=self._known_label())
             return self._enter(label)
 
         def _enter(self, label: str, where: str = "/") -> None:
@@ -1224,12 +1224,12 @@ def _make_handler(server: Server):
             verdict = invite_ok(given.strip("/"), server.invite)
             server.guard.settle(seat, verdict)
             if not verdict:
-                JOURNAL.entered(who, self._agent(), "refus")
+                JOURNAL.entered(who, self._agent(), "refus", label=self._known_label())
                 # Un lien perime : on propose le mot de passe, sans rien dire
                 # de plus de la cle.
                 return self._send(HTTPStatus.SEE_OTHER, b"",
                                   extra={"Location": "/login"})
-            label = JOURNAL.entered(who, self._agent(), "lien")
+            label = JOURNAL.entered(who, self._agent(), "lien", label=self._known_label())
             where = "/#cle=" + quote(server.invite)
             me = profils.valid_me(((query or {}).get("moi") or [""])[0])
             if me:
@@ -1316,7 +1316,23 @@ def _make_handler(server: Server):
             given = self.headers.get("X-Prisme-Moi", "")
             if not given:
                 given = (getattr(self, "_query", {}).get("moi") or [""])[0]
+            if not given:
+                # Le cookie que la page pose : il suit aussi ce que le
+                # navigateur demande seul (la video, le lien d'entree). Sans
+                # lui, ces demandes portaient le nom du navigateur, qui change
+                # a chaque mise a jour de Chrome : une meme personne avait dix
+                # noms dans « Connexions ».
+                for part in (self.headers.get("Cookie", "") or "").split(";"):
+                    name, _eq, value = part.strip().partition("=")
+                    if name == "prisme_moi":
+                        given = value
+                        break
             return profils.valid_me(given)
+
+        def _known_label(self) -> str:
+            """Le nom de la personne si la page s'est deja presentee ; sinon
+            rien (le journal prend alors celui du navigateur)."""
+            return self._label() if self._me() else ""
 
         def _seen(self, labels: list) -> int:
             return JOURNAL.seen_count(labels, profils.MIN_SECONDS)
@@ -1963,6 +1979,12 @@ if (!/^[0-9a-f]{32}$/.test(me)) {
   me = Array.from(bytes, (b) => (b < 16 ? '0' : '') + b.toString(16)).join('');
 }
 try { localStorage.setItem('prisme-moi', me); } catch (_) {}
+// Le meme identifiant en cookie : la video, les images et le lien d'entree,
+// que le navigateur demande seul, sont alors comptes a la meme personne.
+try {
+  document.cookie = 'prisme_moi=' + me + '; path=/; max-age=31536000; SameSite=Lax' +
+    (location.protocol === 'https:' ? '; Secure' : '');
+} catch (_) {}
 function selfHash() {
   return '#cle=' + encodeURIComponent(key) + '&moi=' + me;
 }
@@ -2728,23 +2750,26 @@ function escapeUrl() {
 }
 
 // Ouvert dans Messenger, Facebook, Instagram… : la page y est plus petite, et
-// rien ne s'y installe. On propose le vrai navigateur ; sur Android, on y va
-// tout de suite, une fois par visite.
+// rien ne s'y installe. On propose le vrai navigateur -- Chrome sur Android,
+// Safari sur iPhone --, sans plus y aller tout seul : le saut automatique
+// faisait surgir la question « continuer hors de l'application ? » a chaque
+// visite. « Plus tard » le tait une semaine.
 function offerEscape() {
   if (installed || !key || !inApp || !(android || apple)) return;
   const url = escapeUrl();
   if (!url) return;
-  const where = android ? 'Chrome' : 'Safari';
+  let later = 0;
+  try { later = +(localStorage.getItem('prisme-sortie-tard') || 0); } catch (_) {}
+  if (Date.now() - later < 7 * 864e5) return;
+  const where = apple ? 'Safari' : 'Chrome';
   $('outAppTitle').textContent = 'Prisme s’affiche mieux dans ' + where;
   $('outAppGo').textContent = 'Ouvrir dans ' + where;
   $('outAppGo').onclick = () => { location.href = url; };
+  $('outAppLater').onclick = () => {
+    try { localStorage.setItem('prisme-sortie-tard', String(Date.now())); } catch (_) {}
+    $('outApp').hidden = true;
+  };
   $('outApp').hidden = false;
-  let tried = '';
-  try { tried = sessionStorage.getItem('prisme-sortie') || ''; } catch (_) {}
-  if (android && !tried) {
-    try { sessionStorage.setItem('prisme-sortie', '1'); } catch (_) {}
-    setTimeout(() => { location.href = url; }, 400);
-  }
 }
 offerEscape();
 
@@ -3637,7 +3662,8 @@ APP_PAGE = f"""<!doctype html><html lang="fr"><meta charset="utf-8">
   <div class="few" id="outApp" hidden><span class="perk-ic sm alt line"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></span><div>
     <b id="outAppTitle">Prisme s’affiche mieux dans Chrome</b>Cette page est ouverte
     dans le navigateur d’une autre application, en plus petit.
-    <a id="outAppGo" role="button" tabindex="0">Ouvrir dans Chrome</a></div></div>
+    <a id="outAppGo" role="button" tabindex="0">Ouvrir dans Chrome</a>
+    &nbsp;·&nbsp; <a id="outAppLater" role="button" tabindex="0">Plus tard</a></div></div>
   <button class="perkline" id="gift" hidden></button>
   <div class="pins" id="pins" hidden></div>
   <div id="forYou" hidden><div class="section">Pour vous</div>

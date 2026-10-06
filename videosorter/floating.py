@@ -108,6 +108,7 @@ class FloatingPlayer(QWidget):
         self.player.video_area.setMinimumHeight(60)
         layout.addWidget(self.player, 1)
         self.player.radialRequested.connect(self.radialRequested)
+        self.player.nextRequested.connect(lambda: self.stepRequested.emit(1))
         self.player.cinemaRequested.connect(self.toggle_full)
         for deck in self.player.decks:
             deck.player.mediaStatusChanged.connect(

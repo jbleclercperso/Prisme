@@ -985,7 +985,7 @@ class ShareDialog(QDialog):
         if item is None:
             return
         menu = QMenu(self)
-        name = menu.addAction("Nommer cet appareil…")
+        name = menu.addAction("Nommer cette personne…")
         play = menu.addAction("Regarder dans le lecteur flottant") \
             if item.data(0, Qt.UserRole) else None
         chosen = menu.exec(self.favs.viewport().mapToGlobal(point))
@@ -1000,21 +1000,23 @@ class ShareDialog(QDialog):
         rows = [row + ("",) for row in JOURNAL.all_favorites()]
         rows += [row + (" · NAS",) for row in nas_favorites]
         aliases = dict(self.window.cfg["share_aliases"] or {})
-        key = (tuple(rows), tuple(sorted(aliases.items())))
+        named = self.window.alias
+        key = (tuple(rows), tuple(sorted(aliases.items())),
+               tuple(sorted(named(r[1]) for r in rows)))
         if key == self._fav_rows:
             return
         self._fav_rows = key
         self.favs.clear()
         groups: dict = {}
         for at, label, name, mark, where in sorted(rows, key=lambda r: -r[0]):
-            parent = groups.get(label + where)
+            person = named(label)
+            parent = groups.get(person + where)
             if parent is None:
-                parent = QTreeWidgetItem(self.favs, [(aliases.get(label) or label) + where,
-                                                     "", ""])
+                parent = QTreeWidgetItem(self.favs, [person + where, "", ""])
                 parent.setData(0, Qt.UserRole + 1, label)
                 parent.setToolTip(0, label + "\nClic droit : lui donner un nom.")
                 parent.setExpanded(True)
-                groups[label + where] = parent
+                groups[person + where] = parent
             child = QTreeWidgetItem(parent, ["", name, _when(at)])
             child.setData(0, Qt.UserRole, mark)
             child.setData(0, Qt.UserRole + 1, label)
@@ -1047,7 +1049,7 @@ class ShareDialog(QDialog):
         play = menu.addAction("Regarder dans le lecteur flottant")
         show = menu.addAction("Montrer dans l'explorateur")
         menu.addSeparator()
-        name = menu.addAction("Nommer cet appareil…")
+        name = menu.addAction("Nommer cette personne…")
         chosen = menu.exec(self.views.viewport().mapToGlobal(point))
         if chosen is name:
             self._name(item)
@@ -1064,7 +1066,7 @@ class ShareDialog(QDialog):
         if item is None:
             return
         menu = QMenu(self)
-        name = menu.addAction("Nommer cet appareil…")
+        name = menu.addAction("Nommer cette personne…")
         if menu.exec(self.visits.viewport().mapToGlobal(point)) is name:
             self._name(item)
 
@@ -1196,8 +1198,11 @@ class ShareDialog(QDialog):
         views += [row + (" · NAS",) for row in nas_views]
         views.sort(key=lambda row: row[0], reverse=True)
         aliases = dict(self.window.cfg["share_aliases"] or {})
-        visits = [row + (aliases.get(row[2], ""),) for row in visits]
-        views = [row + (aliases.get(row[2], ""),) for row in views]
+        # Le nom de la personne, quelle que soit l'etiquette de la ligne
+        # (Chrome, icone, autre reseau) : `window.alias` suit son profil.
+        named = self.window.alias
+        visits = [row + (named(row[2]),) for row in visits]
+        views = [row + (named(row[2]),) for row in views]
         if (visits, views) == self._rows:
             return
         self._rows = (visits, views)

@@ -829,25 +829,40 @@ class SplitPane(QFrame):
         event.accept()
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MiddleButton and self.video_path:
+            # Le clic molette : la suivante, comme Espace.
+            event.accept()
+            return self._forward()
         if event.button() == Qt.LeftButton:
             self._held = True
             self._zoomed_while_held = False
+            self._panned = False
+            self._press_at = QCursor.pos()
             self._pan_last = QCursor.pos()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        # Bouton tenu apres un zoom : on promene l'image agrandie.
-        if self._held and self._zoomed_while_held and event.buttons() & Qt.LeftButton:
-            self._pan_to(QCursor.pos())
+        # Image agrandie : glisser la promene, bouton tenu depuis le zoom ou
+        # non (une fois relache, on ne pouvait plus s'y deplacer).
+        if self._held and event.buttons() & Qt.LeftButton and (
+                self._zoomed_while_held or self.zoom > 1.0):
+            start = getattr(self, "_press_at", None) or QCursor.pos()
+            if (self._panned or self._zoomed_while_held
+                    or (QCursor.pos() - start).manhattanLength() >= 4):
+                self._panned = True
+                self._pan_to(QCursor.pos())
             event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self._zoomed_while_held:
-            # Le bouton servait au zoom : ce n'etait pas un clic de pause.
+        if event.button() == Qt.LeftButton and (self._zoomed_while_held
+                                                or getattr(self, "_panned", False)):
+            # Le bouton servait au zoom, ou a promener l'image : ce n'etait
+            # pas un clic de pause.
             self._held = False
             self._zoomed_while_held = False
+            self._panned = False
             event.accept()
             return
         if event.button() == Qt.LeftButton:
