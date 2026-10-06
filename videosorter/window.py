@@ -1150,6 +1150,7 @@ class MainWindow(QMainWindow):
         row_one.addWidget(self.viewers_button, 0)
         self.viewers = []
         self._viewers_busy = False
+        self._live_seen = None          # (« at » du NAS, heure du PC ou il a change)
         self.viewers_timer = QTimer(self)
         self.viewers_timer.setInterval(5000)
         self.viewers_timer.timeout.connect(self._poll_viewers)
@@ -6677,13 +6678,30 @@ class MainWindow(QMainWindow):
                     told = json.loads(live.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     told = {}
-                # Un fichier vieux d'une minute : le serveur du NAS s'est tu.
-                if time.time() - float(told.get("at", 0) or 0) < 60:
-                    late = time.time() - float(told["at"])
+                # Un fichier qui ne change plus depuis une minute : le serveur
+                # du NAS s'est tu. Jugé à l'horloge du PC, quand on voit son
+                # « at » changer : celle du NAS peut avoir des minutes d'écart,
+                # et tous ses visiteurs passaient pour partis.
+                now = time.time()
+                stamp = float(told.get("at", 0) or 0)
+                last = self._live_seen
+                if last is None or last[0] != stamp:
+                    fresh = last is not None or abs(now - stamp) < 60
+                    self._live_seen = (stamp, now if fresh else now - 60)
+                seen_at = self._live_seen[1]
+                if stamp and now - seen_at < 60:
+                    late = now - seen_at
                     for entry in told.get("viewers") or []:
                         if entry.get("playing"):
                             entry["at"] = float(entry.get("at", 0)) + late
                         found.append(dict(entry, where="NAS"))
+            if time.time() - self._people_read > 30:
+                # Les profils : qui est qui, quelle que soit l'etiquette.
+                try:
+                    self._people = self._read_people(root)
+                except Exception:                       # noqa: BLE001
+                    pass
+                self._people_read = time.time()
             return found
 
         self._viewers_busy = True
@@ -6739,7 +6757,7 @@ class MainWindow(QMainWindow):
                 (lambda: self.stop_following()) if following else
                 (lambda e=dict(entry): self.follow_viewer(e)))
             follow.setEnabled(True)
-            menu.addAction("    Nommer cet appareil…",
+            menu.addAction("    Nommer cette personne…",
                            lambda label=entry.get("label", ""): self.name_device(label))
         menu.addSeparator()
         menu.addAction("Ce qui a été regardé, les connexions…", self.open_share)
@@ -6747,24 +6765,88 @@ class MainWindow(QMainWindow):
             self.viewers_button.rect().bottomLeft()))
         menu.deleteLater()
 
+    # Une personne, plusieurs etiquettes : celles que son profil a retenues
+    # (Chrome, puis l'icone, puis Chrome mis a jour…), relues en fond.
+    _people: dict = {}          # etiquette -> (nom du profil, toutes ses etiquettes)
+    _people_read = 0.0
+
+    def _read_people(self, root) -> dict:
+        """Dans un fil : les profils du PC et du NAS, par etiquette."""
+        from . import profils
+        files = []
+        server = self.share_server
+        if server is not None and getattr(server, "profiles_path", None):
+            files.append(Path(server.profiles_path))
+        if root is not None:
+            from .nas_publish import FOLDER
+            files.append(root / FOLDER / "etat" / "profils.json")
+        people: dict = {}
+        for path in files:
+            for me, profile in profils._read(path).items():
+                if not isinstance(profile, dict):
+                    continue
+                labels = set(profile.get("labels") or [])
+                labels |= {label for label in labels if f"({str(me)[:6]})" in label}
+                if not labels:
+                    continue
+                name = str(profile.get("name") or "")
+                for label in labels:
+                    known = people.get(label)
+                    merged = (known[1] | labels) if known else labels
+                    people[label] = (name or (known[0] if known else ""), frozenset(merged))
+        return people
+
+    def _siblings(self, label: str) -> set:
+        """Toutes les etiquettes de la meme personne : son profil, et celles
+        qu'on a nommees pareil."""
+        found = set(self._people.get(label, ("", frozenset()))[1]) | {label}
+        aliases = self.cfg["share_aliases"] or {}
+        names = {aliases[l] for l in found if aliases.get(l)}
+        if names:
+            found |= {l for l, n in aliases.items() if n in names}
+        return found
+
     def alias(self, label: str) -> str:
-        """Le nom donne a cet appareil, ou son etiquette."""
-        return (self.cfg["share_aliases"] or {}).get(label) or label
+        """Le nom de la personne : celui qu'on lui a donne (sur l'une de ses
+        etiquettes), sinon celui de son profil, sinon l'etiquette."""
+        aliases = self.cfg["share_aliases"] or {}
+        if aliases.get(label):
+            return aliases[label]
+        person = self._people.get(label)
+        if person:
+            for other in person[1]:
+                if aliases.get(other):
+                    return aliases[other]
+            if person[0]:
+                return person[0]
+        return label
 
     def name_device(self, label: str, parent=None) -> bool:
-        """Demande un nom pour cet appareil ; vide, on revient a l'etiquette."""
+        """Un nom pour la personne derriere cette etiquette : il vaut pour
+        toutes ses etiquettes (Chrome, icone, 4G, autre wifi). Reprendre un
+        nom deja donne reunit deux etiquettes en une seule personne."""
         aliases = dict(self.cfg["share_aliases"] or {})
-        name, ok = QInputDialog.getText(
-            parent or self, "Nommer cet appareil",
-            f"Un nom pour « {label} » (vide : son étiquette d'origine) :",
-            text=aliases.get(label, ""))
-        if not ok:
+        names = sorted({n for n in aliases.values() if n}, key=str.lower)
+        current = self.alias(label)
+        if current != label and current not in names:
+            names.insert(0, current)
+        dialog = QInputDialog(parent or self)
+        dialog.setWindowTitle("Nommer cette personne")
+        dialog.setLabelText(
+            f"Un nom pour « {label} ».\nChoisir un nom déjà donné : c'est la même "
+            "personne (ses connexions sont réunies). Vide : l'étiquette d'origine.")
+        dialog.setComboBoxEditable(True)
+        dialog.setComboBoxItems(names or [""])
+        dialog.setTextValue(current if current != label else "")
+        if not dialog.exec():
             return False
-        name = name.strip()
-        if name:
-            aliases[label] = name
-        else:
-            aliases.pop(label, None)
+        name = dialog.textValue().strip()
+        family = self._siblings(label)
+        for one in family:
+            if name:
+                aliases[one] = name
+            else:
+                aliases.pop(one, None)
         self.cfg["share_aliases"] = aliases
         self.cfg.save()
         self._viewers_ready(self.viewers)

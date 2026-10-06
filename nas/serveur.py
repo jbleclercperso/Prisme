@@ -308,6 +308,20 @@ def _write_live(server: web.Server) -> None:
         pass
 
 
+def _note_error() -> None:
+    """La pile d'une erreur du fil de surveillance, dans le partage : sans
+    acces aux journaux du conteneur, c'est la seule facon de la lire."""
+    import traceback
+    print(traceback.format_exc(), flush=True)
+    try:
+        target = SHARE / "etat" / "serveur-erreurs.txt"
+        old = target.read_text(encoding="utf-8")[-20000:] if target.exists() else ""
+        target.write_text(old + time.strftime("%Y-%m-%d %H:%M:%S ") + traceback.format_exc()
+                          + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _watch(server: web.Server, library: NasLibrary) -> None:
     """Recharge ce que Prisme republie : le catalogue, la clé du lien -- et le
     programme lui-même, en redémarrant (Docker le relance : « restart »)."""
@@ -315,42 +329,49 @@ def _watch(server: web.Server, library: NasLibrary) -> None:
     seen_program = _program_stamp()
     while True:
         time.sleep(10)
-        _write_live(server)
-        forget = SHARE / "etat" / "effacer-vues"
-        if forget.exists():
-            # Prisme a efface « Ce qui a ete regarde » : ici aussi.
-            JOURNAL.clear_views()
+        # Une etape qui plante (catalogue a moitie recopie, partage qui
+        # hoquette) tuait ce fil en silence : la page servait toujours, mais
+        # la presence des visiteurs restait figee et le PC n'en voyait plus
+        # aucun. Chaque tour est desormais protege, et l'erreur notee.
+        try:
+            _write_live(server)
+            forget = SHARE / "etat" / "effacer-vues"
+            if forget.exists():
+                # Prisme a efface « Ce qui a ete regarde » : ici aussi.
+                JOURNAL.clear_views()
+                try:
+                    forget.unlink()
+                except OSError:
+                    pass
+                print("journal des visionnages effacé", flush=True)
+            _apply_renames(library)
+            if _program_stamp() != seen_program:
+                # Laisser a Prisme le temps de finir de tout recopier.
+                time.sleep(5)
+                print("nouvelle version du programme : redémarrage", flush=True)
+                os._exit(0)
             try:
-                forget.unlink()
+                if CATALOGUE.stat().st_mtime != seen_catalogue:
+                    library.refresh()
+                    seen_catalogue = library.loaded_at
             except OSError:
                 pass
-            print("journal des visionnages effacé", flush=True)
-        _apply_renames(library)
-        if _program_stamp() != seen_program:
-            # Laisser a Prisme le temps de finir de tout recopier.
-            time.sleep(5)
-            print("nouvelle version du programme : redémarrage", flush=True)
-            os._exit(0)
-        try:
-            if CATALOGUE.stat().st_mtime != seen_catalogue:
-                library.refresh()
-                seen_catalogue = library.loaded_at
-        except OSError:
-            pass
-        access = _access()
-        if access and access != seen_access:
-            changed_key = access.get("invite") != seen_access.get("invite")
-            server.invite = access.get("invite", "")
-            server.salt = access.get("salt", "")
-            server.digest = access.get("digest", "")
-            server.secure = access.get("secure", "")
-            if changed_key:
-                # Un nouveau lien sur le PC : l'ancien ne mene plus nulle part,
-                # ici non plus.
-                with server.guard.lock:
-                    server.guard.sessions.clear()
-            seen_access = access
-            print("accès mis à jour", flush=True)
+            access = _access()
+            if access and access != seen_access:
+                changed_key = access.get("invite") != seen_access.get("invite")
+                server.invite = access.get("invite", "")
+                server.salt = access.get("salt", "")
+                server.digest = access.get("digest", "")
+                server.secure = access.get("secure", "")
+                if changed_key:
+                    # Un nouveau lien sur le PC : l'ancien ne mene plus nulle part,
+                    # ici non plus.
+                    with server.guard.lock:
+                        server.guard.sessions.clear()
+                seen_access = access
+                print("accès mis à jour", flush=True)
+        except Exception:                            # noqa: BLE001
+            _note_error()
 
 
 def main() -> None:
