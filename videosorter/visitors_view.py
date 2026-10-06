@@ -95,8 +95,10 @@ def _person(where: str, labels: list, summary: dict, profile: dict | None, key: 
     profile = profile or {}
     friends = [one for one in profiles.values() if key and one.get("parrain") == key]
     godparent = profiles.get(profile.get("parrain") or "") or {}
-    name = profile.get("name") or (aliases.get(labels[0]) if labels else "") or (
-        labels[0] if labels else "Visiteur")
+    # Le nom donne sur le PC d'abord (sur n'importe laquelle de ses
+    # etiquettes), puis celui que la personne s'est donne.
+    given = next((aliases[label] for label in labels if aliases.get(label)), "")
+    name = given or profile.get("name") or (labels[0] if labels else "Visiteur")
     return {
         "name": name, "email": profile.get("email", ""), "likes": profile.get("likes") or [],
         "labels": labels, "where": where, "key": key, "path": path,
@@ -117,20 +119,39 @@ def gather(sources: list, aliases: dict, live: list) -> list:
     """Les fiches. `sources` : [(« PC » ou « NAS », resume du journal,
     fichier des profils, profils)] ; `live` : les visiteurs du moment."""
     people, claimed = [], set()
+    specs = []          # [where, etiquettes, resume, profil, cle, fichier, profils]
     for where, summary, path, profiles in sources:
         for key, profile in profiles.items():
             labels = list(profile.get("labels") or [])
             claimed.update((where, label) for label in labels)
-            people.append(_person(where, labels, summary, profile, key, path, profiles,
-                                  aliases))
+            specs.append([where, labels, summary, profile, key, path, profiles])
+
+    def named(spec) -> set:
+        """Les noms sous lesquels on connait cette personne."""
+        found = {aliases.get(label) for label in spec[1]} | {(spec[3] or {}).get("name")}
+        return {n for n in found if n}
+
     for where, summary, path, _profiles in sources:
         for label, one in summary.items():
+            if (where, label) in claimed:
+                continue
+            # Nommee comme une personne deja connue (« Nommer cette personne »
+            # avec un nom deja donne) : c'est elle, sa fiche la reprend.
+            name = aliases.get(label)
+            home = next((s for s in specs if s[0] == where and name and name in named(s)),
+                        None)
+            if home is not None:
+                home[1].append(label)
+                claimed.add((where, label))
+                continue
             # Un appareil sans profil n'a sa fiche que s'il a fait quelque
             # chose : chaque entree par le lien laisse un nom de navigateur,
             # qui ne faisait que des fiches vides.
-            if (where, label) not in claimed and (one["videos"] or one["favorites"]):
-                people.append(_person(where, [label], summary, None, "", path, {},
-                                      aliases))
+            if one["videos"] or one["favorites"]:
+                specs.append([where, [label], summary, None, "", path, {}])
+                claimed.add((where, label))
+    for where, labels, summary, profile, key, path, profiles in specs:
+        people.append(_person(where, labels, summary, profile, key, path, profiles, aliases))
     for person in people:
         for entry in live or []:
             if entry.get("where") == person["where"] and entry.get("label") in person["labels"]:
