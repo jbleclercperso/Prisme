@@ -352,6 +352,8 @@ DEFAULTS = {
     # dans l'ordre, et si elle s'affiche.
     "word_pins": [],
     "word_pins_shown": True,
+    # Chaque arrivee de videos : les nouvelles sont comparees a la collection.
+    "dupes_watch": True,
     "tree_action": "send",       # clic dans l arborescence : send | go
     "tags": [],
     # Les racines reunies (NAS, disque externe, dossier du PC). « root » peut

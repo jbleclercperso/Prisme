@@ -663,6 +663,26 @@ def embed_query(engine, text: str) -> list:
 
 # -- l'index des images -------------------------------------------------------------------
 
+def _split_path(path: str) -> list:
+    return [p for p in re.split(r"[\\/]+", path) if p]
+
+
+def _last_part(path: str) -> str:
+    parts = _split_path(path)
+    return parts[-1] if parts else ""
+
+
+def _cut_at(path: str, count: int) -> int:
+    """Ou commencent les `count` derniers elements du chemin (a leur
+    separateur)."""
+    at = len(path)
+    for _ in range(count):
+        at = max(path.rfind("\\", 0, at), path.rfind("/", 0, at))
+        if at < 0:
+            return 0
+    return at
+
+
 class SceneIndex:
     """Les empreintes des images de chaque video, sur le disque :
     <dossier>/<moteur>.json (quelles images) et .bin (les nombres, en float32).
@@ -762,6 +782,81 @@ class SceneIndex:
         """Les videos parties de la collection quittent l'index."""
         self._keep([i for i, (v, _t) in enumerate(self.rows) if v in videos])
         self.done &= videos
+
+    def rebase(self, videos) -> int:
+        """Un index fait sur un autre PC : les memes videos, vues sous un autre
+        chemin (Z:\\ au lieu de \\\\as1104t\\Volume 3). Les chemins de l'index
+        prennent ceux de la collection d'ici, d'apres la fin commune de leurs
+        chemins ; rien n'est a refaire. Rend le nombre de videos retrouvees."""
+        here = {str(v) for v in videos}
+        known = {v for v, _t in self.rows}
+        missing = known - here
+        if not here or not missing or len(missing) < len(known) // 2:
+            return 0
+        by_name: dict = {}
+        for old in missing:
+            by_name.setdefault(_last_part(old).lower(), []).append(old)
+        votes: dict = {}
+        for new in here - known:
+            olds = by_name.get(_last_part(new).lower())
+            if not olds or len(olds) != 1:
+                continue
+            old = olds[0]
+            a, b = _split_path(old), _split_path(new)
+            same = 0
+            while (same < min(len(a), len(b)) - 1
+                   and a[-1 - same].lower() == b[-1 - same].lower()):
+                same += 1
+            pair = (old[:_cut_at(old, same)], new[:_cut_at(new, same)])
+            if pair[0] and pair[1] and pair[0] != pair[1]:
+                votes[pair] = votes.get(pair, 0) + 1
+        moves = sorted((p for p, n in votes.items() if n >= 2 or len(votes) == 1),
+                       key=lambda p: -len(p[0]))
+        if not moves:
+            return 0
+
+        def moved(video: str) -> str:
+            low = video.lower()
+            for old, new in moves:
+                if low.startswith(old.lower()) and video[len(old):len(old) + 1] in ("\\", "/"):
+                    rest = video[len(old):]
+                    return new + (rest.replace("/", "\\") if "\\" in new or ":" in new
+                                  else rest.replace("\\", "/"))
+            return video
+
+        names = {v: moved(v) for v in known}
+        # Deja refaite ici sous son nouveau chemin : l'ancienne copie part.
+        dropped = {v for v, n in names.items() if n != v and n in known}
+        if dropped:
+            self._keep([i for i, (v, _t) in enumerate(self.rows) if v not in dropped])
+        self.rows = [(names[v], t) for v, t in self.rows]
+        self.done = {names.get(v, v) for v in self.done}
+        return sum(1 for v, n in names.items() if n != v and n in here)
+
+    def save_head(self) -> None:
+        """Seuls les chemins ont change : le gros .bin reste tel quel."""
+        head, body = self._paths
+        matrix = self.vectors
+        width = int(matrix.shape[1]) if matrix.size else 0
+        try:
+            on_disk = body.stat().st_size // max(1, width * matrix.dtype.itemsize)
+        except OSError:
+            on_disk = -1
+        if on_disk != len(self.rows):
+            # Des lignes ont bouge (copie en double retiree, ajouts) : tout s'ecrit.
+            self.save()
+            on_disk = len(self.rows)
+        spare = head.with_suffix(".tmpj")
+        spare.write_text(json.dumps({"width": width, "rows": self.rows, "sampling": SAMPLING,
+                                     "dtype": self.dtype, "done": sorted(self.done)}),
+                         encoding="utf-8")
+        os.replace(spare, head)
+        # Les empreintes par video (voisines, doublons) gardent les anciens
+        # chemins : elles se refont.
+        try:
+            (self.folder / f"{self.engine_name}.videos.json").unlink()
+        except OSError:
+            pass
 
     def snapshot(self) -> "SceneIndex":
         """L'index tel qu'il est a cet instant, fige : une recherche lancee
