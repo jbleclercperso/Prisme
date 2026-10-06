@@ -1,13 +1,15 @@
-"""La revue des doublons : chaque groupe cote a cote, et ce qu'on en garde.
+"""La revue des doublons : chaque groupe d'un coup d'oeil, et ce qu'on en garde.
 
-La planche cochee d'office ne disait ni ou etait chaque copie, ni pourquoi
-l'une etait gardee plutot que l'autre. Ici, chaque copie montre son image, son
-dossier (rangee ou non), sa definition, son poids et sa duree, le meilleur de
-chaque mesure en vert. Une regle choisit d'un clic la copie a garder dans tous
-les groupes : la meilleure qualite, la plus grosse, la plus petite, celle deja
-rangee, ou celle d'un dossier qu'on privilegie. Un clic sur une copie la fait
-passer de « garder » a « corbeille » ; « Comparer » lit les copies ensemble,
-au meme instant, pour juger a l'oeil.
+Une ligne par copie : trois petites images prises aux memes moments (15, 50
+et 85 % de la video), alignees d'une copie a l'autre -- on voit tout de
+suite si c'est la meme video --, puis son chemin depuis la racine, ses
+mesures (le meilleur de chaque mesure en vert) et sa decision.
+
+Le choix de la copie a garder se fait par criteres croises : un premier
+critere, puis, a egalite, un deuxieme, puis un troisieme (« meilleure
+qualite, puis le chemin le plus long »). Des dossiers a privilegier passent
+avant tout. « Comparer en video » lit les copies d'un groupe ensemble, au
+meme instant, et enchaine les groupes un par un.
 
 Rien ne part sans le bouton du bas, et tout passe par la corbeille de la
 seance (Ctrl+B pour reprendre). Un groupe garde toujours au moins une copie.
@@ -19,18 +21,22 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QPushButton, QScrollArea, QSizePolicy, QSlider, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame, QGridLayout,
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
+    QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
 
 from .scan import human_duration, human_resolution, human_size
 
-THUMB_W = 320
-THUMB_H = 180
-PAGE = 25
+THUMB_W = 160
+THUMB_H = 90
+# Extraites un peu plus grandes que montrees : nettes une fois reduites.
+THUMB_MADE = 240
+MOMENTS = (0.15, 0.5, 0.85)
+PAGE = 30
 
 # Les dossiers d'arrivee : une copie qui y dort n'est pas encore rangee.
 _INBOX = re.compile(
@@ -38,13 +44,19 @@ _INBOX = re.compile(
     r"vrac|divers|temp|tmp|a classer|à classer|en attente|telephone|téléphone)",
     re.IGNORECASE)
 
-RULES = (
-    ("best", "Meilleure qualité (définition, puis poids)"),
-    ("sorted", "Celle déjà rangée dans un dossier"),
+# Les criteres : (cle, texte). Chacun donne une valeur, la plus grande gagne ;
+# a egalite, le critere suivant departage.
+CRITERIA = (
+    ("best", "Meilleure qualité (définition)"),
+    ("deepest", "Chemin le plus long (la plus classée)"),
+    ("sorted", "Déjà rangée (ni racine, ni dossier d'arrivée)"),
+    ("bitrate", "Meilleur débit (la moins compressée)"),
     ("biggest", "Le plus gros fichier"),
     ("smallest", "Le plus petit fichier (gagner de la place)"),
-    ("shortest_path", "Le chemin le plus court"),
+    ("longest", "La plus longue (pas tronquée)"),
+    ("shallowest", "Chemin le plus court"),
 )
+DEFAULT_CRITERIA = ("best", "deepest", "biggest")
 
 STYLE = """
 QWidget#dupesRoot, QWidget#dupesContent { background: #0e1116; color: #e6edf3; }
@@ -52,21 +64,10 @@ QLabel { color: #e6edf3; }
 QLabel#dupesTitle { font-size: 20px; font-weight: 600; }
 QLabel#dupesSub, QLabel#dupesDim { color: #8b949e; }
 QFrame#dupesBar { background: #161b22; border: 1px solid #262c36; border-radius: 10px; }
-QFrame#dupesGroup { background: #131820; border: 1px solid #262c36; border-radius: 12px; }
-QFrame#dupesCopy { background: #0e1116; border: 2px solid #262c36; border-radius: 10px; }
+QFrame#dupesGroup { background: #131820; border: 1px solid #262c36; border-radius: 10px; }
+QFrame#dupesCopy { background: #0e1116; border: 2px solid #262c36; border-radius: 8px; }
 QFrame#dupesCopy[state="keep"] { border-color: #2ea043; }
 QFrame#dupesCopy[state="trash"] { border-color: #da3633; background: #1a1012; }
-QLabel#dupesBadge { border-radius: 8px; padding: 2px 8px; font-weight: 600; }
-QLabel#dupesBadge[state="keep"] { background: #2ea043; color: white; }
-QLabel#dupesBadge[state="trash"] { background: #da3633; color: white; }
-QLabel#dupesBadge[state="free"] { background: #30363d; color: #c9d1d9; }
-QLabel#dupesFolder { color: #79c0ff; }
-QLabel#dupesFolder:hover { text-decoration: underline; }
-QLabel#dupesTag { border-radius: 6px; padding: 1px 6px; font-size: 11px; }
-QLabel#dupesTag[kind="sorted"] { background: #1f3a2a; color: #7ee2a8; }
-QLabel#dupesTag[kind="loose"] { background: #3a2a14; color: #f0b354; }
-QLabel#dupesTag[kind="new"] { background: #1c2f4a; color: #79c0ff; }
-QLabel#dupesTag[kind="doubt"] { background: #3a2a14; color: #f0b354; }
 QPushButton { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
               border-radius: 8px; padding: 6px 12px; }
 QPushButton:hover { background: #30363d; }
@@ -80,8 +81,14 @@ QComboBox { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
             border-radius: 8px; padding: 4px 8px; }
 QComboBox QAbstractItemView { background: #161b22; color: #e6edf3; }
 QCheckBox { color: #c9d1d9; }
+QListWidget { background: #0e1116; color: #e6edf3; border: 1px solid #30363d; }
 QScrollArea { border: none; background: #0e1116; }
+QDialog { background: #0e1116; }
 """
+
+BADGES = {"keep": ("#2ea043", "white", "✓ GARDER"),
+          "trash": ("#da3633", "white", "🗑 CORBEILLE"),
+          "free": ("#30363d", "#c9d1d9", "à décider")}
 
 
 def _key(path) -> str:
@@ -92,6 +99,10 @@ def _under(path: str, folder: str) -> bool:
     path, folder = _key(path), _key(folder).rstrip("\\/")
     return bool(folder) and (path == folder or path.startswith(folder + os.sep)
                              or path.startswith(folder + "/"))
+
+
+def _esc(text: str) -> str:
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
 class Placement:
@@ -108,7 +119,7 @@ class Placement:
             rest = parent[len(top.rstrip("\\/")):].strip("\\/")
             self.parts = [p for p in re.split(r"[\\/]+", rest) if p]
         else:
-            self.parts = [p for p in re.split(r"[\\/]+", parent) if p][-2:]
+            self.parts = [p for p in re.split(r"[\\/]+", parent) if p][1:]
         self.in_destination = any(_under(path, d) for d in destinations if d)
         loose = not self.parts or any(_INBOX.search(p) for p in self.parts)
         # 2 : dans une destination de tri ; 1 : dans un dossier a soi ;
@@ -116,25 +127,43 @@ class Placement:
         self.level = 2 if self.in_destination else (0 if loose else 1)
 
     @property
+    def depth(self) -> int:
+        return len(self.parts)
+
+    @property
     def sorted(self) -> bool:
         return self.level > 0
 
     @property
-    def shown(self) -> str:
-        """Le dossier, relatif a la racine : « Lesbienne › Couple »."""
-        if self.top and not self.parts:
-            return "racine de la collection"
-        return " › ".join(self.parts) if self.parts else self.folder
+    def root_name(self) -> str:
+        top = self.top.rstrip("\\/")
+        return re.split(r"[\\/]+", top)[-1] if top else ""
+
+    def crumbs_html(self) -> str:
+        """« Volume 3 › Lesbienne › Couple » : la racine en gris, chaque
+        dossier en bleu, le dernier en blanc et gras."""
+        sep = "<span style='color:#6e7681'>&nbsp;›&nbsp;</span>"
+        bits = []
+        if self.root_name:
+            bits.append(f"<span style='color:#8b949e'>{_esc(self.root_name)}</span>")
+        for n, part in enumerate(self.parts):
+            last = n == len(self.parts) - 1
+            bits.append(f"<span style='color:{'#ffffff' if last else '#79c0ff'};"
+                        f"{'font-weight:700;' if last else ''}'>{_esc(part)}</span>")
+        if not self.parts:
+            bits.append("<span style='color:#f0b354;font-weight:700'>(à la racine)</span>")
+        return "📁 " + sep.join(bits)
 
     @property
     def why(self) -> str:
+        levels = f" · {self.depth} niveau{'x' if self.depth > 1 else ''}" if self.depth else ""
         if self.level == 2:
-            return "rangée · destination de tri"
+            return "rangée · destination de tri" + levels
         if self.level == 1:
-            return "rangée"
+            return "rangée" + levels
         if not self.parts:
             return "non rangée · à la racine"
-        return "non rangée · dossier d'arrivée"
+        return "non rangée · dossier d'arrivée" + levels
 
 
 class Group:
@@ -161,8 +190,7 @@ class Group:
         return len(self.paths)
 
     def quality(self, i: int) -> tuple:
-        """La definition, puis le poids (a definition egale, moins
-        compresse), puis la duree, puis le chemin le plus court."""
+        """Le dernier recours : definition, poids, duree, chemin court."""
         return (self.heights[i] or 0, self.sizes[i] or 0, self.durations[i] or 0.0,
                 -len(self.paths[i]))
 
@@ -170,26 +198,44 @@ class Group:
         d = self.durations[i]
         return self.sizes[i] * 8 / d / 1e6 if d and self.sizes[i] else 0.0
 
-    def keeper(self, rule: str, prefer: str = "") -> int:
-        n = len(self.paths)
-        order = sorted(range(n), key=self.quality, reverse=True)
-        if prefer:
-            inside = [i for i in order if _under(self.paths[i], prefer)]
-            if inside:
-                order = inside
-        if rule == "biggest":
-            return max(order, key=lambda i: (self.sizes[i], self.quality(i)))
-        if rule == "smallest":
-            return min(order, key=lambda i: (self.sizes[i] or 1 << 62, len(self.paths[i])))
-        if rule == "sorted":
-            return max(order, key=lambda i: (self.places[i].level,
-                                             len(self.places[i].parts), self.quality(i)))
-        if rule == "shortest_path":
-            return min(order, key=lambda i: len(self.paths[i]))
-        return order[0]
+    def score(self, criterion: str, i: int):
+        """La valeur d'une copie pour ce critere : la plus grande gagne."""
+        place = self.places[i]
+        if criterion == "best":
+            return self.heights[i] or 0
+        if criterion == "deepest":
+            return place.depth
+        if criterion == "shallowest":
+            return -place.depth
+        if criterion == "sorted":
+            return place.level
+        if criterion == "bitrate":
+            # A un demi-megabit pres : deux encodages semblables sont a egalite.
+            return round(self.bitrate(i) * 2)
+        if criterion == "biggest":
+            return self.sizes[i] or 0
+        if criterion == "smallest":
+            return -(self.sizes[i] or 1 << 62)
+        if criterion == "longest":
+            return round(self.durations[i] or 0.0)
+        return 0
 
-    def apply(self, rule: str, prefer: str = "") -> None:
-        k = self.keeper(rule, prefer)
+    def keeper(self, criteria=DEFAULT_CRITERIA, prefer=()) -> int:
+        """La copie a garder : celles des dossiers privilegies d'abord, puis
+        chaque critere ne garde que les meilleures, le suivant departage."""
+        left = list(range(len(self.paths)))
+        inside = [i for i in left if any(_under(self.paths[i], f) for f in prefer if f)]
+        if inside:
+            left = inside
+        for criterion in criteria:
+            if not criterion or len(left) == 1:
+                continue
+            top = max(self.score(criterion, i) for i in left)
+            left = [i for i in left if self.score(criterion, i) == top]
+        return max(left, key=self.quality)
+
+    def apply(self, criteria=DEFAULT_CRITERIA, prefer=()) -> None:
+        k = self.keeper(criteria, prefer)
         self.keep = [i == k for i in range(len(self.paths))]
 
     @property
@@ -205,7 +251,8 @@ class Group:
 
 
 class _Thumbs(QObject):
-    """Les images des copies, fabriquees en fond, trois a la fois."""
+    """Les images des copies, fabriquees en fond, trois a la fois. Ce qui
+    n'est plus a l'ecran (autre page) n'est pas fabrique."""
 
     ready = Signal(str, str)        # cle (chemin|instant), fichier image
 
@@ -214,32 +261,34 @@ class _Thumbs(QObject):
         self.pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="prisme-doublons")
         self.asked: set = set()
         self.done: dict = {}
+        self.wanted: set = set()
         self.ready.connect(self._remember)
 
     def _remember(self, key: str, file: str) -> None:
         self.done[key] = file
 
-    def ask(self, video: str, ts: float | None = None, width: int = THUMB_W) -> str:
+    def ask(self, video: str, ts: float) -> str:
         from . import media
-        if ts is None:
-            ts = media.card_moment(video)
-        key = f"{video}|{ts:.2f}|{width}"
+        key = f"{video}|{ts:.2f}"
+        self.wanted.add(key)
         if key in self.done:
-            # Deja faite : la carte refaite (page, filtre) la reprend.
             file = self.done[key]
             QTimer.singleShot(0, lambda: self.ready.emit(key, file))
             return key
         if key in self.asked:
             return key
         self.asked.add(key)
-        hit = media.cached_thumb(Path(video), ts, width)
+        hit = media.cached_thumb(Path(video), ts, THUMB_MADE)
         if hit is not None:
             QTimer.singleShot(0, lambda: self.ready.emit(key, str(hit)))
             return key
 
         def make() -> None:
+            if key not in self.wanted:
+                self.asked.discard(key)       # redemandee si on y revient
+                return
             try:
-                out = media.extract_thumb(Path(video), ts, width, keyframe=True)
+                out = media.extract_thumb(Path(video), ts, THUMB_MADE, keyframe=True)
             except Exception:                                # noqa: BLE001
                 out = None
             self.ready.emit(key, str(out) if out else "")
@@ -291,17 +340,14 @@ class _Picture(QLabel):
         super().__init__(parent)
         self.setFixedSize(w, h)
         self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("background: #05070a; border-radius: 6px; color: #6e7681;")
+        self.setStyleSheet("background: #05070a; border-radius: 4px; color: #6e7681;")
         self.setText("…")
         self.setCursor(Qt.PointingHandCursor)
 
     def show_file(self, file: str) -> None:
-        if not file:
-            self.setText("image indisponible")
-            return
-        pix = QPixmap(file)
+        pix = QPixmap(file) if file else QPixmap()
         if pix.isNull():
-            self.setText("image indisponible")
+            self.setText("—")
             return
         self.setPixmap(pix.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
@@ -311,26 +357,17 @@ class _Picture(QLabel):
         super().mousePressEvent(event)
 
 
-class _Link(QLabel):
+class _Clickable(QLabel):
     clicked = Signal()
 
-    def __init__(self, text: str, parent=None):
+    def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
-        self.setObjectName("dupesFolder")
         self.setCursor(Qt.PointingHandCursor)
-        self.setWordWrap(True)
 
     def mousePressEvent(self, event) -> None:              # noqa: N802
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
-
-
-def _restyle(widget, **props) -> None:
-    for name, value in props.items():
-        widget.setProperty(name, value)
-    widget.style().unpolish(widget)
-    widget.style().polish(widget)
 
 
 def _tag(text: str, kind: str, parent=None) -> QLabel:
@@ -343,9 +380,65 @@ def _tag(text: str, kind: str, parent=None) -> QLabel:
     return label
 
 
-BADGES = {"keep": ("#2ea043", "white", "✓ GARDER"),
-          "trash": ("#da3633", "white", "🗑 CORBEILLE"),
-          "free": ("#30363d", "#c9d1d9", "à décider")}
+def _restyle(widget, **props) -> None:
+    for name, value in props.items():
+        widget.setProperty(name, value)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
+
+def moments_of(duration: float) -> list:
+    """Les instants des trois images : les memes fractions pour chaque copie."""
+    if duration and duration > 3:
+        return [duration * f for f in MOMENTS]
+    return []
+
+
+class PreferDialog(QDialog):
+    """Cocher autant de dossiers a privilegier qu'on veut."""
+
+    def __init__(self, parent, folders: list, chosen: list):
+        super().__init__(parent)
+        self.setWindowTitle("Dossiers à privilégier")
+        self.setStyleSheet(STYLE)
+        self.resize(720, 520)
+        lay = QVBoxLayout(self)
+        said = QLabel("Une copie qui se trouve dans l'un de ces dossiers (ou dessous) est "
+                      "gardée en priorité ; les critères départagent ensuite.", self)
+        said.setWordWrap(True)
+        said.setObjectName("dupesSub")
+        lay.addWidget(said)
+        self.list = QListWidget(self)
+        lay.addWidget(self.list, 1)
+        seen = set()
+        for folder, count in folders:
+            self._add(folder, f"{folder}   ({count})", folder in chosen)
+            seen.add(folder)
+        for folder in chosen:
+            if folder not in seen:
+                self._add(folder, folder, True)
+        more = QPushButton("Ajouter un autre dossier…", self)
+        more.clicked.connect(self._more)
+        lay.addWidget(more)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def _add(self, folder: str, text: str, on: bool) -> None:
+        item = QListWidgetItem(text, self.list)
+        item.setData(Qt.UserRole, folder)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    def _more(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Dossier à privilégier")
+        if folder:
+            self._add(os.path.normpath(folder), os.path.normpath(folder), True)
+
+    def chosen(self) -> list:
+        return [self.list.item(n).data(Qt.UserRole) for n in range(self.list.count())
+                if self.list.item(n).checkState() == Qt.Checked]
 
 
 class DupesReview(QWidget):
@@ -370,21 +463,23 @@ class DupesReview(QWidget):
         self.thumbs.ready.connect(self._thumb_ready)
         self.facts = _Facts(self)
         self.facts.ready.connect(self._facts_ready)
-        self._infos: dict = {}          # (id groupe, copie) -> etiquette des mesures
-        self._rule = ("best", "", False)
         self._pictures: dict = {}       # cle d'image -> [_Picture]
+        self._strips: dict = {}         # (id groupe, copie) -> [_Picture] x 3
+        self._infos: dict = {}          # (id groupe, copie) -> etiquette des mesures
         self._cards: list = []          # (groupe, [(cadre, badge)])
+        self.prefer: list = []
+        self._rule = (DEFAULT_CRITERIA, (), False)
         self.page = 0
         self._compare = None
 
         screen = (window.screen() if window is not None else None)
         room = screen.availableGeometry() if screen is not None else None
         self.resize(min(1400, room.width() - 60) if room else 1400,
-                    min(900, room.height() - 80) if room else 900)
+                    min(950, room.height() - 80) if room else 950)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(18, 14, 18, 14)
-        outer.setSpacing(10)
+        outer.setContentsMargins(16, 12, 16, 12)
+        outer.setSpacing(8)
 
         head = QHBoxLayout()
         titles = QVBoxLayout()
@@ -401,35 +496,42 @@ class DupesReview(QWidget):
         head.addWidget(board)
         outer.addLayout(head)
 
-        # -- les regles ----------------------------------------------------
+        # -- les criteres --------------------------------------------------
         bar = QFrame(self)
         bar.setObjectName("dupesBar")
         grid = QGridLayout(bar)
-        grid.setContentsMargins(14, 10, 14, 10)
-        grid.setHorizontalSpacing(10)
-        grid.addWidget(QLabel("Dans chaque groupe, garder :", bar), 0, 0)
-        self.rule = QComboBox(bar)
-        for key, text in RULES:
-            self.rule.addItem(text, key)
-        grid.addWidget(self.rule, 0, 1)
-        grid.addWidget(QLabel("Dossier à privilégier :", bar), 0, 2)
-        self.prefer = QComboBox(bar)
-        self.prefer.setMinimumWidth(260)
-        self._fill_prefer()
-        self.prefer.activated.connect(self._prefer_picked)
-        grid.addWidget(self.prefer, 0, 3)
-        self.doubtful = QCheckBox("Aussi les groupes « à vérifier »", bar)
-        self.doubtful.setToolTip("Les groupes trop peu sûrs (une seule image commune, durée "
-                                 "inconnue) ne sont pas touchés par la règle, sauf ici.")
-        grid.addWidget(self.doubtful, 1, 1)
+        grid.setContentsMargins(12, 8, 12, 8)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        grid.addWidget(QLabel("<b>Garder</b> dans chaque groupe :", bar), 0, 0)
+        self.criteria = []
+        for n, wanted in enumerate(DEFAULT_CRITERIA):
+            if n:
+                grid.addWidget(QLabel("puis, à égalité :", bar), 0, 2 * n)
+            pick = QComboBox(bar)
+            if n:
+                pick.addItem("—", "")
+            for key, text in CRITERIA:
+                pick.addItem(text, key)
+            pick.setCurrentIndex(max(0, pick.findData(wanted)))
+            self.criteria.append(pick)
+            grid.addWidget(pick, 0, 2 * n + 1)
         apply = QPushButton("Appliquer à tous les groupes", bar)
         apply.setObjectName("dupesApply")
+        apply.setToolTip("Dans chaque groupe : la copie choisie par les critères est gardée, "
+                         "les autres passent en corbeille (rien ne part avant le bouton rouge)")
         apply.clicked.connect(self._apply_all)
-        grid.addWidget(apply, 0, 4)
-        clear = QPushButton("Tout décocher", bar)
-        clear.clicked.connect(self._clear_all)
-        grid.addWidget(clear, 1, 4)
-        grid.addWidget(QLabel("Montrer :", bar), 1, 2)
+        grid.addWidget(apply, 0, 6)
+
+        self.prefer_button = QPushButton("Dossiers à privilégier : aucun", bar)
+        self.prefer_button.setToolTip("Une copie dans l'un de ces dossiers passe avant les critères")
+        self.prefer_button.clicked.connect(self._pick_prefer)
+        grid.addWidget(self.prefer_button, 1, 0, 1, 2)
+        self.doubtful = QCheckBox("Aussi les groupes « à vérifier »", bar)
+        self.doubtful.setToolTip("Les groupes peu sûrs (une seule image commune, durée inconnue) "
+                                 "ne sont pas touchés par les critères, sauf ici.")
+        grid.addWidget(self.doubtful, 1, 2, 1, 2)
+        grid.addWidget(QLabel("Montrer :", bar), 1, 4, Qt.AlignRight)
         self.show_pick = QComboBox(bar)
         for key, text in (("all", "Tous les groupes"), ("sure", "Les groupes sûrs"),
                           ("doubt", "Les groupes à vérifier"),
@@ -440,8 +542,12 @@ class DupesReview(QWidget):
         if self.fresh:
             self.show_pick.setCurrentIndex(4)
         self.show_pick.currentIndexChanged.connect(lambda _i: self._rebuild(0))
-        grid.addWidget(self.show_pick, 1, 3)
-        grid.setColumnStretch(5, 1)
+        grid.addWidget(self.show_pick, 1, 5)
+        reset = QPushButton("Annuler les choix", bar)
+        reset.setToolTip("Toutes les copies repassent « à décider » : rien en corbeille")
+        reset.clicked.connect(self._clear_all)
+        grid.addWidget(reset, 1, 6)
+        grid.setColumnStretch(7, 1)
         outer.addWidget(bar)
 
         # -- les groupes ---------------------------------------------------
@@ -461,6 +567,9 @@ class DupesReview(QWidget):
         foot.addWidget(self.prev_button)
         foot.addWidget(self.page_label)
         foot.addWidget(self.next_button)
+        compare_all = QPushButton("▶ Comparer en vidéo, groupe par groupe", self)
+        compare_all.clicked.connect(lambda: self._open_compare(None))
+        foot.addWidget(compare_all)
         foot.addStretch(1)
         self.summary = QLabel("", self)
         foot.addWidget(self.summary)
@@ -470,11 +579,11 @@ class DupesReview(QWidget):
         foot.addWidget(self.trash_button)
         outer.addLayout(foot)
 
-        # D'office : la meilleure copie de chaque groupe sur est gardee, les
-        # autres vont a la corbeille ; un groupe a verifier attend.
+        # D'office : les criteres par defaut sur chaque groupe sur ; un groupe
+        # a verifier attend qu'on le regarde.
         for group in self.groups:
             if group.sure:
-                group.apply("best")
+                group.apply(DEFAULT_CRITERIA)
         self._rebuild(0)
         # Le codec n'est jamais dans le groupe ; le reste, parfois pas.
         for group in self.groups:
@@ -498,30 +607,26 @@ class DupesReview(QWidget):
             pass
         return tops, [d for d in dests if d]
 
-    def _fill_prefer(self, chosen: str = "") -> None:
+    def _folders(self) -> list:
         counts: dict = {}
         for group in self.groups:
             for place in group.places:
                 counts[place.folder] = counts.get(place.folder, 0) + 1
-        self.prefer.blockSignals(True)
-        self.prefer.clear()
-        self.prefer.addItem("Aucun", "")
-        for folder, n in sorted(counts.items(), key=lambda kv: -kv[1])[:40]:
-            shown = folder if len(folder) < 70 else "…" + folder[-68:]
-            self.prefer.addItem(f"{shown}  ({n})", folder)
-        if chosen and self.prefer.findData(chosen) < 0:
-            self.prefer.addItem(chosen, chosen)
-        self.prefer.addItem("Choisir un autre dossier…", "?")
-        at = self.prefer.findData(chosen) if chosen else 0
-        self.prefer.setCurrentIndex(max(0, at))
-        self.prefer.blockSignals(False)
+        return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))[:200]
 
-    def _prefer_picked(self, _index: int) -> None:
-        if self.prefer.currentData() != "?":
+    def _pick_prefer(self) -> None:
+        dialog = PreferDialog(self, self._folders(), self.prefer)
+        if dialog.exec() != QDialog.Accepted:
             return
-        start = self.groups[0].places[0].top if self.groups else ""
-        folder = QFileDialog.getExistingDirectory(self, "Dossier à privilégier", start)
-        self._fill_prefer(folder or "")
+        self.prefer = dialog.chosen()
+        n = len(self.prefer)
+        self.prefer_button.setText("Dossiers à privilégier : " + (
+            "aucun" if not n else Path(self.prefer[0]).name if n == 1 else f"{n} dossiers"))
+        self.prefer_button.setToolTip("\n".join(self.prefer) or
+                                      "Une copie dans l'un de ces dossiers passe avant les critères")
+
+    def _chosen_criteria(self) -> tuple:
+        return tuple(c for c in (pick.currentData() for pick in self.criteria) if c)
 
     def _visible(self) -> list:
         mode = self.show_pick.currentData()
@@ -547,13 +652,15 @@ class DupesReview(QWidget):
         self.page = max(0, min(page, pages - 1))
         part = shown[self.page * PAGE:(self.page + 1) * PAGE]
         self._pictures = {}
-        self._cards = []
+        self._strips = {}
         self._infos = {}
+        self._cards = []
+        self.thumbs.wanted = set()
         content = QWidget()
         content.setObjectName("dupesContent")
         box = QVBoxLayout(content)
         box.setContentsMargins(0, 0, 8, 0)
-        box.setSpacing(12)
+        box.setSpacing(8)
         if not part:
             empty = QLabel("Aucun groupe à montrer ici." if self.groups
                            else "Plus aucun doublon à examiner.", content)
@@ -574,100 +681,113 @@ class DupesReview(QWidget):
         card = QFrame(parent)
         card.setObjectName("dupesGroup")
         lay = QVBoxLayout(card)
-        lay.setContentsMargins(14, 10, 14, 12)
-        lay.setSpacing(8)
+        lay.setContentsMargins(10, 6, 10, 8)
+        lay.setSpacing(5)
         head = QHBoxLayout()
-        title = QLabel(f"<b>Groupe {number}</b> · {len(group)} copies", card)
-        head.addWidget(title)
+        head.addWidget(QLabel(f"<b>Groupe {number}</b> · {len(group)} copies", card))
         if not group.sure:
             head.addWidget(_tag("à vérifier", "doubt", card))
         if any(group.new):
             head.addWidget(_tag("vidéo nouvelle", "new", card))
         head.addStretch(1)
-        compare = QPushButton("Comparer en vidéo", card)
-        compare.setObjectName("dupesSmall")
-        compare.clicked.connect(lambda _c=False, g=group: self._open_compare(g))
-        head.addWidget(compare)
-        keep_all = QPushButton("Tout garder", card)
-        keep_all.setObjectName("dupesSmall")
-        keep_all.setToolTip("Ne rien supprimer dans ce groupe pour l'instant")
-        keep_all.clicked.connect(lambda _c=False, g=group: self._set_all(g, None))
-        head.addWidget(keep_all)
-        not_dupes = QPushButton("Pas des doublons", card)
-        not_dupes.setObjectName("dupesSmall")
-        not_dupes.setToolTip("Ce groupe n'en est pas un : il quitte la liste et ne reviendra plus")
-        not_dupes.clicked.connect(lambda _c=False, g=group: self._not_dupes(g))
-        head.addWidget(not_dupes)
+        for text, tip, slot in (
+                ("▶ Comparer en vidéo", "Lire les copies ensemble, au même instant",
+                 lambda _c=False, g=group: self._open_compare(g)),
+                ("Tout garder", "Ne rien supprimer dans ce groupe",
+                 lambda _c=False, g=group: self._set_all(g, True)),
+                ("Pas des doublons", "Ce groupe n'en est pas un : il quitte la liste et ne "
+                 "reviendra plus", lambda _c=False, g=group: self._not_dupes(g))):
+            button = QPushButton(text, card)
+            button.setObjectName("dupesSmall")
+            button.setToolTip(tip)
+            button.clicked.connect(slot)
+            head.addWidget(button)
         lay.addLayout(head)
-
-        row = QHBoxLayout()
-        row.setSpacing(12)
         tiles = []
-        for i, path in enumerate(group.paths):
-            tile, badge = self._copy_tile(card, group, i)
-            tiles.append((tile, badge))
-            row.addWidget(tile)
-        row.addStretch(1)
-        lay.addLayout(row)
+        for i in range(len(group)):
+            tiles.append(self._copy_row(card, group, i))
+            lay.addWidget(tiles[-1][0])
         self._cards.append((group, tiles))
         self._paint(group, tiles)
         return card
 
-    def _copy_tile(self, parent, group: Group, i: int) -> tuple:
+    def _copy_row(self, parent, group: Group, i: int) -> tuple:
         path = group.paths[i]
         place = group.places[i]
-        tile = QFrame(parent)
-        tile.setObjectName("dupesCopy")
-        tile.setFixedWidth(THUMB_W + 20)
-        lay = QVBoxLayout(tile)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(5)
-        picture = _Picture(tile)
-        picture.setToolTip("Clic : garder, ou mettre à la corbeille")
-        picture.clicked.connect(lambda g=group, n=i: self._toggle(g, n))
-        key = self.thumbs.ask(path)
-        self._pictures.setdefault(key, []).append(picture)
-        lay.addWidget(picture)
+        row = QFrame(parent)
+        row.setObjectName("dupesCopy")
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(6, 4, 8, 4)
+        lay.setSpacing(8)
+        badge = _Clickable("", row)
+        badge.setFixedWidth(108)
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setToolTip("Clic : garder, ou mettre à la corbeille")
+        badge.clicked.connect(lambda g=group, n=i: self._toggle(g, n))
+        lay.addWidget(badge)
+        strip = []
+        for _slot in MOMENTS:
+            picture = _Picture(row)
+            picture.setToolTip("Les mêmes moments pour chaque copie (15, 50 et 85 %).\n"
+                               "Clic : garder, ou mettre à la corbeille")
+            picture.clicked.connect(lambda g=group, n=i: self._toggle(g, n))
+            strip.append(picture)
+            lay.addWidget(picture)
+        self._strips[(id(group), i)] = strip
+        self._ask_strip(group, i)
 
-        top = QHBoxLayout()
-        badge = QLabel("", tile)
-        badge.setObjectName("dupesBadge")
-        top.addWidget(badge)
-        top.addStretch(1)
-        only = QPushButton("Garder celle-ci", tile)
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        name = QLabel(f"<b>{_esc(Path(path).name)}</b>", row)
+        name.setToolTip(path)
+        name.setTextFormat(Qt.RichText)
+        text.addWidget(name)
+        crumbs = _Clickable("", row)
+        crumbs.setTextFormat(Qt.RichText)
+        crumbs.setText(place.crumbs_html())
+        crumbs.setStyleSheet("font-size: 14px;")
+        crumbs.setWordWrap(True)
+        crumbs.setToolTip(f"{path}\n\nClic : montrer le fichier dans l'explorateur")
+        crumbs.clicked.connect(lambda p=path: self._reveal(p))
+        text.addWidget(crumbs)
+        line = QHBoxLayout()
+        line.setSpacing(6)
+        line.addWidget(_tag(place.why, "sorted" if place.sorted else "loose", row))
+        if group.new[i]:
+            line.addWidget(_tag("nouvelle", "new", row))
+        info = QLabel(self._facts_text(group, i), row)
+        info.setTextFormat(Qt.RichText)
+        self._infos[(id(group), i)] = info
+        line.addWidget(info)
+        line.addStretch(1)
+        text.addLayout(line)
+        lay.addLayout(text, 1)
+
+        only = QPushButton("Garder celle-ci", row)
         only.setObjectName("dupesSmall")
         only.setToolTip("Garder cette copie, mettre les autres du groupe à la corbeille")
         only.clicked.connect(lambda _c=False, g=group, n=i: self._only(g, n))
-        top.addWidget(only)
-        play = QPushButton("▶", tile)
+        lay.addWidget(only)
+        play = QPushButton("▶", row)
         play.setObjectName("dupesSmall")
         play.setToolTip("Ouvrir cette vidéo dans Prisme")
         play.clicked.connect(lambda _c=False, p=path: self._play(p))
-        top.addWidget(play)
-        lay.addLayout(top)
+        lay.addWidget(play)
+        return row, badge
 
-        name = QLabel(Path(path).name, tile)
-        name.setWordWrap(True)
-        name.setToolTip(path)
-        name.setStyleSheet("font-weight: 600;")
-        lay.addWidget(name)
-        folder = _Link("📁 " + place.shown, tile)
-        folder.setToolTip(f"{place.folder}\n\nClic : montrer le fichier dans l'explorateur")
-        folder.clicked.connect(lambda p=path: self._reveal(p))
-        lay.addWidget(folder)
-        tags = QHBoxLayout()
-        tags.addWidget(_tag(place.why, "sorted" if place.sorted else "loose", tile))
-        if group.new[i]:
-            tags.addWidget(_tag("nouvelle", "new", tile))
-        tags.addStretch(1)
-        lay.addLayout(tags)
-
-        info = QLabel(self._facts_text(group, i), tile)
-        info.setTextFormat(Qt.RichText)
-        info.setWordWrap(True)
-        self._infos[(id(group), i)] = info
-        lay.addWidget(info)
-        return tile, badge
+    def _ask_strip(self, group: Group, i: int) -> None:
+        strip = self._strips.get((id(group), i))
+        if not strip:
+            return
+        moments = moments_of(group.durations[i])
+        if not moments:
+            return              # la duree arrive avec les mesures
+        for picture, ts in zip(strip, moments):
+            if getattr(picture, "asked", None) == round(ts, 2):
+                continue
+            picture.asked = round(ts, 2)
+            key = self.thumbs.ask(group.paths[i], ts)
+            self._pictures.setdefault(key, []).append(picture)
 
     @staticmethod
     def _facts_text(group: Group, i: int) -> str:
@@ -690,7 +810,7 @@ class DupesReview(QWidget):
             if rate else "",
             fact(codec.upper(), False) if codec else "",
         ]
-        return " · ".join(x for x in parts if x) or "mesures en cours…"
+        return " · ".join(x for x in parts if x) or "<span style='color:#6e7681'>mesures…</span>"
 
     def _facts_ready(self, group: Group, i: int, found: dict) -> None:
         if not any(g is group for g in self.groups) or i >= len(group):
@@ -703,9 +823,10 @@ class DupesReview(QWidget):
             group.durations[i] = float(found["duration"])
         if found.get("codec"):
             group.codecs[i] = found["codec"]
-        rule, prefer, doubtful = self._rule
+        criteria, prefer, doubtful = self._rule
         if not group.touched and (group.sure or doubtful):
-            group.apply(rule, prefer)
+            group.apply(criteria, prefer)
+        self._ask_strip(group, i)
         for j in range(len(group)):
             label = self._infos.get((id(group), j))
             if label is not None:
@@ -716,13 +837,16 @@ class DupesReview(QWidget):
         self._repaint(group)
 
     def _paint(self, group: Group, tiles: list) -> None:
-        for i, (tile, badge) in enumerate(tiles):
+        for i, (row, badge) in enumerate(tiles):
             state = {True: "keep", False: "trash", None: "free"}[group.keep[i]]
             back, ink, text = BADGES[state]
-            badge.setText(text)
-            badge.setStyleSheet(f"background: {back}; color: {ink}; border-radius: 8px; "
-                                "padding: 2px 8px; font-weight: 600;")
-            _restyle(tile, state=state)
+            try:
+                badge.setText(text)
+                badge.setStyleSheet(f"background: {back}; color: {ink}; border-radius: 8px; "
+                                    "padding: 6px 4px; font-weight: 700;")
+                _restyle(row, state=state)
+            except RuntimeError:
+                pass
 
     def _repaint(self, group: Group) -> None:
         for known, tiles in self._cards:
@@ -743,11 +867,11 @@ class DupesReview(QWidget):
         copies = sum(len(g) - 1 for g in self.groups)
         self.title.setText(f"Doublons — {len(self.groups)} groupe(s)")
         self.sub.setText(
-            f"{copies} copie(s) en trop au total. Clic sur une image : garder ↔ corbeille. "
-            "Le dossier de chaque copie s'ouvre d'un clic. Rien ne part sans le bouton rouge, "
-            "et tout reste récupérable (Ctrl+B dans Prisme).")
-        self.summary.setText(f"{count} copie(s) cochée(s) · {human_size(gain)} libérés"
-                             if count else "Aucune copie cochée")
+            f"{copies} copie(s) en trop au total. Clic sur une copie : garder ↔ corbeille. "
+            "Clic sur un chemin : le fichier dans l'explorateur. Rien ne part sans le bouton "
+            "rouge, et tout reste récupérable (Ctrl+B dans Prisme).")
+        self.summary.setText(f"{count} copie(s) en corbeille · {human_size(gain)} libérés"
+                             if count else "Aucune copie en corbeille")
         self.trash_button.setText(f"Mettre {count} copie(s) à la corbeille" if count
                                   else "Mettre à la corbeille")
         self.trash_button.setEnabled(bool(count))
@@ -755,18 +879,14 @@ class DupesReview(QWidget):
     # -- gestes --------------------------------------------------------------
     def _toggle(self, group: Group, i: int) -> None:
         group.touched = True
-        now = group.keep[i]
-        if now is False:
+        if group.keep[i] is False:
             group.keep[i] = True
         else:
             if sum(1 for k in group.keep if k is not False) <= 1:
-                self._say_last()
-                return
+                return self._say_last()
             group.keep[i] = False
             # La premiere decision d'un groupe : le reste est garde.
-            for j, k in enumerate(group.keep):
-                if k is None:
-                    group.keep[j] = True
+            group.keep = [True if k is None else k for k in group.keep]
         self._repaint(group)
 
     def _say_last(self) -> None:
@@ -784,16 +904,13 @@ class DupesReview(QWidget):
         self._repaint(group)
 
     def _apply_all(self) -> None:
-        rule = self.rule.currentData() or "best"
-        prefer = self.prefer.currentData() or ""
-        if prefer == "?":
-            prefer = ""
+        criteria = self._chosen_criteria() or DEFAULT_CRITERIA
         doubtful = self.doubtful.isChecked()
-        self._rule = (rule, prefer, doubtful)
+        self._rule = (criteria, tuple(self.prefer), doubtful)
         for group in self.groups:
             if group.sure or doubtful:
                 group.touched = False
-                group.apply(rule, prefer)
+                group.apply(criteria, self.prefer)
         self._rebuild(self.page)
 
     def _clear_all(self) -> None:
@@ -837,11 +954,10 @@ class DupesReview(QWidget):
 
     def _trash(self) -> None:
         window = self.window
-        targets = [(g, i) for g in self.groups for i in g.trashed]
-        # Jamais un groupe entier : la derniere copie reste, quoi qu'on ait coche.
         for group in self.groups:
             if group.trashed and len(group.trashed) >= len(group):
                 return self._say_last()
+        targets = [(g, i) for g in self.groups for i in g.trashed]
         if not targets or window is None:
             return
         from .scan import MODE_FILES, Item
@@ -859,22 +975,24 @@ class DupesReview(QWidget):
             left = [i for i, p in enumerate(group.paths) if _key(p) not in gone]
             if len(left) >= 2:
                 if len(left) != len(group):
-                    sub = Group(group.dupe.subset(left), *self._places_of(window), self.fresh)
-                    kept.append(sub)
+                    kept.append(Group(group.dupe.subset(left), *self._places_of(window),
+                                      self.fresh))
                 else:
                     kept.append(group)
         self.groups = kept
-        self._fill_prefer(self.prefer.currentData() if self.prefer.currentData() != "?" else "")
         self._rebuild(self.page)
 
-    def _open_compare(self, group: Group) -> None:
+    def _open_compare(self, group) -> None:
+        shown = self._visible()
+        if not shown:
+            return
         if self._compare is not None:
             try:
                 self._compare.close()
             except RuntimeError:
                 pass
-        self._compare = CompareDialog(self, group)
-        self._compare.decided.connect(lambda i, g=group: self._only(g, i))
+        start = next((n for n, g in enumerate(shown) if g is group), 0)
+        self._compare = CompareDialog(self, shown, start)
         self._compare.show()
 
     def closeEvent(self, event) -> None:                    # noqa: N802
@@ -889,90 +1007,139 @@ class DupesReview(QWidget):
 
 
 class CompareDialog(QDialog):
-    """Les copies d'un groupe lues ensemble, au meme instant, sans le son :
-    la difference de qualite se voit d'un coup d'oeil."""
+    """Les copies d'un groupe lues ensemble, au meme instant, sans le son ;
+    ◂ ▸ passent au groupe precedent ou suivant. « Garder celle-ci » decide et
+    enchaine : on juge tous les groupes douteux a la suite."""
 
-    decided = Signal(int)
+    START = 0.33
 
-    def __init__(self, review: DupesReview, group: Group):
+    def __init__(self, review: DupesReview, groups: list, start: int = 0):
         super().__init__(review)
-        from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-        from PySide6.QtMultimediaWidgets import QVideoWidget
-        self.setWindowTitle("Comparer les copies")
-        self.setStyleSheet(STYLE + "QDialog { background: #0e1116; }")
-        self.group = group
+        self.review = review
+        self.groups = groups
+        self.at = max(0, min(start, len(groups) - 1))
         self.players = []
-        shown = list(range(len(group)))[:4]
+        self.setWindowTitle("Comparer les copies")
+        self.setStyleSheet(STYLE)
         lay = QVBoxLayout(self)
-        row = QHBoxLayout()
-        best_h = max(group.heights or [0])
-        best_s = max(group.sizes or [0])
-        for i in shown:
-            col = QVBoxLayout()
-            video = QVideoWidget(self)
-            video.setMinimumSize(400, 225)
-            video.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            player = QMediaPlayer(self)
-            audio = QAudioOutput(self)
-            audio.setMuted(True)
-            player.setAudioOutput(audio)
-            player.setVideoOutput(video)
-            player.setSource(QUrl.fromLocalFile(group.paths[i]))
-            self.players.append((player, audio))
-            col.addWidget(video, 1)
-            h, s = group.heights[i], group.sizes[i]
-            good = "#7ee2a8"
-            facts = []
-            if h:
-                facts.append(f"<span style='color:{good if h == best_h else '#c9d1d9'}'>"
-                             f"{human_resolution(h)}</span>")
-            if s:
-                facts.append(f"<span style='color:{good if s == best_s else '#c9d1d9'}'>"
-                             f"{human_size(s)}</span>")
-            if group.durations[i]:
-                facts.append(human_duration(group.durations[i]))
-            name = QLabel(f"<b>{Path(group.paths[i]).name}</b><br>"
-                          f"<span style='color:#79c0ff'>📁 {group.places[i].shown}</span>"
-                          f" · {group.places[i].why}<br>" + " · ".join(facts), self)
-            name.setTextFormat(Qt.RichText)
-            name.setWordWrap(True)
-            col.addWidget(name)
-            buttons = QHBoxLayout()
-            keep = QPushButton("Garder celle-ci", self)
-            keep.setObjectName("dupesApply")
-            keep.clicked.connect(lambda _c=False, n=i: self._decide(n))
-            buttons.addWidget(keep)
-            sound = QPushButton("🔇", self)
-            sound.setToolTip("Le son de cette copie seulement")
-            sound.setFixedWidth(44)
-            sound.clicked.connect(lambda _c=False, a=audio, b=sound: self._sound(a, b))
-            buttons.addWidget(sound)
-            col.addLayout(buttons)
-            row.addLayout(col, 1)
-        lay.addLayout(row, 1)
+        top = QHBoxLayout()
+        self.prev = QPushButton("◂ Groupe précédent", self)
+        self.prev.clicked.connect(lambda: self.show_group(self.at - 1))
+        self.where = QLabel("", self)
+        self.where.setAlignment(Qt.AlignCenter)
+        self.next = QPushButton("Groupe suivant ▸", self)
+        self.next.clicked.connect(lambda: self.show_group(self.at + 1))
+        top.addWidget(self.prev)
+        top.addWidget(self.where, 1)
+        top.addWidget(self.next)
+        lay.addLayout(top)
+        self.stage = QWidget(self)
+        self.stage_lay = QHBoxLayout(self.stage)
+        self.stage_lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.stage, 1)
         controls = QHBoxLayout()
         self.pause = QPushButton("⏸", self)
+        self.pause.setFixedWidth(48)
         self.pause.clicked.connect(self._toggle)
         controls.addWidget(self.pause)
         self.slider = QSlider(Qt.Horizontal, self)
         self.slider.setRange(0, 1000)
         self.slider.sliderMoved.connect(self._seek)
         controls.addWidget(self.slider, 1)
-        hint = QLabel("Toutes les copies avancent ensemble", self)
+        hint = QLabel("Toutes les copies avancent ensemble · ← → groupes · Espace pause", self)
         hint.setObjectName("dupesDim")
         controls.addWidget(hint)
         lay.addLayout(controls)
-        self.resize(min(1600, 460 * len(shown) + 40), 560)
+        self.resize(1300, 640)
         self.timer = QTimer(self)
         self.timer.setInterval(250)
         self.timer.timeout.connect(self._follow)
         self.timer.start()
         self._playing = True
-        # Les copies demarrent au meme endroit : un tiers de la video, la ou
-        # la difference d'image se voit, plutot qu'un generique.
-        QTimer.singleShot(400, lambda: self._seek(330))
+        QShortcut(QKeySequence(Qt.Key_Right), self, lambda: self.show_group(self.at + 1))
+        QShortcut(QKeySequence(Qt.Key_Left), self, lambda: self.show_group(self.at - 1))
+        QShortcut(QKeySequence(Qt.Key_Space), self, self._toggle)
+        self.show_group(self.at)
+
+    def _clear(self) -> None:
+        self.timer.stop()
+        for player, _a in self.players:
+            player.stop()
+            player.setSource(QUrl())
+        self.players = []
+        while self.stage_lay.count():
+            item = self.stage_lay.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def show_group(self, at: int) -> None:
+        from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+        from PySide6.QtMultimediaWidgets import QVideoWidget
+        if not self.groups or at < 0 or at >= len(self.groups):
+            return
+        self._clear()
+        self.at = at
+        group = self.groups[at]
+        self.where.setText(f"<b>Groupe {at + 1} / {len(self.groups)}</b> · "
+                           f"{len(group)} copies" + ("" if group.sure else " · à vérifier"))
+        self.prev.setEnabled(at > 0)
+        self.next.setEnabled(at < len(self.groups) - 1)
+        for i in range(min(4, len(group))):
+            column = QWidget(self.stage)
+            col = QVBoxLayout(column)
+            col.setContentsMargins(4, 0, 4, 0)
+            video = QVideoWidget(column)
+            video.setMinimumSize(300, 170)
+            video.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            player = QMediaPlayer(column)
+            audio = QAudioOutput(column)
+            audio.setMuted(True)
+            player.setAudioOutput(audio)
+            player.setVideoOutput(video)
+            # Chaque copie part du meme endroit des que sa duree est connue :
+            # demande trop tot, le saut etait perdu et tout partait du debut.
+            player.durationChanged.connect(
+                lambda length, p=player: self._first_seek(p, length))
+            player.setSource(QUrl.fromLocalFile(group.paths[i]))
+            self.players.append((player, audio))
+            col.addWidget(video, 1)
+            place = group.places[i]
+            label = QLabel(f"<b>{_esc(Path(group.paths[i]).name)}</b><br>"
+                           f"{place.crumbs_html()}<br>"
+                           f"<span style='color:#8b949e'>{_esc(place.why)}</span><br>"
+                           + DupesReview._facts_text(group, i), column)
+            label.setTextFormat(Qt.RichText)
+            label.setWordWrap(True)
+            col.addWidget(label)
+            buttons = QHBoxLayout()
+            state = {True: "keep", False: "trash", None: "free"}[group.keep[i]]
+            keep = QPushButton("✓ Gardée" if state == "keep" else "Garder celle-ci", column)
+            keep.setObjectName("dupesApply")
+            keep.setToolTip("Garder celle-ci, les autres en corbeille, puis groupe suivant")
+            keep.clicked.connect(lambda _c=False, n=i: self._decide(n))
+            buttons.addWidget(keep, 1)
+            sound = QPushButton("🔇", column)
+            sound.setFixedWidth(44)
+            sound.setToolTip("Le son de cette copie seulement")
+            sound.clicked.connect(lambda _c=False, a=audio, b=sound: self._sound(a, b))
+            buttons.addWidget(sound)
+            col.addLayout(buttons)
+            self.stage_lay.addWidget(column, 1)
+        both = QPushButton("Tout garder", self.stage)
+        both.setToolTip("Ce groupe garde toutes ses copies ; groupe suivant")
+        both.clicked.connect(self._keep_all)
+        self.stage_lay.addWidget(both, 0, Qt.AlignBottom)
+        self._playing = True
+        self.pause.setText("⏸")
         for player, _a in self.players:
             player.play()
+        self.timer.start()
+
+    def _first_seek(self, player, length: int) -> None:
+        if length > 0 and not getattr(player, "_placed", False):
+            player._placed = True
+            player.setPosition(int(length * self.START))
 
     def _sound(self, audio, button) -> None:
         on = audio.isMuted()
@@ -1001,12 +1168,19 @@ class CompareDialog(QDialog):
             self.slider.setValue(int(1000 * player.position() / player.duration()))
 
     def _decide(self, i: int) -> None:
-        self.decided.emit(i)
-        self.close()
+        self.review._only(self.groups[self.at], i)
+        self._advance()
+
+    def _keep_all(self) -> None:
+        self.review._set_all(self.groups[self.at], True)
+        self._advance()
+
+    def _advance(self) -> None:
+        if self.at < len(self.groups) - 1:
+            self.show_group(self.at + 1)
+        else:
+            self.close()
 
     def closeEvent(self, event) -> None:                    # noqa: N802
-        self.timer.stop()
-        for player, _a in self.players:
-            player.stop()
-            player.setSource(QUrl())
+        self._clear()
         super().closeEvent(event)
