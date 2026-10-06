@@ -220,7 +220,7 @@ a = Analysis(
     binaries=extra_binaries,
     datas=extra_datas,
     hiddenimports=extra_hidden + ["PySide6.QtMultimediaWidgets", "PySide6.QtSvg", "rapidfuzz",
-                                  "segno", "yt_dlp", "truststore", "numpy",
+                                  "segno", "yt_dlp", "truststore", "numpy", "telethon",
                                   "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets"],
     excludes={excludes},
     noarchive=False,
