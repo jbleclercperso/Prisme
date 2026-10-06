@@ -18,7 +18,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QListView, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar,
-    QPushButton, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QPushButton, QScrollArea, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -238,7 +238,12 @@ class LaboWindow(QWidget):
         font.setPixelSize(13)
         self.setFont(font)
         self.setWindowTitle("Prisme — Labo IA")
-        self.resize(1180, 820)
+        # A la taille de l'ecran : sur un portable, 820 pixels de haut
+        # depassaient, et l'on ne voyait plus les boutons du bas.
+        screen = (window.screen() if window is not None else None) or QApplication.primaryScreen()
+        room = screen.availableGeometry() if screen is not None else None
+        self.resize(min(1180, room.width() - 60) if room else 1180,
+                    min(820, room.height() - 80) if room else 820)
         cfg = window.cfg
         self._engine_given = engine
         self._frame_of = frame_of or self._default_frame
@@ -265,7 +270,21 @@ class LaboWindow(QWidget):
         self._shown: set = set()       # celles de la recherche precedente
         self._tag_found: dict = {}
 
-        box = QVBoxLayout(self)
+        # Tout le contenu dans une zone qui defile : la fenetre se reduit en
+        # hauteur autant qu'on veut, au lieu d'imposer la somme de ses parties.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: 0; }")
+        content = QWidget(scroll)
+        content.setObjectName("laboContent")
+        content.setStyleSheet("QWidget#laboContent { background: #0e1116; }")
+        scroll.setWidget(content)
+        scroll.viewport().setStyleSheet("background: #0e1116;")
+        outer.addWidget(scroll)
+        box = QVBoxLayout(content)
         box.setContentsMargins(20, 18, 20, 16)
         box.setSpacing(12)
 
