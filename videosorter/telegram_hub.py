@@ -125,6 +125,55 @@ def already_in_library(name: str, size: int, keys: set[tuple[str, int]]) -> bool
     return (name.lower(), int(size)) in keys
 
 
+
+def public_links(query: str) -> list[dict]:
+    """Liens t.me et discord.gg déjà publiés sur le web pour ce mot-clé."""
+    import urllib.parse, urllib.request
+    query = query.strip()
+    if not query:
+        return []
+    rows = []
+    seen = set()
+    searches = [
+        f"site:t.me {query}",
+        f"site:t.me/s {query}",
+        f"discord.gg {query}",
+    ]
+    for q in searches:
+        url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": q})
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Prisme"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                html = resp.read().decode("utf-8", "replace")
+        except Exception:
+            continue
+        for kind, pattern in (
+            ("telegram", r"https?://t\.me/(?:s/)?([A-Za-z0-9_]{4,})"),
+            ("discord", r"https?://discord\.gg/([A-Za-z0-9-]+)"),
+        ):
+            for name in re.findall(pattern, html):
+                if name.lower() in {"joinchat", "share", "addstickers"} or name in seen:
+                    continue
+                seen.add(name)
+                if kind == "telegram":
+                    rows.append({
+                        "title": name, "username": name,
+                        "url": f"https://t.me/{name}", "kind": "telegram",
+                        "abonnes": 0, "medias": 0, "protege": False, "demande": False,
+                        "acces": "lien public", "vivant": "?", "dernier": "annoncé sur le web",
+                        "score": 0,
+                    })
+                else:
+                    rows.append({
+                        "title": name, "username": name,
+                        "url": f"https://discord.gg/{name}", "kind": "discord",
+                        "abonnes": 0, "medias": 0, "protege": False, "demande": True,
+                        "acces": "invitation", "vivant": "?", "dernier": "annoncé sur le web",
+                        "score": 0,
+                    })
+    return rows
+
+
 def username_of(text: str) -> str:
     text = (text or "").strip()
     found = URL_RE.search(text)
@@ -612,6 +661,9 @@ class TelegramDialog(QDialog):
         go.setObjectName("tgPrimary")
         go.clicked.connect(self.search)
         row.addWidget(go)
+        web = QPushButton("Liens publiés", page)
+        web.clicked.connect(self.search_public)
+        row.addWidget(web)
         self.min_subs.valueChanged.connect(lambda _v: self._apply_filter())
         self.min_medias.valueChanged.connect(lambda _v: self._apply_filter())
         lay.addLayout(row)
@@ -725,6 +777,15 @@ class TelegramDialog(QDialog):
 
     def _login(self) -> None:
         self._start("login")
+
+    def search_public(self) -> None:
+        rows = public_links(self.query.text())
+        if not rows:
+            self.status.setText("Aucun lien public trouvé pour ce mot. Essaie un terme plus précis.")
+            return
+        self.found = rows
+        self._apply_filter()
+        self.status.setText(f"{len(rows)} liens déjà publiés sur le web. Ouvre la banque pour les noter.")
 
     def search(self) -> None:
         if self.src_dc.isChecked():
