@@ -254,6 +254,9 @@ class TelegramWorker(QThread):
             elif self.job == "download_many":
                 n = await self._download_many(client)
                 self.batch_done.emit(n)
+            elif self.job == "follow":
+                n = await self._follow(client)
+                self.batch_done.emit(n)
         finally:
             await client.disconnect()
 
@@ -492,6 +495,40 @@ class TelegramWorker(QThread):
         return n
 
 
+
+    async def _follow(self, client) -> int:
+        """Télécharge les vidéos nouvelles des chaînes suivies."""
+        if not self.known:
+            self.known = library_keys()
+        n = 0
+        self.skipped = 0
+        for entry in self.state.get("channels") or []:
+            if not entry.get("follow"):
+                continue
+            username = entry.get("username") or ""
+            if not username:
+                continue
+            last = int((self.state.get("last_id") or {}).get(username) or 0)
+            max_id = last
+            fresh = []
+            async for msg in client.iter_messages(username, min_id=last, limit=40):
+                max_id = max(max_id, msg.id)
+                if msg.video or (msg.file and (msg.file.mime_type or "").startswith("video")):
+                    fresh.append(msg.id)
+            self.state.setdefault("last_id", {})[username] = max_id
+            if last == 0:
+                # Premier passage : on arme, on ne vide pas l'historique.
+                continue
+            self.channel = username
+            for mid in reversed(fresh):
+                self.message_id = mid
+                if await self._download(client):
+                    n += 1
+                await asyncio.sleep(0.4)
+        save_state(self.state)
+        return n
+
+
 class TelegramDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -643,6 +680,10 @@ class TelegramDialog(QDialog):
         drop = QPushButton("Retirer", page)
         drop.clicked.connect(self.remove_channel)
         row.addWidget(drop)
+        follow = QPushButton("Suivre et télécharger", page)
+        follow.setObjectName("tgPrimary")
+        follow.clicked.connect(self.toggle_follow)
+        row.addWidget(follow)
         bank = QPushButton("Ouvrir la banque", page)
         bank.setObjectName("tgPrimary")
         bank.clicked.connect(self.open_alert_bank)
@@ -843,6 +884,18 @@ class TelegramDialog(QDialog):
             save_state(self.state)
             self._refresh_alerts_table()
 
+    def toggle_follow(self) -> None:
+        row = self.alerts.currentRow()
+        channels = self.state.get("channels") or []
+        if not (0 <= row < len(channels)):
+            self.status.setText("Choisis une chaîne dans les alertes.")
+            return
+        channels[row]["follow"] = not channels[row].get("follow")
+        save_state(self.state)
+        self._refresh_alerts_table()
+        self.status.setText("Suivi activé : les nouvelles vidéos se téléchargent à l'ouverture de Prisme."
+                            if channels[row]["follow"] else "Suivi retiré.")
+
     def mark_seen(self) -> None:
         for entry in self.state["channels"]:
             name = entry.get("username")
@@ -867,10 +920,10 @@ class TelegramDialog(QDialog):
             name = entry.get("username") or ""
             note = by_name.get(name, {})
             values = [
-                entry.get("title") or name,
+                ("↓ " if entry.get("follow") else "") + (entry.get("title") or name),
                 str(note.get("nouveaux", "")),
                 str((self.state.get("unread") or {}).get(name) or 0),
-                note.get("note") or "",
+                "suivi" if entry.get("follow") else (note.get("note") or ""),
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -1126,3 +1179,28 @@ class Player(QDialog):
         if player is not None:
             player.stop()
         super().reject()
+
+
+def start_follow(window=None) -> None:
+    """Au lancement de Prisme : télécharge les nouveautés des chaînes suivies."""
+    state = load_state()
+    if not any(c.get("follow") for c in state.get("channels") or []):
+        return
+    if not state.get("api_id") or not state.get("api_hash"):
+        return
+    worker = TelegramWorker(state)
+    worker.job = "follow"
+    worker.skip_known = True
+    worker.known = library_keys()
+
+    def done(n: int) -> None:
+        if window is not None and n:
+            try:
+                window.show_banner(f"Telegram : {n} nouvelle(s) vidéo(s) téléchargée(s).", "done")
+            except Exception:
+                pass
+
+    worker.batch_done.connect(done)
+    worker.start()
+    if window is not None:
+        window._telegram_follow_worker = worker

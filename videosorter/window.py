@@ -1118,6 +1118,7 @@ class MainWindow(QMainWindow):
         self._asks_timer.timeout.connect(self._poll_demandes)
         self._asks_timer.start()
         QTimer.singleShot(4000, self._poll_demandes)
+        QTimer.singleShot(12000, self._telegram_follow)
 
         # La corbeille de session, tant qu'elle n'est pas vide : ce qui partira
         # a la fermeture. Rouge quand ce sera detruit pour de bon (le NAS) --
@@ -5546,6 +5547,14 @@ class MainWindow(QMainWindow):
             self.ask_badge.show()
         else:
             self.ask_badge.hide()
+
+    def _telegram_follow(self) -> None:
+        """Chaînes suivies : nouvelles vidéos, sans reprendre la bibliothèque."""
+        try:
+            from .telegram_hub import start_follow
+            start_follow(self)
+        except Exception:
+            pass
 
     def open_telegram(self) -> None:
         """Recherche de channels publics et alertes sur ceux qu'on suit."""
