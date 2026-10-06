@@ -86,6 +86,45 @@ def save_state(data: dict) -> None:
     STATE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+
+VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts", ".wmv"}
+
+
+def library_keys() -> set[tuple[str, int]]:
+    """Nom + taille des vidéos déjà dans les racines Prisme."""
+    keys: set[tuple[str, int]] = set()
+    try:
+        cfg = json.loads((APP_DIR / "config.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return keys
+    roots = list(cfg.get("roots") or [])
+    if cfg.get("root"):
+        roots.append(cfg["root"])
+    seen = set()
+    for raw in roots:
+        root = Path(str(raw))
+        if not root.exists():
+            continue
+        key = str(root).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        for path in root.rglob("*"):
+            if path.suffix.lower() not in VIDEO_EXT:
+                continue
+            try:
+                keys.add((path.name.lower(), path.stat().st_size))
+            except OSError:
+                continue
+    return keys
+
+
+def already_in_library(name: str, size: int, keys: set[tuple[str, int]]) -> bool:
+    if not name or not size:
+        return False
+    return (name.lower(), int(size)) in keys
+
+
 def username_of(text: str) -> str:
     text = (text or "").strip()
     found = URL_RE.search(text)
@@ -140,6 +179,9 @@ class TelegramWorker(QThread):
         self.before_id = 0
         self.message_id = 0
         self.message_ids: list[int] = []
+        self.skip_known = True
+        self.known: set[tuple[str, int]] = set()
+        self.skipped = 0
         self._code = ""
         self._password = ""
         self._wait = threading.Event()
@@ -421,19 +463,32 @@ class TelegramWorker(QThread):
         msg = await client.get_messages(self.channel, ids=self.message_id)
         if msg is None:
             return ""
+        name = (msg.file.name if msg.file else "") or ""
+        size = (msg.file.size if msg.file else 0) or 0
+        if self.skip_known and already_in_library(name, size, self.known):
+            self.skipped += 1
+            self.status.emit(f"Déjà dans la bibliothèque : {name or msg.id}")
+            return ""
         folder = DOWNLOADS / self.channel
         folder.mkdir(parents=True, exist_ok=True)
         path = await msg.download_media(file=folder)
+        if path and name and size:
+            self.known.add((name.lower(), int(size)))
         return str(path or "")
 
     async def _download_many(self, client) -> int:
+        if self.skip_known and not self.known:
+            self.status.emit("Lecture de la bibliothèque…")
+            self.known = library_keys()
         n = 0
+        self.skipped = 0
         for mid in self.message_ids:
             self.message_id = mid
             self.status.emit(f"Téléchargement {n + 1}/{len(self.message_ids)}")
             if await self._download(client):
                 n += 1
             await asyncio.sleep(0.4)
+        self.status.emit(f"{n} nouveaux, {self.skipped} déjà présents")
         return n
 
 
@@ -907,13 +962,16 @@ class TelegramDialog(QDialog):
         self.worker.job = "download_many"
         self.worker.channel = username
         self.worker.message_ids = list(ids)
+        bank = getattr(self, "_bank_window", None)
+        self.worker.skip_known = bool(getattr(bank, "skip_known", None) and bank.skip_known.isChecked())
         self.worker.status.connect(self.status.setText)
         self.worker.failed.connect(self._failed)
         self.worker.batch_done.connect(self._batch_done)
         self.worker.start()
 
     def _batch_done(self, n: int) -> None:
-        self.status.setText(f"{n} fichier(s) dans {DOWNLOADS}")
+        skipped = getattr(self.worker, "skipped", 0)
+        self.status.setText(f"{n} nouveau(x), {skipped} déjà dans la bibliothèque. Dossier : {DOWNLOADS}")
 
 
 class MediaBank(QDialog):
@@ -931,7 +989,7 @@ class MediaBank(QDialog):
         head = QLabel(f"t.me/{username}", self)
         head.setObjectName("tgHead")
         box.addWidget(head)
-        lead = QLabel("Coche les vignettes, ou double-clique pour lire dans Prisme.", self)
+        lead = QLabel("Coche les vignettes. Ce qui est déjà dans la bibliothèque, même nom et même taille, n'est pas retéléchargé.", self)
         lead.setObjectName("tgLead")
         box.addWidget(lead)
         self.grid = QListWidget(self)
@@ -955,6 +1013,9 @@ class MediaBank(QDialog):
         play.setObjectName("tgPrimary")
         play.clicked.connect(self._open_current)
         row.addWidget(play)
+        self.skip_known = QCheckBox("Sauter ce qui est déjà dans la bibliothèque", self)
+        self.skip_known.setChecked(True)
+        row.addWidget(self.skip_known)
         bulk = QPushButton("Télécharger les cochés", self)
         bulk.clicked.connect(self._download_checked)
         row.addWidget(bulk)
