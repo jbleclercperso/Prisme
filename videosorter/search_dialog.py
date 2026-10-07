@@ -54,6 +54,16 @@ SORTS = [("Ordre d'arrivée", "arrival"), ("Plus longues d'abord", "duration"),
 
 CARD_W, CARD_H = 232, 214
 THUMB_W, THUMB_H = 220, 124
+
+
+def set_card_width(width: int) -> None:
+    """La taille des cartes, reglee par le curseur « Taille » : la vignette
+    en 16/9, et sous elle le titre, le site et les boutons."""
+    global CARD_W, CARD_H, THUMB_W, THUMB_H
+    CARD_W = int(width)
+    THUMB_W = CARD_W - 12
+    THUMB_H = round(THUMB_W * 9 / 16)
+    CARD_H = THUMB_H + 90
 MAX_THUMB_BYTES = 4 * 1024 * 1024
 CHECK_STYLE = ("QLabel { background: %s; color: #fff; font-size: 10px; font-weight: 600;"
                " padding: 1px 6px; border-radius: 4px; }")
@@ -631,6 +641,7 @@ class Card(QFrame):
         self.video = video
         self.job = 0
         self.path = ""
+        self._pix = None
         self.setObjectName("card")
         self.setFixedSize(CARD_W - 8, CARD_H - 8)
         box = QVBoxLayout(self)
@@ -774,7 +785,16 @@ class Card(QFrame):
         fade.setOpacity(0.45)
         self.setGraphicsEffect(fade)
 
+    def fit(self) -> None:
+        """Reprend la taille du moment (le curseur « Taille »)."""
+        self.setFixedSize(CARD_W - 8, CARD_H - 8)
+        self.thumb.setFixedSize(THUMB_W - 8, THUMB_H - 8)
+        self._badges()
+        if self._pix is not None:
+            self.set_thumbnail(self._pix)
+
     def set_thumbnail(self, pixmap: QPixmap) -> None:
+        self._pix = pixmap
         self.thumb.setPixmap(pixmap.scaled(self.thumb.size(), Qt.KeepAspectRatioByExpanding,
                                            Qt.SmoothTransformation)
                              .copy(0, 0, self.thumb.width(), self.thumb.height()))
@@ -1169,6 +1189,18 @@ class WebSearchWindow(QWidget):
             self.sort.addItem(label)
         self.sort.currentIndexChanged.connect(self._apply_view)
         bar.addWidget(self.sort)
+        # La taille des vignettes, comme dans le Labo IA : plus petites, on en
+        # voit davantage par ecran.
+        from PySide6.QtWidgets import QSlider
+        bar.addWidget(QLabel("Taille", area))
+        self.card_size = QSlider(Qt.Horizontal, area)
+        self.card_size.setRange(150, 380)
+        self.card_size.setFixedWidth(110)
+        self.card_size.setToolTip("La taille des vignettes : plus petites, on en voit davantage")
+        self.card_size.setValue(int(self.cfg.get("web_search_card_w", CARD_W) or CARD_W))
+        set_card_width(self.card_size.value())
+        self.card_size.valueChanged.connect(self._resize_cards)
+        bar.addWidget(self.card_size)
         box.addLayout(bar)
         self.pick_bar = QWidget(area)
         self.pick_bar.setObjectName("pickBar")
@@ -1246,6 +1278,20 @@ class WebSearchWindow(QWidget):
         self.states_toggle.toggled.connect(self._show_states)
         box.addWidget(split, 1)
         return area
+
+    def _resize_cards(self, width: int) -> None:
+        set_card_width(width)
+        self.cfg["web_search_card_w"] = int(width)
+        self.grid.setUpdatesEnabled(False)
+        self.grid.setGridSize(QSize(CARD_W, CARD_H))
+        for row in range(self.grid.count()):
+            item = self.grid.item(row)
+            item.setSizeHint(QSize(CARD_W, CARD_H))
+            card = self.grid.itemWidget(item)
+            if card is not None:
+                card.fit()
+        self.grid.setUpdatesEnabled(True)
+        self.grid.doItemsLayout()
 
     def _show_states(self, on: bool) -> None:
         self.states.setVisible(on)

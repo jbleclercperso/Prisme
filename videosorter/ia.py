@@ -1033,6 +1033,12 @@ def smart_scores(index: SceneIndex, engine, text: str, liked=None, disliked=None
         score = weakest if score is None else 0.4 * score + 0.6 * weakest
     if score is None:
         score = np.zeros(index.size, dtype="float32")
+    # Les noms comptent aussi : un mot de la demande dans le nom du fichier
+    # ou d'un de ses dossiers (« plage » -> « Vacances/Plage 2019 ») fait
+    # remonter la video. Les images seules ne lisent ni l'un ni l'autre.
+    boost = name_boost(index, whole or " ".join(parts))
+    if boost is not None:
+        score = score + boost
     for negative in negatives:
         score = score - 0.6 * np.maximum(index._z(embed_query(engine, negative), bias), 0.0)
     if liked is not None and len(liked):
@@ -1042,6 +1048,41 @@ def smart_scores(index: SceneIndex, engine, text: str, liked=None, disliked=None
         # presque pas.
         score = score - 0.9 * np.maximum(index._z(_centroid(np, disliked)), 0.0)
     return score
+
+
+_STOP = set("""une un les des der the and with for avec dans sur sous pour par qui que
+est sont pas plus tres son ses leur aux du de la le en et ou of in on at to is are a an
+this that photo image video scene""".split())
+_FOLDED: dict = {}          # chemin -> son texte replie, d'une recherche a l'autre
+NAME_WEIGHT = 1.0           # en ecarts-types : tous les mots trouves = +1
+
+
+def _fold(text: str) -> str:
+    import unicodedata
+    flat = unicodedata.normalize("NFKD", str(text).lower())
+    flat = "".join(c for c in flat if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", " ", flat)
+
+
+def name_boost(index, text: str):
+    """Pour chaque image : la part des mots de la demande trouves dans le
+    chemin de sa video (dossiers et nom), fois NAME_WEIGHT. None sans mot
+    utile."""
+    words = [w for w in _fold(text).split() if len(w) >= 3 and w not in _STOP]
+    if not words:
+        return None
+    np = index._np
+    per_video: dict = {}
+    hits = np.empty(index.size, dtype="float32")
+    for at, (video, _ts) in enumerate(index.rows[:index.size]):
+        found = per_video.get(video)
+        if found is None:
+            folded = _FOLDED.get(video)
+            if folded is None:
+                folded = _FOLDED[video] = " " + _fold(video) + " "
+            found = per_video[video] = sum(1 for w in words if w in folded) / len(words)
+        hits[at] = found
+    return NAME_WEIGHT * hits
 
 
 def _centroid(np, vectors):
