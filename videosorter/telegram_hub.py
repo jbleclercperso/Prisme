@@ -142,13 +142,21 @@ def public_links(query: str) -> tuple[list[dict], str]:
         html = urllib.parse.unquote(html)
         for kind, pattern in (
             ("telegram", r"https?://t\.me/(?:s/)?([A-Za-z0-9_]{5,})"),
+            ("invite", r"https?://t\.me/\+([A-Za-z0-9_-]{8,})"),
             ("discord", r"https?://discord\.gg/([A-Za-z0-9-]{4,})"),
         ):
             for name in re.findall(pattern, html):
                 if name.lower() in {"joinchat", "share", "addstickers", "telegram"} or name in seen:
                     continue
                 seen.add(name)
-                if kind == "telegram":
+                if kind == "invite":
+                    rows.append({
+                        "title": "invitation", "username": name, "url": f"https://t.me/+{name}",
+                        "kind": "privé", "abonnes": 0, "medias": 0, "protege": False,
+                        "demande": True, "acces": "à demander", "vivant": "?",
+                        "dernier": "invitation publiée", "score": 0,
+                    })
+                elif kind == "telegram":
                     rows.append({
                         "title": name, "username": name, "url": f"https://t.me/{name}",
                         "kind": "telegram", "abonnes": 0, "medias": 0, "protege": False,
@@ -165,8 +173,8 @@ def public_links(query: str) -> tuple[list[dict], str]:
 
     searches = [
         ("Bing", "https://www.bing.com/search?" + urllib.parse.urlencode({"q": f"site:t.me {query}"})),
-        ("Bing Discord", "https://www.bing.com/search?" + urllib.parse.urlencode({"q": f"discord.gg {query}"})),
-        ("DuckDuckGo", "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": f"site:t.me {query}"})),
+        ("Invitations", "https://www.bing.com/search?" + urllib.parse.urlencode({"q": f"t.me/+ {query}"})),
+        ("DuckDuckGo", "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": f"t.me/+ {query}"})),
     ]
     for name, url in searches:
         try:
@@ -796,6 +804,9 @@ class TelegramDialog(QDialog):
         web = QPushButton("Dans les messages", page)
         web.clicked.connect(lambda: self._start("content"))
         row.addWidget(web)
+        invites = QPushButton("Invitations publiées", page)
+        invites.clicked.connect(self.search_public)
+        row.addWidget(invites)
         self.min_subs.valueChanged.connect(lambda _v: self._apply_filter())
         self.min_medias.valueChanged.connect(lambda _v: self._apply_filter())
         lay.addLayout(row)
