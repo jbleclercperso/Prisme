@@ -308,6 +308,9 @@ class TelegramWorker(QThread):
                 report = await self._alerts(client, InputMessagesFilterVideo,
                                              InputMessagesFilterDocument, FloodWaitError)
                 self.alerts_done.emit(report)
+            elif self.job == "content":
+                rows = await self._content(client)
+                self.search_done.emit(rows)
             elif self.job == "dialogs":
                 rows = await self._dialogs(client)
                 self.search_done.emit(rows)
@@ -368,6 +371,60 @@ class TelegramWorker(QThread):
         row["vivant"] = _alive(row["jours"])
         row["score"] = round(_score(row))
         return row
+
+
+    async def _content(self, client) -> list:
+        """Posts publics qui contiennent le mot, avec le lien du message."""
+        from telethon.tl.functions.messages import SearchGlobalRequest
+        from telethon.tl.types import Channel, InputMessagesFilterEmpty, InputPeerEmpty
+        query = self.query.strip()
+        rows = []
+        seen = set()
+        offset_rate, offset_peer, offset_id = 0, InputPeerEmpty(), 0
+        for _page in range(6):
+            try:
+                page = await client(SearchGlobalRequest(
+                    q=query, filter=InputMessagesFilterEmpty(),
+                    min_date=None, max_date=None,
+                    offset_rate=offset_rate, offset_peer=offset_peer,
+                    offset_id=offset_id, limit=50,
+                ))
+            except Exception as exc:
+                self.status.emit(str(exc)[:80])
+                break
+            chats = {c.id: c for c in page.chats if isinstance(c, Channel)}
+            if not page.messages:
+                break
+            for msg in page.messages:
+                chat = chats.get(getattr(msg.peer_id, "channel_id", 0))
+                if chat is None or not getattr(chat, "username", None):
+                    continue
+                key = (chat.username, msg.id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                text = (msg.message or "").replace("\n", " ")[:80]
+                rows.append({
+                    "title": chat.title or chat.username,
+                    "username": chat.username,
+                    "url": f"https://t.me/{chat.username}/{msg.id}",
+                    "kind": "message",
+                    "abonnes": int(getattr(chat, "participants_count", 0) or 0),
+                    "medias": 1 if (msg.video or msg.photo or msg.file) else 0,
+                    "protege": bool(getattr(chat, "noforwards", False)),
+                    "demande": bool(getattr(chat, "join_request", False)),
+                    "acces": "à demander" if getattr(chat, "join_request", False) else "entrée libre",
+                    "vivant": "?",
+                    "dernier": text,
+                    "score": 1,
+                })
+            last = page.messages[-1]
+            offset_id = last.id
+            when = getattr(last, "date", None)
+            offset_rate = int(when.timestamp()) if when else 0
+            offset_peer = await client.get_input_entity(last.peer_id)
+            self.status.emit(f"{len(rows)} messages publics")
+        return rows
 
     async def _collect(self, client, SearchRequest, Channel, flood, seen: dict) -> None:
         """Élargit au-delà d'une page : recherche contacts + recherche globale."""
@@ -736,8 +793,8 @@ class TelegramDialog(QDialog):
         go.setObjectName("tgPrimary")
         go.clicked.connect(self.search)
         row.addWidget(go)
-        web = QPushButton("Liens publiés", page)
-        web.clicked.connect(self.search_public)
+        web = QPushButton("Dans les messages", page)
+        web.clicked.connect(lambda: self._start("content"))
         row.addWidget(web)
         self.min_subs.valueChanged.connect(lambda _v: self._apply_filter())
         self.min_medias.valueChanged.connect(lambda _v: self._apply_filter())
