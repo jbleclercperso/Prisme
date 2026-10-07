@@ -16,6 +16,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QPoint, QProcess, QRect, QSize, QTimer, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QSizePolicy,
     QApplication, QComboBox, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QListView, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar,
     QPushButton, QScrollArea, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
@@ -285,24 +286,31 @@ class LaboWindow(QWidget):
         scroll.viewport().setStyleSheet("background: #0e1116;")
         outer.addWidget(scroll)
         box = QVBoxLayout(content)
-        box.setContentsMargins(20, 18, 20, 16)
-        box.setSpacing(12)
+        box.setContentsMargins(12, 8, 12, 8)
+        box.setSpacing(6)
 
-        # -- en-tete -------------------------------------------------------
+        # -- en-tete : le titre, les onglets et ce qui tourne, sur une ligne --
+        # La place va aux resultats : plus de phrase d'accueil ni de bandeau
+        # d'activite sous les onglets.
         head = QHBoxLayout()
-        head.addWidget(_label("Labo IA", "labTitle", self))
-        self.lead = _label(
-            "Retrouvez une scène en la décrivant, en français ou en anglais. Tout se passe "
-            "sur ce PC : rien ne part sur Internet.", "labLead", self)
-        self.lead.setWordWrap(False)
-        head.addSpacing(14)
-        head.addWidget(self.lead, 1)
+        head.setSpacing(10)
+        title = _label("Labo IA", "labTitle", self)
+        title.setToolTip("Retrouvez une scène en la décrivant, en français ou en anglais. "
+                         "Tout se passe sur ce PC : rien ne part sur Internet.")
+        head.addWidget(title)
+        from PySide6.QtWidgets import QTabBar
+        self.tab_bar = QTabBar(self)
+        self.tab_bar.setDrawBase(False)
+        self.tab_bar.setExpanding(False)
+        head.addWidget(self.tab_bar)
         box.addLayout(head)
 
         # -- 1. preparer -----------------------------------------------------
         card, inner = _card(self)
+        inner.setContentsMargins(10, 6, 10, 6)
+        inner.setSpacing(4)
         row = QHBoxLayout()
-        row.setSpacing(10)
+        row.setSpacing(8)
         self.engine_pick = QComboBox(card)
         for key, spec in ia.ENGINES.items():
             self.engine_pick.addItem(spec["label"], key)
@@ -311,7 +319,7 @@ class LaboWindow(QWidget):
         self.engine_pick.currentIndexChanged.connect(self._engine_changed)
         # Un seul moteur : pas de choix a faire, donc pas de liste.
         self.engine_pick.setVisible(self.engine_pick.count() > 1)
-        self.engine_pick.setMinimumWidth(330)
+        self.engine_pick.setMinimumWidth(260)
         row.addWidget(self.engine_pick)
         # Le compte s'ecrit dans la barre elle-meme : « 5 288 / 62 031 vidéos
         # indexées », qui avance pendant l'indexation. Une ligne de compte et
@@ -383,8 +391,8 @@ class LaboWindow(QWidget):
 
         search = QWidget(tabs)
         search_box = QVBoxLayout(search)
-        search_box.setContentsMargins(14, 14, 14, 12)
-        search_box.setSpacing(8)
+        search_box.setContentsMargins(8, 8, 8, 6)
+        search_box.setSpacing(6)
         row = QHBoxLayout()
         self.query = QLineEdit(search)
         self.query.setObjectName("labQuery")
@@ -402,19 +410,17 @@ class LaboWindow(QWidget):
         go.setObjectName("labPrimary")
         go.clicked.connect(self._search)
         row.addWidget(go)
-        search_box.addLayout(row)
-        row = QHBoxLayout()
-        hint = _label("Chaque idée de la phrase doit se voir dans l'image. « -plage » écarte un "
-                      "mot. Cochez des résultats, puis « Plus comme ça » ou « Moins comme ça ».",
-                      "labHint", search)
+        hint = _label("?", "labHint", search)
         hint.setToolTip(
+            "Chaque idée de la phrase doit se voir dans l'image. Cochez des résultats, puis "
+            "« Plus comme ça » ou « Moins comme ça ».\n\n"
             "« amatrice qui pisse en extérieur » exige les trois idées : « amatrice », "
             "« pisse », « en extérieur ». Des virgules séparent les idées à la main ; "
             "« -plage », « sans plage » ou « pas de plage » écartent un mot.\n\n"
             "Le Labo compare votre phrase à TOUTES les images déjà indexées et garde les "
             "vidéos les plus proches, la meilleure d'abord. Plus la collection est indexée, "
             "plus il a de chances de trouver.")
-        row.addWidget(hint, 1)
+        row.addWidget(hint)
         row.addWidget(_label("Taille", "labDim", search))
         from PySide6.QtWidgets import QSlider
         self.thumb_size = QSlider(Qt.Horizontal, search)
@@ -447,6 +453,12 @@ class LaboWindow(QWidget):
         tabs.addTab(self._groups_tab(tabs), "Collections par nom")
         self._bench_page = self._bench_tab(tabs)
         tabs.addTab(self._bench_page, "Comparer les moteurs")
+        tabs.tabBar().hide()
+        tabs.setDocumentMode(True)
+        for at in range(tabs.count()):
+            self.tab_bar.addTab(tabs.tabText(at))
+        self.tab_bar.currentChanged.connect(tabs.setCurrentIndex)
+        tabs.currentChanged.connect(self.tab_bar.setCurrentIndex)
         box.addWidget(tabs, 1)
 
         # Ce que fait l'ordinateur, toujours sous les yeux : ce qui tourne (avec
@@ -455,7 +467,7 @@ class LaboWindow(QWidget):
         self.activity = QFrame(self)
         self.activity.setObjectName("labActivity")
         strip = QHBoxLayout(self.activity)
-        strip.setContentsMargins(10, 6, 12, 6)
+        strip.setContentsMargins(8, 2, 10, 2)
         strip.setSpacing(10)
         self.spin = QLabel("", self.activity)
         self.spin.setObjectName("labSpin")
@@ -464,11 +476,15 @@ class LaboWindow(QWidget):
         self.now.setObjectName("labNow")
         strip.addWidget(self.now)
         self.state = _label("", "labDim", self.activity)
+        # Une seule ligne, coupee si besoin : dans l'en-tete, elle ne doit ni
+        # le grandir ni elargir la fenetre (le texte entier est en infobulle).
+        self.state.setWordWrap(False)
+        self.state.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         strip.addWidget(self.state, 1)
         self.clock = QLabel("", self.activity)
         self.clock.setObjectName("labClock")
         strip.addWidget(self.clock)
-        box.addWidget(self.activity)
+        head.addWidget(self.activity, 1)
         self._tasks: dict = {}           # ce qui tourne : {clef: (texte, debut)}
         self._stopping = False
         self._refused_until = 0.0
@@ -659,6 +675,7 @@ class LaboWindow(QWidget):
 
     def _say(self, text: str) -> None:
         self.state.setText(text)
+        self.state.setToolTip(text)
 
     # -- l'activite --------------------------------------------------------------
     SPIN = "◐◓◑◒"
@@ -1986,10 +2003,8 @@ class LaboWindow(QWidget):
         threading.Thread(target=guarded, daemon=True, name="prisme-labo-comparer").start()
 
     def _tab_changed(self, at: int) -> None:
-        """Sur l'essai, la place va aux resultats : les explications du haut
-        se replient."""
-        bench = self.tabs.widget(at) is getattr(self, "_bench_page", None)
-        self.lead.setVisible(not bench)
+        """Plus d'explications en haut a replier : la place va deja aux
+        resultats sur tous les onglets."""
 
     def _bench_results(self, results: dict) -> None:
         self._bench["results"].update(results)

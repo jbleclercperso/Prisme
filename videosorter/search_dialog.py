@@ -52,8 +52,8 @@ SORTS = [("Ordre d'arrivée", "arrival"), ("Plus longues d'abord", "duration"),
          ("Meilleure qualité d'abord", "height"), ("Par site", "site"),
          ("Par titre", "title")]
 
-CARD_W, CARD_H = 280, 262
-THUMB_W, THUMB_H = 264, 148
+CARD_W, CARD_H = 232, 214
+THUMB_W, THUMB_H = 220, 124
 MAX_THUMB_BYTES = 4 * 1024 * 1024
 CHECK_STYLE = ("QLabel { background: %s; color: #fff; font-size: 10px; font-weight: 600;"
                " padding: 1px 6px; border-radius: 4px; }")
@@ -634,8 +634,8 @@ class Card(QFrame):
         self.setObjectName("card")
         self.setFixedSize(CARD_W - 8, CARD_H - 8)
         box = QVBoxLayout(self)
-        box.setContentsMargins(6, 6, 6, 6)
-        box.setSpacing(4)
+        box.setContentsMargins(5, 5, 5, 5)
+        box.setSpacing(2)
         self.thumb = QLabel(self)
         self.thumb.setObjectName("thumb")
         self.thumb.setFixedSize(THUMB_W - 8, THUMB_H - 8)
@@ -667,7 +667,8 @@ class Card(QFrame):
         title = QLabel(self)
         title.setObjectName("title")
         title.setWordWrap(True)
-        title.setFixedHeight(32)
+        title.setFixedHeight(30)
+        title.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         title.setText(video.title)
         title.setToolTip(f"{video.title}\n{video.page_url}")
         box.addWidget(title)
@@ -887,11 +888,15 @@ class WebSearchWindow(QWidget):
         outer.setContentsMargins(10, 10, 10, 10)
         split = QSplitter(Qt.Horizontal, self)
         outer.addWidget(split)
-        split.addWidget(self._panel())
+        split.setHandleWidth(8)
+        self.panel = self._panel()
+        split.addWidget(self.panel)
         split.addWidget(self._results())
         split.setStretchFactor(1, 1)
+        split.setCollapsible(1, False)
         # Assez large pour lire les noms des sites sur deux colonnes.
-        split.setSizes([420, 940])
+        split.setSizes([380, 980])
+        self.main_split = split
         self._load_settings()
         QTimer.singleShot(0, self._restore_session)
 
@@ -943,8 +948,20 @@ class WebSearchWindow(QWidget):
             "remplaçant les mots cherchés par {q}.")
         self.site_tabs.addTab(self.sites, "Coller / modifier")
         # Les sites prennent toute la hauteur libre : on en voit le plus
-        # possible d'un coup (ils sont des centaines).
-        box.addWidget(self.site_tabs, 1)
+        # possible d'un coup (ils sont des centaines). Une poignee les separe
+        # des recherches et reglages : la tirer donne plus de place a l'un ou
+        # a l'autre.
+        lower = QWidget(panel)
+        lower_box = QVBoxLayout(lower)
+        lower_box.setContentsMargins(0, 0, 0, 0)
+        side = QSplitter(Qt.Vertical, panel)
+        side.setHandleWidth(8)
+        side.addWidget(self.site_tabs)
+        side.addWidget(lower)
+        side.setStretchFactor(0, 1)
+        side.setCollapsible(0, False)
+        box.addWidget(side, 1)
+        box = lower_box
         self._unchecked = set(self.cfg.get("web_search_unchecked", []) or [])
         self._list_timer = QTimer(self)
         self._list_timer.setSingleShot(True)
@@ -1122,6 +1139,17 @@ class WebSearchWindow(QWidget):
         self.busy.hide()
         bar.addWidget(self.busy)
         bar.addStretch(1)
+        self.panel_toggle = QPushButton("◀ Panneau", area)
+        self.panel_toggle.setObjectName("small")
+        self.panel_toggle.setToolTip("Masquer ou montrer le panneau des sites et réglages : "
+                                     "toute la largeur pour les résultats")
+        self.panel_toggle.clicked.connect(self._toggle_panel)
+        bar.addWidget(self.panel_toggle)
+        self.states_toggle = QPushButton("État des sites", area)
+        self.states_toggle.setObjectName("small")
+        self.states_toggle.setCheckable(True)
+        self.states_toggle.setToolTip("Montrer ou fermer l'état des sites, sous les résultats")
+        bar.addWidget(self.states_toggle)
         self.hide_unavailable = QCheckBox("Masquer les non téléchargeables", area)
         self.hide_unavailable.setToolTip("Chaque résultat est vérifié en fond (la vidéo "
                                          "entière existe-t-elle, en quelle qualité) : "
@@ -1170,6 +1198,7 @@ class WebSearchWindow(QWidget):
         box.addWidget(self.chips)
 
         split = QSplitter(Qt.Vertical, area)
+        split.setHandleWidth(8)
         self.grid = QListWidget(area)
         self.grid.setObjectName("results")
         self.grid.setViewMode(QListView.IconMode)
@@ -1177,7 +1206,7 @@ class WebSearchWindow(QWidget):
         self.grid.setMovement(QListView.Static)
         self.grid.setUniformItemSizes(True)
         self.grid.setGridSize(QSize(CARD_W, CARD_H))
-        self.grid.setSpacing(4)
+        self.grid.setSpacing(2)
         self.grid.setSelectionMode(QAbstractItemView.NoSelection)
         self.grid.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.grid.verticalScrollBar().setSingleStep(24)
@@ -1188,7 +1217,15 @@ class WebSearchWindow(QWidget):
         states_box.setContentsMargins(0, 4, 0, 0)
         head = QLabel("État des sites", states)
         head.setObjectName("head")
-        states_box.addWidget(head)
+        head_row = QHBoxLayout()
+        head_row.addWidget(head, 1)
+        close = QPushButton("✕", states)
+        close.setObjectName("small")
+        close.setToolTip("Fermer l'état des sites (le bouton « État des sites », en haut, "
+                         "le rouvre). Tirer la poignée au-dessus l'agrandit ou le réduit.")
+        close.clicked.connect(lambda: self.states_toggle.setChecked(False))
+        head_row.addWidget(close)
+        states_box.addLayout(head_row)
         self.site_tree = QTreeWidget(states)
         self.site_tree.setHeaderLabels(["Site", "", "Ce qui s'est passé"])
         self.site_tree.setRootIsDecorated(False)
@@ -1200,9 +1237,24 @@ class WebSearchWindow(QWidget):
         states_box.addWidget(self.site_tree)
         split.addWidget(states)
         split.setStretchFactor(0, 4)
-        split.setSizes([640, 160])
+        split.setCollapsible(0, False)
+        split.setSizes([700, 140])
+        self.states = states
+        opened = bool(self.cfg.get("web_search_states_open", False))
+        states.setVisible(opened)
+        self.states_toggle.setChecked(opened)
+        self.states_toggle.toggled.connect(self._show_states)
         box.addWidget(split, 1)
         return area
+
+    def _show_states(self, on: bool) -> None:
+        self.states.setVisible(on)
+        self.cfg["web_search_states_open"] = on
+
+    def _toggle_panel(self) -> None:
+        shown = not self.panel.isVisible()
+        self.panel.setVisible(shown)
+        self.panel_toggle.setText("◀ Panneau" if shown else "▶ Panneau")
 
     # -- reglages persistes ----------------------------------------------
     def _load_settings(self) -> None:
@@ -1252,9 +1304,11 @@ class WebSearchWindow(QWidget):
         return super().eventFilter(watched, event)
 
     def _site_columns(self) -> None:
-        """Deux colonnes, chacune la moitie de la liste."""
-        width = max(80, (self.site_list.viewport().width() - 2) // 2)
-        height = self.site_list.fontMetrics().height() + 8
+        """Autant de colonnes que la largeur en laisse (150 px chacune au
+        moins), en lignes serrees : on voit plus de sites d'un coup."""
+        room = self.site_list.viewport().width() - 2
+        width = max(80, room // max(1, room // 150))
+        height = self.site_list.fontMetrics().height() + 4
         if self.site_list.gridSize() != QSize(width, height):
             self.site_list.setGridSize(QSize(width, height))
 
