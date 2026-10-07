@@ -308,6 +308,9 @@ class TelegramWorker(QThread):
                 report = await self._alerts(client, InputMessagesFilterVideo,
                                              InputMessagesFilterDocument, FloodWaitError)
                 self.alerts_done.emit(report)
+            elif self.job == "dialogs":
+                rows = await self._dialogs(client)
+                self.search_done.emit(rows)
             elif self.job == "bank":
                 items = await self._bank(client, FloodWaitError)
                 self.bank_done.emit(items)
@@ -485,6 +488,39 @@ class TelegramWorker(QThread):
 
 
 
+
+    async def _entity(self, client):
+        raw = str(self.channel)
+        if raw.lstrip("-").isdigit():
+            from telethon.tl.types import PeerChannel
+            return await client.get_entity(PeerChannel(int(raw)))
+        return raw
+
+    async def _dialogs(self, client) -> list:
+        rows = []
+        async for dialog in client.iter_dialogs():
+            ent = dialog.entity
+            if not (getattr(ent, "megagroup", False) or getattr(ent, "broadcast", False) or getattr(ent, "gigagroup", False)):
+                continue
+            username = getattr(ent, "username", None) or ""
+            rows.append({
+                "title": dialog.name or username or str(ent.id),
+                "username": username or str(ent.id),
+                "peer": str(ent.id),
+                "url": f"https://t.me/{username}" if username else "",
+                "kind": "groupe" if getattr(ent, "megagroup", False) else "channel",
+                "abonnes": int(getattr(ent, "participants_count", 0) or 0),
+                "medias": 0,
+                "protege": bool(getattr(ent, "noforwards", False)),
+                "demande": False,
+                "acces": "déjà dedans" if not username else "déjà dedans, public",
+                "vivant": "?",
+                "dernier": "",
+                "score": int(getattr(ent, "participants_count", 0) or 0),
+            })
+        rows.sort(key=lambda r: r["title"].lower())
+        return rows
+
     async def _bank(self, client, flood) -> list:
         """Les médias du channel, lus dans Telegram, vignette en local."""
         THUMBS.mkdir(parents=True, exist_ok=True)
@@ -493,7 +529,7 @@ class TelegramWorker(QThread):
         if self.before_id:
             kwargs["offset_id"] = self.before_id
         try:
-            async for msg in client.iter_messages(self.channel, **kwargs):
+            async for msg in client.iter_messages(await self._entity(client), **kwargs):
                 if not (msg.video or msg.photo or msg.file):
                     continue
                 thumb = THUMBS / f"{self.channel}_{msg.id}.jpg"
@@ -529,7 +565,7 @@ class TelegramWorker(QThread):
 
     async def _download(self, client) -> str:
         DOWNLOADS.mkdir(parents=True, exist_ok=True)
-        msg = await client.get_messages(self.channel, ids=self.message_id)
+        msg = await client.get_messages(await self._entity(client), ids=self.message_id)
         if msg is None:
             return ""
         name = (msg.file.name if msg.file else "") or ""
@@ -570,7 +606,7 @@ class TelegramWorker(QThread):
         n = 0
         self.skipped = 0
         self.channel = self.channel
-        async for msg in client.iter_messages(self.channel, limit=None):
+        async for msg in client.iter_messages(await self._entity(client), limit=None):
             if not (msg.video or msg.photo or (msg.file and (msg.file.mime_type or "").startswith(("video", "image")))):
                 continue
             self.message_id = msg.id
@@ -642,6 +678,7 @@ class TelegramDialog(QDialog):
         tabs = QTabWidget(self)
         tabs.addTab(self._account_tab(), "Compte")
         tabs.addTab(self._search_tab(), "Recherche")
+        tabs.addTab(self._joined_tab(), "Mes groupes")
         tabs.addTab(self._alert_tab(), "Alertes")
         box.addWidget(tabs, 1)
         self._refresh_alerts_table()
@@ -743,6 +780,57 @@ class TelegramDialog(QDialog):
         lay.addLayout(row2)
         self.table.itemDoubleClicked.connect(lambda _item: self.open_selected_bank())
         return page
+
+
+    def _joined_tab(self) -> QWidget:
+        page = QWidget(self)
+        lay = QVBoxLayout(page)
+        lead = QLabel("Les groupes et chaînes où ton compte est déjà entré, publics ou privés. "
+                      "Ouvre la banque, ou exporte photos et vidéos. Ce qui est déjà sur le disque est sauté.", page)
+        lead.setObjectName("tgLead")
+        lead.setWordWrap(True)
+        lay.addWidget(lead)
+        self.joined = QTableWidget(0, 4, page)
+        self.joined.setHorizontalHeaderLabels(["Titre", "Accès", "Type", "Lien"])
+        self.joined.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.joined.setSelectionBehavior(QTableWidget.SelectRows)
+        lay.addWidget(self.joined, 1)
+        row = QHBoxLayout()
+        load = QPushButton("Charger mes groupes", page)
+        load.setObjectName("tgPrimary")
+        load.clicked.connect(lambda: self._start("dialogs"))
+        row.addWidget(load)
+        bank = QPushButton("Ouvrir la banque", page)
+        bank.clicked.connect(self.open_joined_bank)
+        row.addWidget(bank)
+        exp = QPushButton("Exporter photos et vidéos", page)
+        exp.clicked.connect(self.export_joined)
+        row.addWidget(exp)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.joined.itemDoubleClicked.connect(lambda _i: self.open_joined_bank())
+        return page
+
+    def _joined_peer(self) -> str:
+        row = self.joined.currentRow()
+        rows = getattr(self, "joined_rows", [])
+        if not (0 <= row < len(rows)):
+            return ""
+        return rows[row].get("peer") or rows[row].get("username") or ""
+
+    def open_joined_bank(self) -> None:
+        peer = self._joined_peer()
+        if not peer:
+            self.status.setText("Choisis un groupe dans la liste.")
+            return
+        self.open_bank(peer)
+
+    def export_joined(self) -> None:
+        peer = self._joined_peer()
+        if not peer:
+            self.status.setText("Choisis un groupe dans la liste.")
+            return
+        self._export_channel(peer)
 
     def _alert_tab(self) -> QWidget:
         page = QWidget(self)
@@ -903,6 +991,17 @@ class TelegramDialog(QDialog):
         QMessageBox.warning(self, "Telegram", text)
 
     def _show_search(self, rows: list) -> None:
+        if rows and rows[0].get("acces", "").startswith("déjà dedans"):
+            self.joined_rows = rows
+            self.joined.setRowCount(len(rows))
+            for i, row in enumerate(rows):
+                values = [row.get("title") or "", row.get("acces") or "", row.get("kind") or "", row.get("url") or "privé"]
+                for col, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    self.joined.setItem(i, col, item)
+            self.status.setText(f"{len(rows)} groupes où tu es déjà entré.")
+            return
         self.found = rows
         self._apply_filter()
 
